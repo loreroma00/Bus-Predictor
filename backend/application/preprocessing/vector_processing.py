@@ -326,9 +326,16 @@ def process_single_trip(
     Process a single trip - designed for parallelization.
     Returns DataFrame with 100 rows (one per segment) or None if invalid.
     """
-    route_id = str(trip_df["route_id"].iloc[0])
-    direction_id = int(trip_df["direction_id"].iloc[0])
-    day_type = int(trip_df["day_type"].iloc[0]) if "day_type" in trip_df.columns else 0
+    try:
+        route_id = str(trip_df["route_id"].iloc[0])
+        direction_id = int(trip_df["direction_id"].iloc[0])
+        day_type = (
+            int(trip_df["day_type"].iloc[0]) if "day_type" in trip_df.columns else 0
+        )
+    except KeyError as e:
+        print(f"KeyError in trip {trip_id}: {e}")
+        print(f"Available columns: {list(trip_df.columns)}")
+        raise
 
     # O(1) lookup for static map
     trip_static = static_map_index.get((route_id, direction_id))
@@ -737,28 +744,39 @@ def process_data(start_date: str = None):
     print("\n" + "-" * 40)
     print("Processing trips in parallel...")
 
+    # Debug: show sample of what columns will be in trip_df
+    sample_group = list(df.groupby(trip_col))[0]
+    print(f"DEBUG: trip_col={trip_col}, sample trip_id={sample_group[0]}")
+    print(f"DEBUG: columns in trip_df (after groupby): {list(sample_group[1].columns)}")
+
     trip_groups = list(df.groupby(trip_col))
     total_trips = len(trip_groups)
     print(f"Processing {total_trips} trips...")
 
-    results = Parallel(
-        n_jobs=-1,
-        backend="loky",
-        verbose=10,
-        batch_size="auto",
-    )(
-        delayed(process_single_trip)(
-            trip_id,
-            trip_df,
-            static_map_index,
-            traffic_avg_index,
-            h3_encoding,
-            global_avg_speed_ratio,
-            global_avg_traffic_speed,
-            trip_col,
+    try:
+        # Use n_jobs=1 for debugging to avoid parallelization issues
+        results = Parallel(
+            n_jobs=1,  # Set to -1 for parallel after debugging
+            verbose=10,
+        )(
+            delayed(process_single_trip)(
+                trip_id,
+                trip_df,
+                static_map_index,
+                traffic_avg_index,
+                h3_encoding,
+                global_avg_speed_ratio,
+                global_avg_traffic_speed,
+                trip_col,
+            )
+            for trip_id, trip_df in trip_groups
         )
-        for trip_id, trip_df in trip_groups
-    )
+    except Exception as e:
+        import traceback
+
+        print(f"\nError during parallel processing: {e}")
+        traceback.print_exc()
+        return
 
     # Filter None results
     print("\nCombining results...")
