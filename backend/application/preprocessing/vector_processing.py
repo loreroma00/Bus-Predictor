@@ -689,6 +689,9 @@ def process_data(start_date: str = None):
         print(f"Available columns: {list(df.columns)}")
         return
     print(f"Using trip column: {trip_col}")
+    print(
+        f"DEBUG: Columns after trip_col detection: {trip_col in df.columns}, {list(df.columns)[:15]}..."
+    )
 
     # Pre-build indexes
     print("\nBuilding lookup indexes...")
@@ -714,6 +717,7 @@ def process_data(start_date: str = None):
     # Unroll time
     print("\nUnrolling time...")
     df = unroll_time(df, trip_col)
+    print(f"DEBUG: After unroll_time, {trip_col} in columns: {trip_col in df.columns}")
 
     # Fill distance_to_next_stop NaN
     if "distance_to_next_stop" in df.columns:
@@ -726,15 +730,27 @@ def process_data(start_date: str = None):
     ].drop_duplicates()
     df = df.merge(lookup, on=["route_id", "direction_id"], how="left")
     df = df.dropna(subset=["canonical_len_m"])
+    print(f"DEBUG: After merge, {trip_col} in columns: {trip_col in df.columns}")
+
     df["progress"] = df["shape_dist_travelled"] / df["canonical_len_m"]
     df["progress"] = df["progress"].clip(0.0, 1.0)
 
     # Combined filtering
     print("\n" + "-" * 40)
     df = filter_trips_combined(df, trip_col, outlier_stats)
+    print(
+        f"DEBUG: After filter_trips, shape={df.shape}, {trip_col} in columns: {trip_col in df.columns}"
+    )
+
+    if df.empty:
+        print("No trips remaining after filtering.")
+        return
 
     # Interpolate schedule_adherence
     df = interpolate_schedule_adherence(df, trip_col)
+    print(
+        f"DEBUG: After interpolate, shape={df.shape}, {trip_col} in columns: {trip_col in df.columns}"
+    )
 
     # Drop stop_sequence (will be replaced from static map)
     if "stop_sequence" in df.columns:
@@ -744,10 +760,11 @@ def process_data(start_date: str = None):
     print("\n" + "-" * 40)
     print("Processing trips in parallel...")
 
-    # Debug: show sample of what columns will be in trip_df
-    sample_group = list(df.groupby(trip_col))[0]
-    print(f"DEBUG: trip_col={trip_col}, sample trip_id={sample_group[0]}")
-    print(f"DEBUG: columns in trip_df (after groupby): {list(sample_group[1].columns)}")
+    # Final check that trip_col exists
+    if trip_col not in df.columns:
+        print(f"ERROR: trip_col '{trip_col}' not found in DataFrame!")
+        print(f"Available columns: {list(df.columns)}")
+        return
 
     trip_groups = list(df.groupby(trip_col))
     total_trips = len(trip_groups)
