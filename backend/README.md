@@ -137,3 +137,49 @@ Copy `config.ini.example` to `config.ini` and configure:
 - Database connection strings
 - GTFS feed URLs
 - API server settings
+
+## ML Training Pipeline
+
+### Prepare Dataset
+
+Run the full preprocessing pipeline to create training data:
+
+```bash
+python prepare_dataset.py
+```
+
+Options:
+- `--skip-db` - Skip database extraction (use existing `dataset_*.parquet` files)
+- `--force-canonical` - Force regeneration of canonical route map
+
+### Pipeline Stages
+
+| Stage | Script | Input | Output |
+|-------|--------|-------|--------|
+| 1 | `canonical_shape_mapper` | GTFS static files | `canonical_route_map.parquet` |
+| 2 | `preprocessing` | TimescaleDB | `dataset_YYYY-MM-DD.parquet` |
+| 3 | `vector_processing` | Daily datasets | `dataset_lstm_unscaled.parquet` |
+| 4 | `scaling_2` | Unscaled dataset | `dataset_lstm_final.parquet` |
+
+### Output Files
+
+After running `prepare_dataset.py`:
+
+```
+parquets/
+├── canonical_route_map.parquet   # Route shapes mapped to 100 segments
+├── dataset_lstm_final.parquet    # Final training dataset
+├── route_encoder.pkl             # Route ID label encoder
+├── route_encoding.json           # Route ID to index mapping
+├── h3_encoding.json              # H3 hexagon to index mapping
+└── traffic_averages.parquet      # Traffic patterns by hex/hour (optional)
+```
+
+### Training
+
+After preparing the dataset, train the model:
+
+```bash
+cd application/model
+python train.py
+```
