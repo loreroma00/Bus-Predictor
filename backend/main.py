@@ -284,6 +284,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
     """Run the FastAPI prediction server."""
     import configparser
     import glob
+    import asyncio
     from datetime import datetime
     from fastapi import FastAPI, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
@@ -294,6 +295,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
 
     MODEL_DIR = PROJECT_ROOT / "application" / "model"
     CONFIG_PATH = PROJECT_ROOT / "config.ini"
+    PARQUET_DIR = PROJECT_ROOT / "parquets"
 
     class PredictRequest(BaseModel):
         route_id: str
@@ -336,12 +338,82 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         scheduled_start: str
         stops: list[StopPredictionResponse]
 
+    class StopPredictionWithInfo(BaseModel):
+        stop_sequence: int
+        stop_id: str
+        stop_name: str
+        stop_lat: float
+        stop_lon: float
+        predicted_arrival: str
+        delay_seconds: float
+        confidence_rating: Optional[float] = None
+
+    class PredictedTrip(BaseModel):
+        route_id: str
+        direction_id: int
+        trip_date: str
+        scheduled_start: str
+        weather_code: int
+        bus_type: int
+        stop_sequence: dict[int, StopPredictionWithInfo]
+
     class ModelInfo(BaseModel):
         filename: str
         path: str
 
+    class WeatherResponse(BaseModel):
+        temperature: float
+        apparent_temperature: float
+        humidity: float
+        precip_intensity: float
+        wind_speed: float
+        weather_code: int
+        description: str
+
+    class RouteSummary(BaseModel):
+        route_id: str
+
+    class RoutesResponse(BaseModel):
+        routes: list[RouteSummary]
+
+    class DirectionInfo(BaseModel):
+        direction_id: int
+        trip_headsign: str
+
+    class DirectionsResponse(BaseModel):
+        route_id: str
+        directions: list[DirectionInfo]
+
+    class ShapePoint(BaseModel):
+        lat: float
+        lon: float
+        dist: float
+
+    class StopInfo(BaseModel):
+        stop_id: str
+        stop_name: str
+        stop_lat: float
+        stop_lon: float
+        stop_sequence: int
+        shape_dist_traveled: Optional[float] = None
+
+    class TripSchedule(BaseModel):
+        trip_id: str
+        start_time: str
+
+    class RouteDirectionResponse(BaseModel):
+        route_id: str
+        direction_id: int
+        trip_headsign: str
+        shape: list[ShapePoint]
+        stops: list[StopInfo]
+        schedule: list[TripSchedule]
+
     predictor: Optional[Predictor] = None
     available_models: list[ModelInfo] = []
+    observatory = None
+    city = None
+    weather_service = None
 
     def load_config_api() -> dict:
         config = configparser.ConfigParser()
@@ -408,12 +480,29 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         selected_model = available_models[choice_idx]
         return load_model_by_name(selected_model.filename)
 
+    def generate_canonical_map():
+        if not (PARQUET_DIR / "canonical_route_map.parquet").exists():
+            print("Generating canonical_route_map.parquet...")
+            from application.preprocessing.canonical_shape_mapper import (
+                main as gen_main,
+            )
+
+            gen_main()
+
+    async def periodic_ledger_check():
+        from application.services.shared_state import check_for_updates
+
+        while True:
+            await asyncio.sleep(3600)
+            if check_for_updates():
+                print("Ledger updated with new GTFS data")
+
     api_config = load_config_api()
 
     app = FastAPI(
         title="ATAC Bus Delay Prediction API",
         description="Predict bus delays for routes in Rome",
-        version="1.0.0",
+        version="2.0.0",
     )
 
     frontend_url = api_config["frontend_url"]
@@ -429,7 +518,29 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
 
     @app.on_event("startup")
     async def startup_event():
-        nonlocal predictor, available_models
+        nonlocal predictor, available_models, observatory, city, weather_service
+
+        print("\n" + "=" * 50)
+        print("Initializing ATAC Backend...")
+        print("=" * 50)
+
+        print("\n[1/4] Loading Observatory (GTFS ledger)...")
+        from application.services.shared_state import get_observatory, get_city
+
+        observatory = get_observatory()
+
+        print("\n[2/4] Loading City (hexagons)...")
+        city = get_city()
+
+        print("\n[3/4] Initializing Weather Service...")
+        from application.services.weather_service import WeatherService
+
+        weather_service = WeatherService(city)
+
+        print("\n[4/4] Generating canonical route map (if needed)...")
+        generate_canonical_map()
+
+        print("\n[5/6] Loading ML model...")
         available_models = discover_models()
 
         if not available_models:
@@ -445,6 +556,9 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             if not interactive_model_selection():
                 sys.exit(1)
 
+        print("\n[6/6] Starting background tasks...")
+        asyncio.create_task(periodic_ledger_check())
+
         print(f"\nCORS enabled for: {api_config['frontend_url']}")
         print(f"Server ready. API documentation at: /docs")
         print("=" * 50 + "\n")
@@ -453,10 +567,141 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
     async def list_models():
         return available_models
 
-    @app.post("/predict", response_model=PredictResponse)
+    @app.get("/weather", response_model=WeatherResponse)
+    async def get_weather(lat: float = None, lon: float = None, hex_id: str = None):
+        """Get current weather for Rome or specified location (lat/lon or hex_id)."""
+        try:
+            weather = weather_service.get_weather(lat=lat, lon=lon, hex_id=hex_id)
+            return WeatherResponse(
+                temperature=weather.temperature,
+                apparent_temperature=weather.apparent_temperature,
+                humidity=weather.humidity,
+                precip_intensity=weather.precip_intensity,
+                wind_speed=weather.wind_speed,
+                weather_code=weather.weather_code,
+                description=weather.description,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Weather error: {str(e)}")
+
+    @app.get("/routes", response_model=RoutesResponse)
+    async def list_routes():
+        """List all available routes."""
+        ledger = observatory.get_ledger()
+        routes = [{"route_id": rid} for rid in ledger["routes"].keys()]
+        return RoutesResponse(routes=routes)
+
+    @app.get("/routes/{route_id}/directions", response_model=DirectionsResponse)
+    async def get_directions(route_id: str):
+        """List all directions for a route."""
+        ledger = observatory.get_ledger()
+        directions = {}
+        for trip_id, trip in ledger["trips"].items():
+            if trip.route.id == route_id:
+                dir_id = trip.direction_id
+                if dir_id not in directions:
+                    directions[dir_id] = trip.direction_name or f"Direction {dir_id}"
+
+        if not directions:
+            raise HTTPException(status_code=404, detail=f"Route {route_id} not found")
+
+        return DirectionsResponse(
+            route_id=route_id,
+            directions=[
+                DirectionInfo(direction_id=d, trip_headsign=h)
+                for d, h in sorted(directions.items())
+            ],
+        )
+
+    @app.get(
+        "/routes/{route_id}/directions/{direction_id}",
+        response_model=RouteDirectionResponse,
+    )
+    async def get_route_info(route_id: str, direction_id: int):
+        """Get full info for route+direction: shape, stops, schedule."""
+        ledger = observatory.get_ledger()
+
+        shape_counts = {}
+        canonical_trip = None
+        all_trips = []
+
+        for trip_id, trip in ledger["trips"].items():
+            if trip.route.id == route_id and trip.direction_id == direction_id:
+                all_trips.append(trip)
+                if trip.shape:
+                    sid = trip.shape.id
+                    shape_counts[sid] = shape_counts.get(sid, 0) + 1
+                    current_count = shape_counts[sid]
+                    best_count = shape_counts.get(
+                        canonical_trip.shape.id
+                        if canonical_trip and canonical_trip.shape
+                        else "",
+                        0,
+                    )
+                    if canonical_trip is None or current_count > best_count:
+                        canonical_trip = trip
+
+        if not canonical_trip:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Route {route_id} direction {direction_id} not found",
+            )
+
+        shape_points = []
+        if canonical_trip.shape:
+            for i in range(len(canonical_trip.shape.coords)):
+                shape_points.append(
+                    ShapePoint(
+                        lat=float(canonical_trip.shape.coords[i][0]),
+                        lon=float(canonical_trip.shape.coords[i][1]),
+                        dist=float(canonical_trip.shape.distances[i]),
+                    )
+                )
+
+        stops = []
+        stop_times = canonical_trip.get_stop_times() or []
+        for st in stop_times:
+            stop_id = st.get("stop_id")
+            stop_info = ledger["stops"].get(stop_id, {})
+            stops.append(
+                StopInfo(
+                    stop_id=stop_id or "",
+                    stop_name=stop_info.get("stop_name", ""),
+                    stop_lat=float(stop_info.get("stop_lat", 0) or 0),
+                    stop_lon=float(stop_info.get("stop_lon", 0) or 0),
+                    stop_sequence=int(st.get("stop_sequence", 0) or 0),
+                    shape_dist_traveled=float(st.get("shape_dist_traveled", 0))
+                    if st.get("shape_dist_traveled")
+                    else None,
+                )
+            )
+
+        schedule = []
+        for trip in all_trips:
+            first_stop = (trip.get_stop_times() or [{}])[0]
+            schedule.append(
+                TripSchedule(
+                    trip_id=trip.id,
+                    start_time=first_stop.get("arrival_time", ""),
+                )
+            )
+
+        return RouteDirectionResponse(
+            route_id=route_id,
+            direction_id=direction_id,
+            trip_headsign=canonical_trip.direction_name or "",
+            shape=shape_points,
+            stops=stops,
+            schedule=schedule,
+        )
+
+    @app.post("/predict", response_model=PredictedTrip)
     async def predict(request: PredictRequest):
+        """Predict bus delays with full stop information."""
         if predictor is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
+
+        ledger = observatory.get_ledger()
 
         try:
             forecast: TripForecast = predictor.get_trip_forecast(
@@ -468,24 +713,49 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
                 bus_type=request.bus_type,
             )
 
-            stops = [
-                StopPredictionResponse(
-                    stop_sequence=s.stop_sequence,
-                    distance_m=s.distance_m,
-                    cumulative_delay_sec=s.cumulative_delay_sec,
-                    delay_formatted=s.delay_formatted,
-                    expected_arrival=s.expected_arrival,
-                    crowd_level=s.crowd_level,
-                )
-                for s in forecast.stops
-            ]
+            stops_map = {}
+            for trip_id, trip in ledger["trips"].items():
+                if (
+                    trip.route.id == request.route_id
+                    and trip.direction_id == request.direction_id
+                ):
+                    for st in trip.get_stop_times() or []:
+                        seq = int(st.get("stop_sequence", 0) or 0)
+                        if seq not in stops_map:
+                            stop_id = st.get("stop_id")
+                            stop_info = ledger["stops"].get(stop_id, {})
+                            stops_map[seq] = {
+                                "stop_id": stop_id or "",
+                                "stop_name": stop_info.get("stop_name", ""),
+                                "stop_lat": float(stop_info.get("stop_lat", 0) or 0),
+                                "stop_lon": float(stop_info.get("stop_lon", 0) or 0),
+                            }
+                    break
 
-            return PredictResponse(
+            stop_sequence = {}
+            for pred in forecast.stops:
+                seq = pred.stop_sequence
+                stop_info = stops_map.get(seq, {})
+
+                stop_sequence[seq] = StopPredictionWithInfo(
+                    stop_sequence=seq,
+                    stop_id=stop_info.get("stop_id", ""),
+                    stop_name=stop_info.get("stop_name", ""),
+                    stop_lat=stop_info.get("stop_lat", 0),
+                    stop_lon=stop_info.get("stop_lon", 0),
+                    predicted_arrival=pred.expected_arrival,
+                    delay_seconds=pred.cumulative_delay_sec,
+                    confidence_rating=None,
+                )
+
+            return PredictedTrip(
                 route_id=forecast.route_id,
                 direction_id=forecast.direction_id,
                 trip_date=forecast.trip_date,
                 scheduled_start=forecast.scheduled_start,
-                stops=stops,
+                weather_code=request.weather_code,
+                bus_type=request.bus_type,
+                stop_sequence=stop_sequence,
             )
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
@@ -494,7 +764,12 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
 
     @app.get("/health")
     async def health():
-        return {"status": "healthy", "model_loaded": predictor is not None}
+        return {
+            "status": "healthy",
+            "model_loaded": predictor is not None,
+            "ledger_loaded": observatory is not None,
+            "city_loaded": city is not None,
+        }
 
     import uvicorn
 

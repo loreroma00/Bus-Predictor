@@ -51,7 +51,8 @@ backend/
 │   ├── live/               # GTFS feed fetchers, traffic services
 │   ├── post_processing/    # Data cleaning, vectorization
 │   ├── preprocessing/      # Shape mapping for ML
-│   └── model/              # ML model, training, prediction
+│   ├── model/              # ML model, training, prediction
+│   └── services/           # Shared state, weather service
 ├── persistence/            # Database, caching, storage
 ├── interaction/            # CLI console, debug GUI
 └── tests/                  # Unit and integration tests
@@ -61,9 +62,72 @@ backend/
 
 When running `python main.py serve`:
 
-- `GET /models` - List available trained models
-- `POST /predict` - Predict bus delays for a route
-- `GET /health` - Health check
+### Core Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check with service status |
+| `/models` | GET | List available trained models |
+
+### Weather
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/weather` | GET | Get current weather for Rome |
+| `/weather?lat=41.9&lon=12.5` | GET | Get weather for coordinates |
+| `/weather?hex_id=8a123...` | GET | Get weather for hexagon |
+
+### GTFS Static Data
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/routes` | GET | List all routes |
+| `/routes/{route_id}/directions` | GET | List directions for a route |
+| `/routes/{route_id}/directions/{dir_id}` | GET | Full info: shape, stops, schedule |
+
+### Prediction
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/predict` | POST | Predict delays with full stop info |
+
+#### Predict Request
+
+```json
+{
+  "route_id": "62",
+  "direction_id": 0,
+  "start_date": "28-02-2026",
+  "start_time": "07:30",
+  "weather_code": 1,
+  "bus_type": 0
+}
+```
+
+#### Predict Response
+
+```json
+{
+  "route_id": "62",
+  "direction_id": 0,
+  "trip_date": "28-02-2026",
+  "scheduled_start": "07:30:00",
+  "weather_code": 1,
+  "bus_type": 0,
+  "stop_sequence": {
+    "1": {
+      "stop_sequence": 1,
+      "stop_id": "74761",
+      "stop_name": "TERMINI",
+      "stop_lat": 41.901,
+      "stop_lon": 12.500,
+      "predicted_arrival": "07:30:45",
+      "delay_seconds": 45.0,
+      "confidence_rating": null
+    }
+  }
+}
+```
 
 ## Configuration
 
