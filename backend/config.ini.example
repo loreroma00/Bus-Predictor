@@ -1,0 +1,89 @@
+[api]
+# TomTom Traffic API
+tomtom_api_key = YOUR_TOMTOM_API_KEY_HERE
+
+# API Server settings (for 'python main.py serve')
+frontend_url = http://localhost:3000
+host = 0.0.0.0
+port = 8000
+
+[prediction]
+# Configuration for the Prediction Pipeline
+enabled = true
+vector_db_connection = postgresql://user:password@localhost:1515/transit
+vector_table = prediction_vectors
+label_table = prediction_label
+
+[traffic]
+# Configuration for the Traffic Analysis Pipeline
+enabled = true
+vector_db_connection = postgresql://user:password@localhost:1515/transit
+vector_table = traffic_vectors
+label_table = traffic_label
+
+[vehicle]
+# Configuration for the Vehicle Classification Pipeline
+enabled = true
+vector_db_connection = postgresql://user:password@localhost:1515/transit
+vector_table = vehicle_vectors
+label_table = vehicle_label
+
+[urls]
+# GTFS Static Data
+gtfs_static = https://romamobilita.it/wp-content/uploads/drupal/rome_static_gtfs.zip
+gtfs_md5 = https://romamobilita.it/wp-content/uploads/drupal/rome_static_gtfs.zip.md5
+
+# GTFS Realtime Feeds
+rtgtfs_vehicles = https://romamobilita.it/wp-content/uploads/drupal/rome_rtgtfs_vehicle_positions_feed.pb
+rtgtfs_trip_updates = https://romamobilita.it/wp-content/uploads/drupal/rome_rtgtfs_trip_updates_feed.pb
+
+# Weather API (Open-Meteo, no key required)
+weather_api = https://api.open-meteo.com/v1/forecast
+
+# TomTom Traffic API
+tomtom_traffic = https://api.tomtom.com/traffic/map/4/tile/flow
+
+# Nominatim (geocoding) - use custom server or https://nominatim.openstreetmap.org
+nominatim_url = http://localhost:8080
+
+[paths]
+# Cache files
+ledger_cache = ledger_cache.pkl
+city_cache = city_cache.pkl
+
+# Diaries storage
+diaries_path = diaries/
+diaries_file = diaries.parquet
+
+# Static bus lanes
+static_bus_lanes = static_bus_lanes_roma.pkl
+
+[timings]
+# Update intervals in seconds
+update_interval = 900
+traffic_update_interval = 900
+saving_interval = 1800
+weather_update_interval = 3600
+
+[services]
+# Cache strategy: file, none
+cache_strategy = file
+
+# Debug GUI port
+debug_gui_port = 8050
+
+[data_cleaning]
+# Minimum measurements for valid run
+min_measurements_per_run = 7
+
+# Maximum bus speed for outlier detection (km/h)
+max_bus_speed_kmh = 120
+
+# Maximum time gap for isolated measurement detection (seconds)
+max_time_gap_seconds = 600
+
+# Time that the bot needed to be active for prior to a recording to consider it valid
+served_ratio_lookback_minutes = 60
+
+# Use lenient pipeline (skips strict filtering)
+lenient_pipeline = false
