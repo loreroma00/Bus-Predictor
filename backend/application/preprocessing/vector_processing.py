@@ -665,6 +665,8 @@ def process_data(start_date: str = None):
         print("No dynamic data to process.")
         return
 
+    print(f"Loaded {len(df)} rows with columns: {list(df.columns)[:10]}...")
+
     # Drop deprecated column
     if "time_feat" in df.columns:
         print("Dropping deprecated 'time_feat' column.")
