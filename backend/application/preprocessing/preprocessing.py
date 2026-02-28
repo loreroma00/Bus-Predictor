@@ -170,21 +170,27 @@ def main(start_date: str = None):
     """
 
     if start_date:
-        query += f"\n    WHERE v.ts >= '{start_date}'"
+        query += f"\n    WHERE v.ts >= '{start_date} 00:00:00'"
         print(f"Filtering data from {start_date} onwards...")
 
     print("Executing query and loading data (this may take a while)...")
+    print(f"Query tables: {Prediction.VECTOR_TABLE} + {Prediction.LABEL_TABLE}")
     try:
-        # Use a chunksize if data is massive, but for this task logic (global sort/cumsum),
-        # loading into memory is required unless we use Dask/Spark. Assuming memory fits.
         df = pd.read_sql(query, engine)
     except Exception as e:
         print(f"Error querying database: {e}")
         return
 
+    print(f"Loaded {len(df)} rows from database.")
+
     if df.empty:
         print("No data found in database.")
         return
+
+    if start_date and "ts" in df.columns:
+        min_ts = df["ts"].min()
+        max_ts = df["ts"].max()
+        print(f"Data range: {min_ts} to {max_ts}")
 
     # Ensure ts is datetime
     df["ts"] = pd.to_datetime(df["ts"])

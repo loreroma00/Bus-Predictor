@@ -79,7 +79,13 @@ def load_traffic_avg() -> pd.DataFrame:
     return pd.read_parquet(TRAFFIC_AVG_FILE)
 
 
-def load_dynamic_data() -> pd.DataFrame:
+def load_dynamic_data(start_date: str = None) -> pd.DataFrame:
+    """
+    Load all dynamic dataset files.
+
+    Args:
+        start_date: Optional start date (YYYY-MM-DD). Only load files from this date onwards.
+    """
     files = glob.glob(os.path.join(PARQUET_DIR, "dataset_*.parquet"))
     files = [
         f
@@ -91,8 +97,27 @@ def load_dynamic_data() -> pd.DataFrame:
         print("No dynamic dataset files found in ./parquets/")
         return pd.DataFrame()
 
-    print(f"Loading {len(files)} dynamic dataset files...")
-    dfs = [pd.read_parquet(f) for f in files]
+    # Filter files by start_date if provided
+    if start_date:
+        from datetime import datetime
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        filtered_files = []
+        for f in files:
+            try:
+                filename = os.path.basename(f)
+                date_str = filename.replace("dataset_", "").replace(".parquet", "")
+                file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                if file_date >= start_dt:
+                    filtered_files.append(f)
+            except ValueError:
+                continue
+        files = filtered_files
+        print(f"Filtering to {len(files)} files from {start_date} onwards")
+    else:
+        print(f"Loading {len(files)} dynamic dataset files...")
+
+    dfs = [pd.read_parquet(f) for f in sorted(files)]
 
     if not dfs:
         return pd.DataFrame()
@@ -619,8 +644,13 @@ def compute_static_features(trip_df: pd.DataFrame) -> Dict[str, Any]:
     return result
 
 
-def process_data():
-    """Main entry point for vector processing."""
+def process_data(start_date: str = None):
+    """
+    Main entry point for vector processing.
+
+    Args:
+        start_date: Optional start date (YYYY-MM-DD). Only process data from this date onwards.
+    """
     print("=" * 60)
     print("VECTOR PROCESSING (Optimized)")
     print("=" * 60)
@@ -629,7 +659,7 @@ def process_data():
     print("\nLoading data...")
     static_map = load_static_map()
     traffic_avg = load_traffic_avg()
-    df = load_dynamic_data()
+    df = load_dynamic_data(start_date=start_date)
 
     if df.empty:
         print("No dynamic data to process.")
@@ -640,8 +670,15 @@ def process_data():
         print("Dropping deprecated 'time_feat' column.")
         df.drop(columns=["time_feat"], inplace=True)
 
-    # Determine trip column
-    trip_col = "trip_id_synthetic" if "trip_id_synthetic" in df.columns else "trip_id"
+    # Determine trip column - must exist
+    if "trip_id_synthetic" in df.columns:
+        trip_col = "trip_id_synthetic"
+    elif "trip_id" in df.columns:
+        trip_col = "trip_id"
+    else:
+        print("Error: No trip_id or trip_id_synthetic column found in data.")
+        print(f"Available columns: {list(df.columns)}")
+        return
     print(f"Using trip column: {trip_col}")
 
     # Pre-build indexes

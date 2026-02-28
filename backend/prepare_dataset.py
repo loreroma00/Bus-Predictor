@@ -142,7 +142,7 @@ def run_preprocessing(start_date: str = None):
     preprocessing_main(start_date=start_date)
 
 
-def run_vector_processing():
+def run_vector_processing(start_date: str = None):
     """Run Stage 3: Vector processing."""
     print("\n" + "=" * 60)
     print("STAGE 3: Vector Processing")
@@ -150,7 +150,7 @@ def run_vector_processing():
 
     from application.preprocessing.vector_processing import process_data
 
-    process_data()
+    process_data(start_date=start_date)
 
 
 def run_scaling():
@@ -203,6 +203,16 @@ Pipeline stages:
     print("DATASET PREPARATION PIPELINE")
     print("=" * 60)
 
+    if args.start_date:
+        print(f"\nStart date filter: {args.start_date}")
+        existing_files = (
+            list(PARQUET_DIR.glob("dataset_*.parquet")) if PARQUET_DIR.exists() else []
+        )
+        if existing_files and not args.skip_db:
+            print(f"Warning: {len(existing_files)} existing parquet files found.")
+            print("Only NEW dates (not already processed) will be fetched from DB.")
+            print("To reprocess from start_date, delete old parquet files first.")
+
     PARQUET_DIR.mkdir(parents=True, exist_ok=True)
 
     needs_regen, reason = needs_canonical_regeneration(force=args.force_canonical)
@@ -218,7 +228,7 @@ Pipeline stages:
     else:
         print("\nSkipping Stage 2: Using existing dataset_*.parquet files")
 
-    run_vector_processing()
+    run_vector_processing(start_date=args.start_date)
 
     run_scaling()
 
