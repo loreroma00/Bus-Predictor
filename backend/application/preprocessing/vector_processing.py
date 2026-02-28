@@ -286,6 +286,9 @@ def interpolate_schedule_adherence(df: pd.DataFrame, trip_col: str) -> pd.DataFr
     print("Interpolating missing schedule_adherence values...")
     df = df.sort_values([trip_col, "ts"])
 
+    # Save trip_col values before groupby (which may drop the column)
+    trip_col_values = df[trip_col].values.copy()
+
     def interp_group(group):
         mask = group["schedule_adherence"].isna()
         if not mask.any():
@@ -309,6 +312,11 @@ def interpolate_schedule_adherence(df: pd.DataFrame, trip_col: str) -> pd.DataFr
         return group
 
     df = df.groupby(trip_col, group_keys=False).apply(interp_group)
+
+    # Restore trip_col if it was dropped by groupby
+    if trip_col not in df.columns:
+        df[trip_col] = trip_col_values[: len(df)]
+
     return df
 
 
