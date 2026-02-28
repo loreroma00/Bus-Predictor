@@ -3,40 +3,14 @@ import sys
 import pandas as pd
 import numpy as np
 import h3
-import sqlalchemy
-import configparser
 
-# --- Configuration ---
-CONFIG_FILE = "config.ini"
+from config import Traffic
+from persistence.database import get_sync_engine_for_pipeline
+
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 PARQUET_DIR = os.path.join(PROJECT_ROOT, "parquets")
-
-
-def load_config():
-    """Loads database configuration from config.ini."""
-    if not os.path.exists(CONFIG_FILE):
-        raise FileNotFoundError(
-            f"Configuration file '{CONFIG_FILE}' not found. Please create it based on config.ini.example."
-        )
-
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-
-    if "traffic_tables" not in config:
-        config["traffic_tables"] = {
-            "vector_table": "traffic_vector",
-            "label_table": "traffic_label",
-        }
-
-    return config["database"], config["traffic_tables"]
-
-
-def get_db_engine(db_config):
-    """Creates a SQLAlchemy engine from the configuration."""
-    conn_str = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
-    return sqlalchemy.create_engine(conn_str)
 
 
 def compute_traffic_averages(output_path=None):
@@ -52,13 +26,13 @@ def compute_traffic_averages(output_path=None):
 
     Optionally saves to parquet if output_path provided.
     """
-    try:
-        db_config, table_config = load_config()
-    except Exception as e:
-        print(f"Error loading configuration: {e}")
-        return None
+    engine = get_sync_engine_for_pipeline("traffic")
 
-    engine = get_db_engine(db_config)
+    if engine is None:
+        print(
+            "Warning: Traffic database not configured. Skipping traffic averages computation."
+        )
+        return None
 
     query = f"""
     SELECT
@@ -67,8 +41,8 @@ def compute_traffic_averages(output_path=None):
         v.ts,
         l.speed_ratio,
         l.current_traffic_speed
-    FROM {table_config.get("vector_table", "traffic_vector")} v
-    JOIN {table_config.get("label_table", "traffic_label")} l ON v.id::text = l.id::text AND v.ts = l.ts
+    FROM {Traffic.VECTOR_TABLE} v
+    JOIN {Traffic.LABEL_TABLE} l ON v.id::text = l.id::text AND v.ts = l.ts
     """
 
     print("Fetching traffic data from database...")

@@ -460,3 +460,60 @@ async def close_database():
     for conn in _db_instances.values():
         await conn.close()
     _db_instances.clear()
+
+
+def get_sync_engine(connection_string: str = None):
+    """
+    Get a synchronous SQLAlchemy engine for batch operations.
+
+    Converts postgresql:// URLs to postgresql+psycopg2:// for SQLAlchemy.
+
+    Args:
+        connection_string: PostgreSQL connection string. Defaults to Prediction.VECTOR_DB_CONNECTION.
+
+    Returns:
+        SQLAlchemy Engine or None if not configured.
+    """
+    import sqlalchemy
+    from urllib.parse import urlparse
+
+    if connection_string is None:
+        connection_string = Prediction.VECTOR_DB_CONNECTION
+
+    if not connection_string:
+        return None
+
+    if "user:password" in connection_string:
+        return None
+
+    try:
+        parsed = urlparse(connection_string)
+        port = parsed.port or 5432
+        sqlalchemy_url = f"postgresql+psycopg2://{parsed.username}:{parsed.password}@{parsed.hostname}:{port}{parsed.path}"
+        return sqlalchemy.create_engine(sqlalchemy_url)
+    except Exception as e:
+        logger.error(f"Failed to create sync engine: {e}")
+        return None
+
+
+def get_sync_engine_for_pipeline(pipeline: str = "prediction"):
+    """
+    Convenience getter for specific pipeline databases.
+
+    Args:
+        pipeline: One of "prediction", "traffic", or "vehicle"
+
+    Returns:
+        SQLAlchemy Engine or None if not configured.
+    """
+    pipeline_map = {
+        "prediction": Prediction.VECTOR_DB_CONNECTION,
+        "traffic": Traffic.VECTOR_DB_CONNECTION,
+        "vehicle": Vehicle.VECTOR_DB_CONNECTION,
+    }
+
+    conn_str = pipeline_map.get(pipeline)
+    if not conn_str:
+        return None
+
+    return get_sync_engine(conn_str)

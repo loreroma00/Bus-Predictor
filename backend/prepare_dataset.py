@@ -9,11 +9,12 @@ Pipeline stages:
   4. scaling - Apply feature scaling and create final training dataset
 
 Usage:
-  python prepare_dataset.py [--skip-db] [--force-canonical]
+  python prepare_dataset.py [--skip-db] [--force-canonical] [--start-date YYYY-MM-DD]
 
 Options:
   --skip-db          Skip preprocessing stage (use existing dataset_*.parquet files)
   --force-canonical  Force regeneration of canonical route map
+  --start-date       Only process data from this date onwards (YYYY-MM-DD format)
 """
 
 import os
@@ -130,7 +131,7 @@ def run_canonical_mapper():
         print(f"Saved GTFS MD5: {local_md5}")
 
 
-def run_preprocessing():
+def run_preprocessing(start_date: str = None):
     """Run Stage 2: Preprocessing (DB extraction)."""
     print("\n" + "=" * 60)
     print("STAGE 2: Preprocessing (Database Extraction)")
@@ -138,7 +139,7 @@ def run_preprocessing():
 
     from application.preprocessing.preprocessing import main as preprocessing_main
 
-    preprocessing_main()
+    preprocessing_main(start_date=start_date)
 
 
 def run_vector_processing():
@@ -189,6 +190,12 @@ Pipeline stages:
         action="store_true",
         help="Force regeneration of canonical route map",
     )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        help="Only process data from this date onwards (YYYY-MM-DD format)",
+    )
 
     args = parser.parse_args()
 
@@ -207,7 +214,7 @@ Pipeline stages:
         print("\nSkipping Stage 1: Canonical map is up to date")
 
     if not args.skip_db:
-        run_preprocessing()
+        run_preprocessing(start_date=args.start_date)
     else:
         print("\nSkipping Stage 2: Using existing dataset_*.parquet files")
 

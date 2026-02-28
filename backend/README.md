@@ -151,6 +151,22 @@ python prepare_dataset.py
 Options:
 - `--skip-db` - Skip database extraction (use existing `dataset_*.parquet` files)
 - `--force-canonical` - Force regeneration of canonical route map
+- `--start-date YYYY-MM-DD` - Only process data from this date onwards
+
+Examples:
+```bash
+# Full pipeline
+python prepare_dataset.py
+
+# Only data from January 1st, 2025 onwards
+python prepare_dataset.py --start-date 2025-01-01
+
+# Skip DB, use existing parquet files
+python prepare_dataset.py --skip-db
+
+# Force regenerate canonical map + filter by date
+python prepare_dataset.py --force-canonical --start-date 2025-01-01
+```
 
 ### Pipeline Stages
 

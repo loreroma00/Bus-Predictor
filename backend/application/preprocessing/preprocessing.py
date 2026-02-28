@@ -1,45 +1,17 @@
 import re
 import os
 import glob
-import pandas as pd
-import sqlalchemy
-import configparser
 import random
+import pandas as pd
 from datetime import datetime
 
-# --- Configuration ---
-CONFIG_FILE = "config.ini"
+from config import Prediction
+from persistence.database import get_sync_engine_for_pipeline
+
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 PARQUET_DIR = os.path.join(PROJECT_ROOT, "parquets")
-
-
-def load_config():
-    """Loads database configuration from config.ini."""
-    if not os.path.exists(CONFIG_FILE):
-        raise FileNotFoundError(
-            f"Configuration file '{CONFIG_FILE}' not found. Please create it based on config.ini.example."
-        )
-
-    config = configparser.ConfigParser()
-    config.read(CONFIG_FILE)
-
-    # Default table names if not specified
-    if "tables" not in config:
-        config["tables"] = {
-            "vector_table": "prediction_vector",
-            "label_table": "prediction_label",
-        }
-
-    return config["database"], config["tables"]
-
-
-def get_db_engine(db_config):
-    """Creates a SQLAlchemy engine from the configuration."""
-    # Construct connection string: postgresql+psycopg2://user:password@host:port/dbname
-    conn_str = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
-    return sqlalchemy.create_engine(conn_str)
 
 
 def get_processed_dates(parquet_dir):
@@ -129,31 +101,25 @@ def generate_synthetic_trip_id(df):
     return df
 
 
-def main():
-    try:
-        db_config, table_config = load_config()
-    except Exception as e:
-        print(f"Error loading configuration: {e}")
+def main(start_date: str = None):
+    """
+    Extract data from database to daily parquet files.
+
+    Args:
+        start_date: Optional start date (YYYY-MM-DD). Only process data from this date onwards.
+    """
+    engine = get_sync_engine_for_pipeline("prediction")
+
+    if engine is None:
+        print(
+            "Error: Prediction database not configured. Check config.ini [prediction] section."
+        )
         return
 
     processed_dates = get_processed_dates(PARQUET_DIR)
     print(
         f"Found {len(processed_dates)} already processed days: {sorted(list(processed_dates))}"
     )
-
-    # Connect to DB
-    engine = get_db_engine(db_config)
-
-    # Define Query
-    # We fetch ALL data that corresponds to dates NOT in processed_dates?
-    # Actually, fetching everything and filtering in Pandas is safer for the Trip ID logic
-    # because a trip might span across midnight, though standard bus trips usually reset or have distinct IDs if we had them.
-    # However, the task says "Partitioning & Saving: Iterate through days... Skip if existing".
-    # But to generate consistent Trip IDs globally, we technically need the whole history or at least complete sequences.
-    # Given the instructions "Incremental processing (skip days already present)", strict global Trip ID consistency
-    # across runs might be tricky if we don't load previous state.
-    # BUT, assuming we process the whole DB once or big chunks, we can just process what we fetch.
-    # For now, we will fetch everything and filter at save time as per instructions.
 
     query = f"""
     SELECT
@@ -199,9 +165,13 @@ def main():
         v.sch_starting_time_cos,
         l.time_seconds,
         l.occupancy_status
-    FROM {table_config.get("vector_table", "prediction_vector")} v
-    JOIN {table_config.get("label_table", "prediction_label")} l ON v.id = l.id
+    FROM {Prediction.VECTOR_TABLE} v
+    JOIN {Prediction.LABEL_TABLE} l ON v.id = l.id
     """
+
+    if start_date:
+        query += f"\n    WHERE v.ts >= '{start_date}'"
+        print(f"Filtering data from {start_date} onwards...")
 
     print("Executing query and loading data (this may take a while)...")
     try:
