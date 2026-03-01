@@ -186,6 +186,13 @@ class BusODELSTM(nn.Module):
         # =========================
         # 2. DECODER ODE - LSTM
         # =========================
+        
+        self.x2_embeddings = nn.ModuleList()
+        x2_total_emb_dim = 0
+        for num_categories in x2_cat_cardinalities:
+            emb_dim = min(50, (num_categories + 1) // 2)
+            self.x2_embeddings.append(nn.Embedding(num_categories, emb_dim))
+            x2_total_emb_dim += emb_dim
 
         decoder_input_size = n_x2_dense_features + x2_total_emb_dim + encoder_hidden_size
         self.ode_func = ODEFunc(lstm_hidden_size)
@@ -259,30 +266,33 @@ class BusODELSTM(nn.Module):
         # lstm_out, _ = self.decoder_lstm(decoder_input)
 
         outputs = []
-        for t_step in range(seq_length):
-            if t_step > 0:
-                t_span = torch.tensor(
-                    [t_grid[t_step-1],
-                     t_grid[t_step]],
-                    device = x1_dense.device
-                )
 
-            h_t = odeint(self.ode_func, h_t, t_span, method='euler')[-1]
+        for t_step in range(seq_length):
+            
+            # ==========================================
+            # 1. EVOLUZIONE CONTINUA (Fisica del bus)
+            # ==========================================
+            if t_step > 0:
+                t_span = torch.tensor([t_grid[t_step-1], t_grid[t_step]], device=x1_dense.device)
+                
+                # ---> QUESTA RIGA DEVE ESSERE DENTRO L'IF <---
+                h_t = odeint(self.ode_func, h_t, t_span, method='euler')[-1]
+
+            # ==========================================
+            # 2. INIEZIONE DEL TRAFFICO E METEO (LSTM)
+            # ==========================================
+            # ---> TORNIAMO INDIETRO DI UN LIVELLO DI INDENTAZIONE <---
+            
             current_x2_dense = x2_dense[:, t_step, :]
             current_x2_emb = x2_emb_concat[:, t_step, :] if x2_emb_concat.size(2) > 0 else torch.empty(batch_size, 0).to(x1_dense.device)
-            current_input = torch.cat(
-                [current_x2_dense,
-                 current_x2_emb,
-                 context],
-                dim = 1
-            )
+            
+            # Uniamo: Dati dinamici del segmento + Contesto statico del viaggio
+            current_input = torch.cat([current_x2_dense, current_x2_emb, context], dim=1)
 
-            h_t, c_t = self.lstm_cell(
-                current_input,
-                (h_t, c_t)
-            )
-
-            outputs.append(h_t)
+            # La cella LSTM fonde l'evoluzione continua (h_t) con l'impatto reale
+            h_t, c_t = self.lstm_cell(current_input, (h_t, c_t))
+            
+            outputs.append(h_t) 
 
         outputs = torch.stack(outputs, dim=1)
 

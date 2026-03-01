@@ -51,7 +51,6 @@ def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None
             x2_cat_cardinalities=x2_cat_cards,
             encoder_hidden_size=ENCODER_HIDDEN_SIZE,
             lstm_hidden_size=DECODER_HIDDEN_SIZE,
-            num_lstm_layers=LSTM_LAYERS
         ).to(DEVICE)
     if arch == "lstm":
         model = BusLSTM(
@@ -239,7 +238,7 @@ def batch_train():
             loss_type=loss_corrente,
             hyperparameter_iteration=idx,
             preloaded_data=preloaded_data,
-            config_modello=exp
+            config_modello=exp,
             arch=args.arch
         )
         
@@ -270,4 +269,4 @@ if __name__ == "__main__":
     if args.batch_train:
         batch_train()
     else:
-    train(loss_type=args.loss, hyperparameter_iteration=99,a arch=args.arch) # Il 99 indica che è una run isolata
+        train(loss_type=args.loss, hyperparameter_iteration=99, arch=args.arch) # Il 99 indica che è una run isolata
