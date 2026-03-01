@@ -7,7 +7,7 @@ import json
 import argparse
 
 from dataset import load_dataset
-from model import BusLSTM
+from model import BusLSTM, BusODELSTM
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,15 +42,28 @@ def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None
 
     # 2. INIZIALIZZAZIONE MODELLO
     print(f"Initializing model for iteration {hyperparameter_iteration}...")
-    model = BusLSTM(
-        n_x1_dense_features=n_x1_dense, 
-        n_x2_dense_features=n_x2_dense,
-        x1_cat_cardinalities=x1_cat_cards, 
-        x2_cat_cardinalities=x2_cat_cards,
-        encoder_hidden_size=ENCODER_HIDDEN_SIZE,
-        lstm_hidden_size=DECODER_HIDDEN_SIZE,
-        num_lstm_layers=LSTM_LAYERS
-    ).to(DEVICE)
+
+    if args.arch == "ode_lstm":
+        model = BusODELSTM(
+            n_x1_dense_features=n_x1_dense, 
+            n_x2_dense_features=n_x2_dense,
+            x1_cat_cardinalities=x1_cat_cards, 
+            x2_cat_cardinalities=x2_cat_cards,
+            encoder_hidden_size=ENCODER_HIDDEN_SIZE,
+            lstm_hidden_size=DECODER_HIDDEN_SIZE,
+            num_lstm_layers=LSTM_LAYERS
+        ).to(DEVICE)
+    if args.arch == "lstm":
+        model = BusLSTM(
+            n_x1_dense_features=n_x1_dense, 
+            n_x2_dense_features=n_x2_dense,
+            x1_cat_cardinalities=x1_cat_cards, 
+            x2_cat_cardinalities=x2_cat_cards,
+            encoder_hidden_size=ENCODER_HIDDEN_SIZE,
+            lstm_hidden_size=DECODER_HIDDEN_SIZE,
+            num_lstm_layers=LSTM_LAYERS
+        ).to(DEVICE)
+
 
     CROWD_LOSS_WEIGHT: float = 1.0
     
@@ -79,6 +92,7 @@ def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None
     )
     
     print(f"Starting training on {DEVICE}...")
+    print(f"Using architecture {args.arch}...")
     print(f"Using loss function: {loss_type.upper()}")
 
     best_val_loss = float('inf') 
@@ -230,8 +244,25 @@ def batch_train():
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--loss", type=str, default="mse", choices=["mse", "mae", "huber", "nll"], help="Choose loss function")
-    parser.add_argument("--batch-train", action="store_true", help="Uses 'grid_search.json' to batch train several models")
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default="mse",
+        choices=["mse", "mae", "huber", "nll"],
+        help="Choose loss function"
+    )
+    parser.add_argument(
+        "--batch-train",
+        action="store_true",
+        help="Uses 'grid_search.json' to batch train several models"
+    )
+    parser.add_argument(
+        "--arch",
+        type=str,
+        default="lstm",
+        choices=["lstm", "ode_lstm"],
+        help="Architecture to use"
+    )
     
     args = parser.parse_args()
 
