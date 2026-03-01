@@ -24,7 +24,7 @@ LSTM_LAYERS = 2
 TIME_LOSS_WEIGHT = 1.0
 
 
-def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None, config_modello=None):
+def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None, config_modello=None, arch: str = "lstm"):
     
     # 1. GESTIONE DELLA MEMORIA (Caricamento o Iniezione)
     if preloaded_data is None:
@@ -43,7 +43,7 @@ def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None
     # 2. INIZIALIZZAZIONE MODELLO
     print(f"Initializing model for iteration {hyperparameter_iteration}...")
 
-    if args.arch == "ode_lstm":
+    if arch == "ode_lstm":
         model = BusODELSTM(
             n_x1_dense_features=n_x1_dense, 
             n_x2_dense_features=n_x2_dense,
@@ -53,7 +53,7 @@ def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None
             lstm_hidden_size=DECODER_HIDDEN_SIZE,
             num_lstm_layers=LSTM_LAYERS
         ).to(DEVICE)
-    if args.arch == "lstm":
+    if arch == "lstm":
         model = BusLSTM(
             n_x1_dense_features=n_x1_dense, 
             n_x2_dense_features=n_x2_dense,
@@ -92,7 +92,7 @@ def train(loss_type: str, hyperparameter_iteration: int = 1, preloaded_data=None
     )
     
     print(f"Starting training on {DEVICE}...")
-    print(f"Using architecture {args.arch}...")
+    print(f"Using architecture {arch}...")
     print(f"Using loss function: {loss_type.upper()}")
 
     best_val_loss = float('inf') 
@@ -240,6 +240,7 @@ def batch_train():
             hyperparameter_iteration=idx,
             preloaded_data=preloaded_data,
             config_modello=exp
+            arch=args.arch
         )
         
 if __name__ == "__main__":
@@ -269,4 +270,4 @@ if __name__ == "__main__":
     if args.batch_train:
         batch_train()
     else:
-        train(loss_type=args.loss, hyperparameter_iteration=99) # Il 99 indica che è una run isolata
+    train(loss_type=args.loss, hyperparameter_iteration=99,a arch=args.arch) # Il 99 indica che è una run isolata

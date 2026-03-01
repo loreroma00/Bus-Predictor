@@ -91,6 +91,7 @@ class BusLSTM(nn.Module):
         print(f"Input Encoder: {encoder_input_size} | Input Decoder: {decoder_input_size}")
         
     def forward(self, x1_cat, x1_dense, x2_cat, x2_dense):
+        batch_size = x1_cat.size(0)
 
         # ================================
         # 1. ENCODER
@@ -208,6 +209,7 @@ class BusODELSTM(nn.Module):
         )
 
     def forward(self, x1_cat, x1_dense, x2_cat, x2_dense):
+        batch_size = x1_cat.size(0)
 
         # ================================
         # 1. ENCODER
@@ -257,13 +259,13 @@ class BusODELSTM(nn.Module):
         # lstm_out, _ = self.decoder_lstm(decoder_input)
 
         outputs = []
-        for t in range(seq_length):
-            if t_step > 0
-            t_span = torch.tensor(
-                [t_grid[t_step-1],
-                 t_grid[t_step]],
-                device = x1_dense.device
-            )
+        for t_step in range(seq_length):
+            if t_step > 0:
+                t_span = torch.tensor(
+                    [t_grid[t_step-1],
+                     t_grid[t_step]],
+                    device = x1_dense.device
+                )
 
             h_t = odeint(self.ode_func, h_t, t_span, method='euler')[-1]
             current_x2_dense = x2_dense[:, t_step, :]
