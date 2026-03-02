@@ -134,19 +134,20 @@ def evaluate_model(weights_path: Path, config_path: Path):
             all_pred_crowd.append(pred_crowd_classes.cpu().numpy().flatten())
 
             total_samples += y_time.numel()
-
+            
             # --- ESTRAZIONE VISIVA (Dal primo batch) ---
             if i == 0:
-                # 1. Recuperiamo l'indice originale del primo viaggio del batch
-                # Assumendo che il tuo dataset mantenga l'ordine del DF originale
-                primo_viaggio_idx = 0 
-                
-                # 2. Estraiamo la riga dal dataframe originale per lo storytelling
-                # Moltiplichiamo per 100 perché ogni viaggio occupa 100 righe nel parquet
-                info_riga = test_dataset.df.iloc[primo_viaggio_idx * 100]
-                
-                route_id = info_riga.get('route_id', 'N/D')
-                start_time = info_riga.get('start_time', 'N/D')
+                # Recuperiamo l'ID della linea e l'ora leggendo direttamente dal file Parquet
+                # Questo evita di dipendere dagli attributi interni di test_dataset
+                try:
+                    # Leggiamo solo la prima riga del file di test
+                    df_meta = pd.read_parquet(TEST_FILE_PATH, columns=['route_id', 'start_time'])
+                    info_riga = df_meta.iloc[0]
+                    route_id = info_riga.get('route_id', 'N/D')
+                    start_time = info_riga.get('start_time', 'N/D')
+                except Exception:
+                    route_id = "N/D"
+                    start_time = "N/D"
 
                 # Salviamo la prima traiettoria per il fotoromanzo
                 fotoromanzo_reale = true_time_sec[0].cpu().numpy()
@@ -157,6 +158,7 @@ def evaluate_model(weights_path: Path, config_path: Path):
                 print(
                     f"{'Segmento':<10} | {'Reale (sec)':<15} | {'Previsto (sec)':<15} | {'Errore (sec)':<15} || {'Folla Reale':<15} | {'Folla Prevista':<15}"
                 )
+            # --- ESTRAZIONE VISIVA (Dal primo batch) ---
                 print("-" * 95)
                 for seg in [0, 25, 50, 75, 99]:
                     r_time = true_time_sec[0, seg].item()
