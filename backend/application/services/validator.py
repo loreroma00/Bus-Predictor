@@ -66,7 +66,21 @@ class Validator:
         self.weather_service = weather_service
         self.logger = logging.getLogger("validator")
 
+        self._bus_type_predictor = None
+
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def bus_type_predictor(self):
+        """Lazy-load the bus type predictor on first use."""
+        if self._bus_type_predictor is None:
+            from application.services.bus_type_predictor import BusTypePredictor
+
+            try:
+                self._bus_type_predictor = BusTypePredictor()
+            except FileNotFoundError as e:
+                self.logger.warning(f"Bus type predictor not available: {e}")
+        return self._bus_type_predictor
 
     def validate_date(self, date_str: str) -> ValidationReport:
         """
@@ -197,8 +211,20 @@ class Validator:
             return 0
 
     def _compute_bus_type(self, trip_data: Dict) -> int:
-        """Compute bus type for a trip. Placeholder for now."""
-        return 0
+        """Predict bus type using the ML model."""
+        if self.bus_type_predictor is None:
+            return 0
+
+        try:
+            trip_date = datetime.strptime(trip_data["start_date"], "%d-%m-%Y").date()
+            return self.bus_type_predictor.predict(
+                route_id=trip_data["route_id"],
+                start_time=trip_data["start_time"],
+                trip_date=trip_date,
+            )
+        except Exception as e:
+            self.logger.warning(f"Bus type prediction failed: {e}")
+            return 0
 
     def _run_predictions(self, trips: List[Dict], weather_code: int) -> Dict[str, Any]:
         """Run batch predictions for all trips."""
