@@ -38,3 +38,6 @@ torchvision>=0.20.0
 torchaudio>=2.5.0
 uvicorn>=0.40.0
 torchdiffeq
+lightgbm
+matplotlib>=3.8.0
+
