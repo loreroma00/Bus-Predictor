@@ -22,7 +22,7 @@ def train_bus_type_predictor(parquet_path: str, model_save_path: str):
     # Estraiamo X e y
     X = df[features].copy()
     y = df[target].copy()
-    y = y.astype(int)
+    y = y = (y * 9.0).round().astype(int)
     
     # TRUCCO MAGICO DI LIGHTGBM: Convertiamo le stringhe/ID in tipo 'category'
     # Così l'albero capisce che la linea 170 non è "maggiore" della linea 85, sono solo etichette diverse.

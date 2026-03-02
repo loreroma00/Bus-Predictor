@@ -112,7 +112,7 @@ def evaluate_model(weights_path: Path, config_path: Path):
             # --- CALCOLO ERRORI TEMPO ---
             pred_time_sec = pred_time.squeeze(-1) * 3600.0
             true_time_sec = y_time.squeeze(-1) * 3600.0
-
+ 
             # MAE e MSE
             mae = torch.abs(pred_time_sec - true_time_sec).sum().item()
             mse = ((pred_time_sec - true_time_sec) ** 2).sum().item()
@@ -162,6 +162,12 @@ def evaluate_model(weights_path: Path, config_path: Path):
     rmse = (total_time_mse_seconds / total_samples) ** 0.5
     accuracy_crowd = (total_crowd_correct / total_samples) * 100
 
+    # --- CALCOLO VARIANZA E DEVIAZIONE STANDARD ---
+    all_time_errors_np = np.array(all_time_errors)
+    variance_time = np.var(all_time_errors_np)
+    std_dev_time = np.std(all_time_errors_np)
+    mean_bias = np.mean(all_time_errors_np) # Questo ti dice se il modello tende a sovrastimare o sottostimare
+    
     print("\n" + "=" * 50)
     print("RISULTATI SUL TEST SET INEDITO")
     print("=" * 50)
@@ -285,7 +291,7 @@ def evaluate_gbdt_model(pkl_path: Path):
     print(f"Trip unici estratti: {len(df_trips)}")
 
     X = df_trips[features].copy()
-    y_true = df_trips[target].astype(int).values
+    y_true = (df_trips[target] * 9.0).round().astype(int).values
 
     categorical_features = ["route_id", "day_type"]
     for col in categorical_features:
