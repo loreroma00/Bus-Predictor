@@ -11,6 +11,7 @@ def train_bus_type_predictor(parquet_path: str, model_save_path: str):
     # Assicurati di puntare al dataset pulito (quello dal 22 Febbraio 2026 in poi!)
     print(f"Caricamento dati da {parquet_path}...")
     df = pd.read_parquet(parquet_path)
+    df = df.dropna(subset=[target])
     
     # 2. FEATURE ENGINEERING (Il Layer Interno)
     # Selezioniamo solo le colonne che sappiamo a priori prima che il viaggio inizi
@@ -21,6 +22,7 @@ def train_bus_type_predictor(parquet_path: str, model_save_path: str):
     # Estraiamo X e y
     X = df[features].copy()
     y = df[target].copy()
+    y = y.astype(int)
     
     # TRUCCO MAGICO DI LIGHTGBM: Convertiamo le stringhe/ID in tipo 'category'
     # Così l'albero capisce che la linea 170 non è "maggiore" della linea 85, sono solo etichette diverse.
