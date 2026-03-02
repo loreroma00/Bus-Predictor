@@ -355,6 +355,42 @@ def display_prediction(
     print("=" * 80)
 
 
+def display_validation(report: dict):
+    """Display validation results."""
+    print("\n" + "=" * 80)
+    print(f"MODEL VALIDATION REPORT - Date: {report['date']}")
+    print("=" * 80)
+    print(f"Total Scheduled Trips:      {report['total_scheduled_trips']}")
+    print(f"Trips with Ground Truth:    {report['total_trips_with_ground_truth']}")
+    print(f"Trips Predicted:            {report['total_trips_predicted']}")
+    print(f"Trips Validated:            {report['total_trips_validated']}")
+    print(f"Total Measurements:         {report['total_measurements']}")
+    print("-" * 80)
+    print(f"Median RMSE:                {report['median_rmse']:.2f} s")
+    print(f"Median MSE:                 {report['median_mse']:.2f} s²")
+    print(f"RMSE Range:                 [{report['min_rmse']:.2f}, {report['max_rmse']:.2f}]")
+    print("-" * 80)
+    print(f"Log File:                   {report['log_file']}")
+    print(f"Report File:                {report['report_file']}")
+    print("=" * 80)
+
+    if report["trips"]:
+        print(f"\nTrip Samples (first 10 of {len(report['trips'])}):")
+        print(f"{'Route':>6} | {'Dir':>3} | {'Start':>10} | {'RMSE':>8} | {'N':>4} | {'Error'}")
+        print("-" * 80)
+        for trip in report["trips"][:10]:
+            error_str = trip["error"] if trip["error"] else ""
+            print(
+                f"{trip['route_id']:>6} | "
+                f"{trip['direction_id']:>3} | "
+                f"{trip['scheduled_start']:>10} | "
+                f"{trip['rmse']:>8.1f} | "
+                f"{trip['n_measurements']:>4} | "
+                f"{error_str}"
+            )
+        print("-" * 80)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ATAC Bus Delay Prediction CLI")
     parser.add_argument(
@@ -369,7 +405,45 @@ def main():
         default=None,
         help="Directory for GTFS static data (default: current directory)",
     )
+    parser.add_argument(
+        "--test-model",
+        type=str,
+        metavar="YYYY-MM-DD",
+        help="Validate model against ground truth for a specific date",
+    )
     args = parser.parse_args()
+
+    api_client = APIClient(args.api_url)
+
+    if args.test_model:
+        # Convert YYYY-MM-DD to DD-MM-YYYY for the API
+        try:
+            date_obj = datetime.strptime(args.test_model, "%Y-%m-%d")
+            api_date = date_obj.strftime("%d-%m-%Y")
+        except ValueError:
+            # Maybe it's already DD-MM-YYYY
+            try:
+                datetime.strptime(args.test_model, "%d-%m-%Y")
+                api_date = args.test_model
+            except ValueError:
+                print(f"Error: Invalid date format '{args.test_model}'. Use YYYY-MM-DD.")
+                sys.exit(1)
+
+        print(f"Validating model for date: {api_date}...")
+        try:
+            report = api_client.validate(api_date)
+            display_validation(report)
+            sys.exit(0)
+        except requests.HTTPError as e:
+            try:
+                detail = e.response.json().get("detail", str(e))
+            except Exception:
+                detail = e.response.text or str(e)
+            print(f"API Error ({e.response.status_code}): {detail}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
     cli_dir = os.path.dirname(os.path.abspath(__file__))
     base_path = args.data_dir or os.getcwd()

@@ -349,6 +349,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         confidence_rating: Optional[float] = None
 
     class PredictedTrip(BaseModel):
+        trip_id: str
         route_id: str
         direction_id: int
         trip_date: str
@@ -356,6 +357,23 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         weather_code: int
         bus_type: int
         stop_sequence: dict[int, StopPredictionWithInfo]
+
+    class BatchPredictRequest(BaseModel):
+        trips: list[PredictRequest]
+
+    class FailedTrip(BaseModel):
+        index: int
+        route_id: str
+        direction_id: int
+        start_time: str
+        error: str
+
+    class BatchPredictResponse(BaseModel):
+        successful: list[PredictedTrip]
+        failed: list[FailedTrip]
+        total_requested: int
+        total_successful: int
+        total_failed: int
 
     class ModelInfo(BaseModel):
         filename: str
@@ -408,6 +426,46 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         shape: list[ShapePoint]
         stops: list[StopInfo]
         schedule: list[TripSchedule]
+
+    class ValidateRequest(BaseModel):
+        date: str
+
+        @field_validator("date")
+        @classmethod
+        def validate_date(cls, v):
+            try:
+                datetime.strptime(v, "%d-%m-%Y")
+                return v
+            except ValueError:
+                raise ValueError("date must be in DD-MM-YYYY format")
+
+    class TripValidationSummary(BaseModel):
+        trip_id: str
+        route_id: str
+        direction_id: int
+        scheduled_start: str
+        mse: float
+        rmse: float
+        n_measurements: int
+        error: Optional[str] = None
+
+    class ValidateResponse(BaseModel):
+        date: str
+        total_scheduled_trips: int
+        total_trips_with_ground_truth: int
+        total_trips_predicted: int
+        total_trips_validated: int
+        total_measurements: int
+        median_mse: float
+        median_rmse: float
+        min_mse: float
+        max_mse: float
+        min_rmse: float
+        max_rmse: float
+        occupancy_confusion_matrix: list[list[int]]
+        trips: list[TripValidationSummary]
+        log_file: str
+        report_file: str
 
     predictor: Optional[Predictor] = None
     available_models: list[ModelInfo] = []
@@ -695,6 +753,161 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             schedule=schedule,
         )
 
+    @app.post("/predict/batch", response_model=BatchPredictResponse)
+    async def predict_batch(request: BatchPredictRequest):
+        """Predict bus delays for multiple trips in a single batched inference."""
+        if predictor is None:
+            raise HTTPException(status_code=503, detail="Model not loaded")
+
+        ledger = observatory.get_ledger()
+        valid_trips_data = []
+        failed = []
+
+        valid_route_directions = set()
+        for trip in ledger["trips"].values():
+            valid_route_directions.add((trip.route.id, trip.direction_id))
+
+        for idx, trip in enumerate(request.trips):
+            key = (trip.route_id, trip.direction_id)
+            if key in valid_route_directions:
+                valid_trips_data.append(
+                    {
+                        "orig_idx": idx,
+                        "route_id": trip.route_id,
+                        "direction_id": trip.direction_id,
+                        "start_date": trip.start_date,
+                        "start_time": trip.start_time,
+                        "weather_code": trip.weather_code,
+                        "bus_type": trip.bus_type,
+                    }
+                )
+            else:
+                failed.append(
+                    FailedTrip(
+                        index=idx,
+                        route_id=trip.route_id,
+                        direction_id=trip.direction_id,
+                        start_time=trip.start_time,
+                        error=f"Route {trip.route_id} direction {trip.direction_id} not found",
+                    )
+                )
+
+        successful = []
+
+        if valid_trips_data:
+            try:
+                forecasts = predictor.get_batch_forecast(
+                    [
+                        {k: v for k, v in t.items() if k != "orig_idx"}
+                        for t in valid_trips_data
+                    ]
+                )
+
+                stops_cache = {}
+                trip_data_by_key = {
+                    (t["route_id"], t["direction_id"], t["start_time"]): t
+                    for t in valid_trips_data
+                }
+
+                for forecast in forecasts:
+                    start_time = (
+                        forecast.scheduled_start[:-3]
+                        if forecast.scheduled_start.endswith(":00")
+                        else forecast.scheduled_start
+                    )
+                    key = (
+                        forecast.route_id,
+                        forecast.direction_id,
+                        start_time,
+                    )
+                    trip_data = trip_data_by_key.get(key)
+                    if not trip_data:
+                        for k, v in trip_data_by_key.items():
+                            if (
+                                k[0] == forecast.route_id
+                                and k[1] == forecast.direction_id
+                            ):
+                                trip_data = v
+                                break
+
+                    if not trip_data:
+                        continue
+
+                    cache_key = (forecast.route_id, forecast.direction_id)
+                    if cache_key not in stops_cache:
+                        stops_map = {}
+                        for ledger_trip in ledger["trips"].values():
+                            if (
+                                ledger_trip.route.id == forecast.route_id
+                                and ledger_trip.direction_id == forecast.direction_id
+                            ):
+                                for st in ledger_trip.get_stop_times() or []:
+                                    seq = int(st.get("stop_sequence", 0) or 0)
+                                    if seq not in stops_map:
+                                        stop_id = st.get("stop_id")
+                                        stop_info = ledger["stops"].get(stop_id, {})
+                                        stops_map[seq] = {
+                                            "stop_id": stop_id or "",
+                                            "stop_name": stop_info.get("stop_name", ""),
+                                            "stop_lat": float(
+                                                stop_info.get("stop_lat", 0) or 0
+                                            ),
+                                            "stop_lon": float(
+                                                stop_info.get("stop_lon", 0) or 0
+                                            ),
+                                        }
+                                break
+                        stops_cache[cache_key] = stops_map
+                    else:
+                        stops_map = stops_cache[cache_key]
+
+                    stop_sequence = {}
+                    for pred in forecast.stops:
+                        stop_info = stops_map.get(pred.stop_sequence, {})
+                        stop_sequence[pred.stop_sequence] = StopPredictionWithInfo(
+                            stop_sequence=pred.stop_sequence,
+                            stop_id=stop_info.get("stop_id", ""),
+                            stop_name=stop_info.get("stop_name", ""),
+                            stop_lat=stop_info.get("stop_lat", 0),
+                            stop_lon=stop_info.get("stop_lon", 0),
+                            predicted_arrival=pred.expected_arrival,
+                            delay_seconds=pred.cumulative_delay_sec,
+                            confidence_rating=None,
+                        )
+
+                    successful.append(
+                        PredictedTrip(
+                            trip_id=f"{forecast.route_id}_{forecast.scheduled_start}",
+                            route_id=forecast.route_id,
+                            direction_id=forecast.direction_id,
+                            trip_date=forecast.trip_date,
+                            scheduled_start=forecast.scheduled_start,
+                            weather_code=trip_data["weather_code"],
+                            bus_type=trip_data["bus_type"],
+                            stop_sequence=stop_sequence,
+                        )
+                    )
+
+            except Exception as e:
+                for trip_data in valid_trips_data:
+                    failed.append(
+                        FailedTrip(
+                            index=trip_data["orig_idx"],
+                            route_id=trip_data["route_id"],
+                            direction_id=trip_data["direction_id"],
+                            start_time=trip_data["start_time"],
+                            error=str(e),
+                        )
+                    )
+
+        return BatchPredictResponse(
+            successful=successful,
+            failed=failed,
+            total_requested=len(request.trips),
+            total_successful=len(successful),
+            total_failed=len(failed),
+        )
+
     @app.post("/predict", response_model=PredictedTrip)
     async def predict(request: PredictRequest):
         """Predict bus delays with full stop information."""
@@ -761,6 +974,60 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             raise HTTPException(status_code=404, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
+    @app.post("/validate", response_model=ValidateResponse)
+    async def validate(request: ValidateRequest):
+        """Validate model predictions against ground truth for a specific date."""
+        if predictor is None:
+            raise HTTPException(status_code=503, detail="Model not loaded")
+        if observatory is None:
+            raise HTTPException(status_code=503, detail="Observatory not loaded")
+
+        from application.services.validator import Validator
+
+        validator = Validator(
+            predictor=predictor,
+            observatory=observatory,
+            weather_service=weather_service,
+        )
+
+        try:
+            report = validator.validate_date(request.date)
+
+            trip_summaries = [
+                TripValidationSummary(
+                    trip_id=t.trip_id,
+                    route_id=t.route_id,
+                    direction_id=t.direction_id,
+                    scheduled_start=t.scheduled_start,
+                    mse=t.mse,
+                    rmse=t.rmse,
+                    n_measurements=t.n_measurements,
+                    error=t.error,
+                )
+                for t in report.trips
+            ]
+
+            return ValidateResponse(
+                date=report.date,
+                total_scheduled_trips=report.total_scheduled_trips,
+                total_trips_with_ground_truth=report.total_trips_with_ground_truth,
+                total_trips_predicted=report.total_trips_predicted,
+                total_trips_validated=report.total_trips_validated,
+                total_measurements=report.total_measurements,
+                median_mse=report.median_mse,
+                median_rmse=report.median_rmse,
+                min_mse=report.min_mse,
+                max_mse=report.max_mse,
+                min_rmse=report.min_rmse,
+                max_rmse=report.max_rmse,
+                occupancy_confusion_matrix=report.occupancy_confusion_matrix,
+                trips=trip_summaries,
+                log_file=report.log_file,
+                report_file=report.report_file,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
 
     @app.get("/health")
     async def health():

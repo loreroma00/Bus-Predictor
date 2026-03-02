@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 from datetime import date
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import torch
 import numpy as np
@@ -19,6 +19,8 @@ PARQUET_DIR = PROJECT_ROOT / "parquets"
 ROUTE_ENCODING_PATH = PARQUET_DIR / "route_encoding.json"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
 STATIC_MAP_PATH = PARQUET_DIR / "canonical_route_map.parquet"
+
+BATCH_SIZE = 100  # Number of segments per trip
 
 
 @dataclass
@@ -250,3 +252,221 @@ class Predictor:
             scheduled_start=start_time + ":00",
             stops=stop_predictions,
         )
+
+    def _predict_batch_tensors(
+        self,
+        x1_cat_batch: np.ndarray,
+        x1_dense_batch: np.ndarray,
+        x2_cat_batch: np.ndarray,
+        x2_dense_batch: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Batched inference for multiple trips.
+
+        Args:
+            x1_cat_batch: (N, 5) - route_id, direction_id, day_type, weather_code, bus_type
+            x1_dense_batch: (N, 16) - static features
+            x2_cat_batch: (N, 100, 2) - h3_encoded, stop_sequence per segment
+            x2_dense_batch: (N, 100, 6) - dynamic features per segment
+
+        Returns:
+            delays: (N, 100) - delay in seconds for each segment
+            crowd: (N, 100) - crowd level for each segment
+        """
+        # Encode route_ids
+        for i in range(len(x1_cat_batch)):
+            route_id_str = x1_cat_batch[i, 0]
+            x1_cat_batch[i, 0] = self.route_encoder.get(str(route_id_str), 0)
+
+        # Normalize x1_dense
+        x1_dense_batch[:, 13] = np.clip(x1_dense_batch[:, 13], 1, 3) / 3.0
+
+        # Normalize x2_dense
+        x2_dense_batch[:, :, 0] = np.clip(x2_dense_batch[:, :, 0], 0, 15000) / 15000.0
+        x2_dense_batch[:, :, 1] = np.clip(x2_dense_batch[:, :, 1], 0, 1000) / 1000.0
+        x2_dense_batch[:, :, 2] = x2_dense_batch[:, :, 2] / 99.0
+        x2_dense_batch[:, :, 4] = np.clip(x2_dense_batch[:, :, 4], 0, 65.0) / 65.0
+        x2_dense_batch[:, :, 5] = np.clip(x2_dense_batch[:, :, 5], 0.0, 2.0)
+
+        # Convert to tensors
+        x1_cat_tensor = torch.tensor(x1_cat_batch, dtype=torch.int64)
+        x1_dense_tensor = torch.tensor(x1_dense_batch, dtype=torch.float32)
+        x2_cat_tensor = torch.tensor(x2_cat_batch, dtype=torch.int64)
+        x2_dense_tensor = torch.tensor(x2_dense_batch, dtype=torch.float32)
+
+        # Batched inference
+        with torch.no_grad():
+            pred_time_scaled, pred_crowd_logits = self.model(
+                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor
+            )
+
+        delays = pred_time_scaled.numpy() * 3600.0
+        crowd = pred_crowd_logits.argmax(dim=-1).numpy()
+
+        return delays, crowd
+
+    def get_batch_forecast(
+        self,
+        trips: List[Dict[str, Any]],
+    ) -> List[TripForecast]:
+        """
+        Predict multiple trips in a single batched inference pass.
+
+        Args:
+            trips: List of dicts, each with:
+                - route_id: str
+                - direction_id: int
+                - start_date: str (DD-MM-YYYY)
+                - start_time: str (HH:MM)
+                - weather_code: int
+                - bus_type: int
+
+        Returns:
+            List[TripForecast] - one per input trip, in same order
+
+        Raises:
+            ValueError: If any trip has invalid route_id/direction_id
+        """
+        from datetime import datetime
+
+        if not trips:
+            return []
+
+        n_trips = len(trips)
+
+        # 1. Validate all trips and collect metadata
+        trip_metadata = []
+        invalid_trips = []
+
+        for idx, trip in enumerate(trips):
+            route_id = trip["route_id"]
+            direction_id = trip["direction_id"]
+
+            trip_static = self.static_map[
+                (self.static_map["route_id"] == route_id)
+                & (self.static_map["direction_id"] == direction_id)
+            ]
+
+            if trip_static.empty or len(trip_static) != BATCH_SIZE:
+                invalid_trips.append(
+                    f"Trip {idx}: route_id={route_id}, direction_id={direction_id}"
+                )
+                continue
+
+            trip_static = trip_static.sort_values("segment_idx")
+
+            trip_date = datetime.strptime(trip["start_date"], "%d-%m-%Y").date()
+            time_parts = trip["start_time"].split(":")
+            time_seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60
+            day_type = self._get_day_type(trip_date)
+
+            trip_metadata.append(
+                {
+                    "idx": idx,
+                    "route_id": route_id,
+                    "direction_id": direction_id,
+                    "trip_date": trip["start_date"],
+                    "start_time": trip["start_time"],
+                    "time_seconds": time_seconds,
+                    "day_type": day_type,
+                    "weather_code": trip["weather_code"],
+                    "bus_type": trip["bus_type"],
+                    "trip_static": trip_static,
+                }
+            )
+
+        if invalid_trips:
+            raise ValueError(f"Invalid trips found:\n" + "\n".join(invalid_trips))
+
+        # 2. Build batch tensors
+        x1_cat_batch = np.zeros((n_trips, 5), dtype=np.int64)
+        x1_dense_batch = np.zeros((n_trips, 16), dtype=np.float32)
+        x2_cat_batch = np.zeros((n_trips, BATCH_SIZE, 2), dtype=np.int64)
+        x2_dense_batch = np.zeros((n_trips, BATCH_SIZE, 6), dtype=np.float32)
+
+        for i, meta in enumerate(trip_metadata):
+            trip_static = meta["trip_static"]
+
+            # x1_cat: [route_id, direction_id, day_type, weather_code, bus_type]
+            x1_cat_batch[i] = [
+                meta["route_id"],
+                meta["direction_id"],
+                meta["day_type"],
+                meta["weather_code"],
+                meta["bus_type"],
+            ]
+
+            # x1_dense: 13 zeros + [3.0, time_sin, time_cos]
+            time_sin = math.sin(2 * math.pi * meta["time_seconds"] / 86400)
+            time_cos = math.cos(2 * math.pi * meta["time_seconds"] / 86400)
+            x1_dense_batch[i] = [0.0] * 13 + [3.0, time_sin, time_cos]
+
+            # x2_cat: [h3_encoded, stop_sequence] for each segment
+            h3_encoded = [
+                self.h3_encoder.get(h, 0) if h else 0
+                for h in trip_static["h3_index"].values
+            ]
+            stop_seq = trip_static["stop_sequence"].fillna(-1).astype(int).values
+            x2_cat_batch[i, :, 0] = h3_encoded
+            x2_cat_batch[i, :, 1] = stop_seq
+
+            # x2_dense: [shape_dist, dist_to_next, seg_idx, is_gen, base_speed, speed_ratio]
+            x2_dense_batch[i, :, 0] = trip_static["can_shape_dist_travelled"].values
+            x2_dense_batch[i, :, 1] = trip_static["can_distance_to_next_stop"].values
+            x2_dense_batch[i, :, 2] = trip_static["segment_idx"].values
+            x2_dense_batch[i, :, 3] = 1.0  # is_genuine
+            x2_dense_batch[i, :, 4] = 25.0  # base_speed
+            x2_dense_batch[i, :, 5] = 1.0  # speed_ratio
+
+        # 3. Batched inference
+        delays_batch, crowd_batch = self._predict_batch_tensors(
+            x1_cat_batch, x1_dense_batch, x2_cat_batch, x2_dense_batch
+        )
+
+        # 4. Build TripForecast objects
+        forecasts = []
+
+        for i, meta in enumerate(trip_metadata):
+            trip_static = meta["trip_static"]
+            delays = delays_batch[i]
+            crowd = crowd_batch[i]
+            time_seconds = meta["time_seconds"]
+
+            # Build stop predictions
+            stop_groups = trip_static.groupby("stop_sequence", sort=True)
+            stop_predictions = []
+
+            for stop_seq, group in stop_groups:
+                last_segment_idx = group["segment_idx"].max()
+                last_segment_mask = trip_static["segment_idx"] == last_segment_idx
+
+                delay_at_stop = delays[last_segment_idx]
+                crowd_at_stop = int(crowd[last_segment_idx])
+                distance_m = trip_static.loc[
+                    last_segment_mask, "can_shape_dist_travelled"
+                ].values[0]
+
+                expected_arrival_seconds = time_seconds + delay_at_stop
+
+                stop_predictions.append(
+                    StopPrediction(
+                        stop_sequence=int(stop_seq),
+                        distance_m=float(distance_m),
+                        cumulative_delay_sec=float(delay_at_stop),
+                        delay_formatted=self._format_delay(delay_at_stop),
+                        expected_arrival=self._format_time(expected_arrival_seconds),
+                        crowd_level=crowd_at_stop,
+                    )
+                )
+
+            forecasts.append(
+                TripForecast(
+                    route_id=meta["route_id"],
+                    direction_id=meta["direction_id"],
+                    trip_date=meta["trip_date"],
+                    scheduled_start=meta["start_time"] + ":00",
+                    stops=stop_predictions,
+                )
+            )
+
+        return forecasts

@@ -50,6 +50,22 @@ class APIClient:
         response.raise_for_status()
         return response.json()
 
+    def validate(self, date: str) -> dict:
+        """
+        Request model validation for a specific date.
+
+        Args:
+            date: DD-MM-YYYY format
+
+        Returns:
+            Validation response dict with error metrics and trip summaries
+        """
+        url = f"{self.base_url}/validate"
+        payload = {"date": date}
+        response = requests.post(url, json=payload, timeout=300)  # Validation can take longer
+        response.raise_for_status()
+        return response.json()
+
     def health_check(self) -> bool:
         """Check if the API is reachable."""
         try:
