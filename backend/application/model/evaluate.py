@@ -7,7 +7,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from dataset import BusDataset
-from model import BusLSTM
+from model import BusLSTM, BusODELSTM
 
 try:
     import matplotlib
@@ -51,18 +51,31 @@ def evaluate_model(weights_path: Path, config_path: Path):
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    model = BusLSTM(
-        n_x1_dense_features=config["x1_dense_features"],
-        n_x2_dense_features=config["x2_dense_features"],
-        x1_cat_cardinalities=config["x1_cat_cards"],
-        x2_cat_cardinalities=config["x2_cat_cards"],
-        encoder_hidden_size=config["encoder_hidden_size"],
-        lstm_hidden_size=config["decoder_hidden_size"],
-        num_lstm_layers=config["num_lstm_layers"],
-    ).to(DEVICE)
+    arch = config.get("architecture", "lstm")
+    ModelClass = BusODELSTM if arch == "ode_lstm" else BusLSTM
+
+    model_kwargs = {
+        "n_x1_dense_features": config["x1_dense_features"],
+        "n_x2_dense_features": config["x2_dense_features"],
+        "x1_cat_cardinalities": config["x1_cat_cards"],
+        "x2_cat_cardinalities": config["x2_cat_cards"],
+        "encoder_hidden_size": config["encoder_hidden_size"],
+        "lstm_hidden_size": config["decoder_hidden_size"],
+    }
+
+    if arch == "lstm":
+        model_kwargs["num_lstm_layers"] = config.get("num_lstm_layers", 2)
+
+    model = ModelClass(**model_kwargs).to(DEVICE)
 
     # Caricamento dei pesi specifici
-    model.load_state_dict(torch.load(weights_path, map_location=DEVICE))
+    state_dict = torch.load(weights_path, map_location=DEVICE)
+
+    # Handle torch.compile() wrapper - strip _orig_mod. prefix if present
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict)
     model.eval()
     print(
         f"Modello armato e pronto. Loss originale: {config.get('loss_type', 'N/A').upper()}"
