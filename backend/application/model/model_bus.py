@@ -63,7 +63,7 @@ def train_bus_type_predictor(parquet_path: str, model_save_path: str):
 
 if __name__ == "__main__":
     # Inserisci i percorsi corretti del tuo ambiente
-    PERCORSO_DATASET = "dataset_pulito_2026.parquet" 
+    PERCORSO_DATASET = "dataset_lstm_final.parquet" 
     PERCORSO_SALVATAGGIO = "bus_type_predictor.pkl"
     
     train_bus_type_predictor(PERCORSO_DATASET, PERCORSO_SALVATAGGIO)
