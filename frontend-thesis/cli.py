@@ -4,12 +4,17 @@ ATAC Bus Delay Prediction CLI Tool.
 
 Interactively prompts for bus line, direction, date, and time,
 then finds the closest scheduled trip and queries the prediction API.
+
+Also supports:
+- Retrospective validation: --test-model YYYY-MM-DD
+- Live validation: --live-validate DD-MM-YYYY
 """
 
 import os
 import sys
 import json
 import argparse
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -19,7 +24,7 @@ import joblib
 
 from static_data import StaticDataFetcher
 from weather import get_weather_code, get_weather_description
-from api_client import APIClient
+from api_client import APIClient, LiveValidationClient
 
 
 def load_supported_routes(cli_dir: str) -> list[str]:
@@ -368,7 +373,9 @@ def display_validation(report: dict):
     print("-" * 80)
     print(f"Median RMSE:                {report['median_rmse']:.2f} s")
     print(f"Median MSE:                 {report['median_mse']:.2f} s²")
-    print(f"RMSE Range:                 [{report['min_rmse']:.2f}, {report['max_rmse']:.2f}]")
+    print(
+        f"RMSE Range:                 [{report['min_rmse']:.2f}, {report['max_rmse']:.2f}]"
+    )
     print("-" * 80)
     print(f"Log File:                   {report['log_file']}")
     print(f"Report File:                {report['report_file']}")
@@ -376,7 +383,9 @@ def display_validation(report: dict):
 
     if report["trips"]:
         print(f"\nTrip Samples (first 10 of {len(report['trips'])}):")
-        print(f"{'Route':>6} | {'Dir':>3} | {'Start':>10} | {'RMSE':>8} | {'N':>4} | {'Error'}")
+        print(
+            f"{'Route':>6} | {'Dir':>3} | {'Start':>10} | {'RMSE':>8} | {'N':>4} | {'Error'}"
+        )
         print("-" * 80)
         for trip in report["trips"][:10]:
             error_str = trip["error"] if trip["error"] else ""
@@ -389,6 +398,151 @@ def display_validation(report: dict):
                 f"{error_str}"
             )
         print("-" * 80)
+
+
+def display_live_status(data: dict):
+    """Display live validation status update."""
+    print(
+        f"\r[{datetime.now().strftime('%H:%M:%S')}] "
+        f"Validated: {data.get('total_validated', 0)}/{data.get('total_scheduled', 0)} "
+        f"| Pending: {data.get('total_pending', 0)}"
+        f"{'':20}",
+        end="",
+    )
+
+
+def display_trip_validated(data: dict):
+    """Display a trip validation result."""
+    print(
+        f"\n[{datetime.now().strftime('%H:%M:%S')}] Trip {data['trip_id']}: "
+        f"Route {data['route_id']} Dir {data['direction_id']} "
+        f"| RMSE: {data['rmse']:.1f}s "
+        f"| Measurements: {data['n_measurements']}"
+    )
+
+
+def display_live_completed(data: dict):
+    """Display live validation completion."""
+    print(f"\n\n{'=' * 60}")
+    print("LIVE VALIDATION COMPLETED")
+    print("=" * 60)
+    print(f"Total Validated:     {data.get('total_validated', 'N/A')}")
+    print(f"Median RMSE:         {data.get('median_rmse', 0):.2f}s")
+    print(f"Median MSE:          {data.get('median_mse', 0):.2f}s²")
+    print(f"Log File:            {data.get('log_file', 'N/A')}")
+    print(f"Report File:         {data.get('report_file', 'N/A')}")
+    print("=" * 60)
+
+
+def run_live_validation(api_client: APIClient, date: str):
+    """Run live validation with WebSocket updates."""
+    print(f"\n{'=' * 60}")
+    print(f"LIVE VALIDATION FOR {date}")
+    print("=" * 60)
+
+    print("\nScheduling live validation session...")
+    try:
+        session = api_client.validate_live_schedule(date)
+    except requests.HTTPError as e:
+        if e.response.status_code == 409:
+            detail = e.response.json().get("detail", {})
+            print(f"\nError: A session is already running")
+            print(f"  Session ID: {detail.get('session_id', 'unknown')}")
+            print(f"  Date: {detail.get('date', 'unknown')}")
+            print(f"  Status: {detail.get('status', 'unknown')}")
+            print("\nUse --live-stop to stop the current session first.")
+        else:
+            try:
+                detail = e.response.json().get("detail", str(e))
+            except Exception:
+                detail = e.response.text or str(e)
+            print(f"API Error ({e.response.status_code}): {detail}")
+        sys.exit(1)
+
+    session_id = session["session_id"]
+    print(f"Session ID: {session_id}")
+    print(f"Status: {session['status']}")
+    print(f"Scheduled trips: {session['total_scheduled']}")
+    print(f"Predicted trips: {session['total_predicted']}")
+    print(f"Auto-stops at: {session['stops_at']}")
+
+    print("\nConnecting to WebSocket for real-time updates...")
+    print("Press Ctrl+C to stop monitoring (session will continue on server).\n")
+
+    live_client = LiveValidationClient(api_client.base_url)
+
+    live_client.on_status(lambda d: display_live_status(d))
+    live_client.on_progress(lambda d: display_live_status(d))
+    live_client.on_trip_validated(lambda d: display_trip_validated(d))
+    live_client.on_completed(lambda d: display_live_completed(d))
+    live_client.on_error(lambda d: print(f"\nError: {d.get('error', 'Unknown error')}"))
+
+    try:
+        asyncio.run(live_client.connect(session_id))
+    except KeyboardInterrupt:
+        print("\n\nDisconnected from WebSocket.")
+        print("Session continues on server. Check status with --live-status.")
+
+    print(f"\nSession ID: {session_id}")
+
+
+def stop_live_validation(api_client: APIClient):
+    """Stop the current live validation session."""
+    print("Stopping live validation session...")
+    try:
+        result = api_client.validate_live_stop()
+        print(f"Session {result['session_id']} stopped.")
+        print(f"Status: {result['status']}")
+        print(f"Total validated: {result['total_validated']}")
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            print("No active session to stop.")
+        else:
+            try:
+                detail = e.response.json().get("detail", str(e))
+            except Exception:
+                detail = e.response.text or str(e)
+            print(f"API Error ({e.response.status_code}): {detail}")
+        sys.exit(1)
+
+
+def get_live_status(api_client: APIClient):
+    """Get and display current live validation status."""
+    try:
+        status = api_client.validate_live_status()
+
+        if not status.get("session_id"):
+            print("No active or recent live validation session.")
+            return
+
+        print(f"\n{'=' * 60}")
+        print("LIVE VALIDATION STATUS")
+        print("=" * 60)
+        print(f"Session ID:     {status['session_id']}")
+        print(f"Date:           {status['date']}")
+        print(f"Status:         {status['status']}")
+        print(f"Scheduled:      {status['total_scheduled']}")
+        print(f"Predicted:      {status['total_predicted']}")
+        print(f"Validated:      {status['total_validated']}")
+        print(f"Pending:        {status['total_pending']}")
+        print(f"Started at:     {status['started_at']}")
+        print(f"Stops at:       {status['stops_at']}")
+
+        if status["total_validated"] > 0:
+            print(f"\nDelay Metrics:")
+            print(f"  Median RMSE:  {status['median_rmse']:.2f}s")
+            print(f"  Min RMSE:     {status['min_rmse']:.2f}s")
+            print(f"  Max RMSE:     {status['max_rmse']:.2f}s")
+
+        print("=" * 60)
+
+    except requests.HTTPError as e:
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = e.response.text or str(e)
+        print(f"API Error ({e.response.status_code}): {detail}")
+        sys.exit(1)
 
 
 def main():
@@ -409,11 +563,52 @@ def main():
         "--test-model",
         type=str,
         metavar="YYYY-MM-DD",
-        help="Validate model against ground truth for a specific date",
+        help="Retrospective validation against ground truth for a date",
+    )
+    parser.add_argument(
+        "--live-validate",
+        type=str,
+        metavar="DD-MM-YYYY",
+        help="Start live validation session for a date",
+    )
+    parser.add_argument(
+        "--live-stop",
+        action="store_true",
+        help="Stop the current live validation session",
+    )
+    parser.add_argument(
+        "--live-status",
+        action="store_true",
+        help="Get status of current live validation session",
     )
     args = parser.parse_args()
 
     api_client = APIClient(args.api_url)
+
+    if args.live_validate:
+        try:
+            datetime.strptime(args.live_validate, "%d-%m-%Y")
+            api_date = args.live_validate
+        except ValueError:
+            try:
+                date_obj = datetime.strptime(args.live_validate, "%Y-%m-%d")
+                api_date = date_obj.strftime("%d-%m-%Y")
+            except ValueError:
+                print(
+                    f"Error: Invalid date format '{args.live_validate}'. Use DD-MM-YYYY."
+                )
+                sys.exit(1)
+
+        run_live_validation(api_client, api_date)
+        sys.exit(0)
+
+    if args.live_stop:
+        stop_live_validation(api_client)
+        sys.exit(0)
+
+    if args.live_status:
+        get_live_status(api_client)
+        sys.exit(0)
 
     if args.test_model:
         # Convert YYYY-MM-DD to DD-MM-YYYY for the API
@@ -426,7 +621,9 @@ def main():
                 datetime.strptime(args.test_model, "%d-%m-%Y")
                 api_date = args.test_model
             except ValueError:
-                print(f"Error: Invalid date format '{args.test_model}'. Use YYYY-MM-DD.")
+                print(
+                    f"Error: Invalid date format '{args.test_model}'. Use YYYY-MM-DD."
+                )
                 sys.exit(1)
 
         print(f"Validating model for date: {api_date}...")

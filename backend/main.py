@@ -285,8 +285,9 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
     import configparser
     import glob
     import asyncio
+    import uuid
     from datetime import datetime
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, field_validator
 
@@ -467,11 +468,54 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         log_file: str
         report_file: str
 
+    class LiveValidateScheduleRequest(BaseModel):
+        date: str
+
+        @field_validator("date")
+        @classmethod
+        def validate_date(cls, v):
+            try:
+                datetime.strptime(v, "%d-%m-%Y")
+                return v
+            except ValueError:
+                raise ValueError("date must be in DD-MM-YYYY format")
+
+    class LiveValidateScheduleResponse(BaseModel):
+        session_id: str
+        date: str
+        total_scheduled: int
+        total_predicted: int
+        status: str
+        started_at: str
+        stops_at: str
+
+    class LiveValidateStatusResponse(BaseModel):
+        session_id: Optional[str] = None
+        date: Optional[str] = None
+        status: Optional[str] = None
+        total_scheduled: int = 0
+        total_predicted: int = 0
+        total_validated: int = 0
+        total_pending: int = 0
+        median_mse: float = 0.0
+        median_rmse: float = 0.0
+        min_mse: float = 0.0
+        max_mse: float = 0.0
+        min_rmse: float = 0.0
+        max_rmse: float = 0.0
+        started_at: Optional[str] = None
+        stops_at: Optional[str] = None
+        log_file: Optional[str] = None
+        report_file: Optional[str] = None
+
     predictor: Optional[Predictor] = None
     available_models: list[ModelInfo] = []
     observatory = None
     city = None
     weather_service = None
+
+    current_live_session = None
+    bus_type_predictor = None
 
     def load_config_api() -> dict:
         config = configparser.ConfigParser()
@@ -1028,6 +1072,139 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
+
+    @app.post("/validate/live/schedule", response_model=LiveValidateScheduleResponse)
+    async def schedule_live_validation(request: LiveValidateScheduleRequest):
+        """Schedule and start a live validation session for a date."""
+        nonlocal current_live_session, bus_type_predictor
+
+        if predictor is None:
+            raise HTTPException(status_code=503, detail="Model not loaded")
+        if observatory is None:
+            raise HTTPException(status_code=503, detail="Observatory not loaded")
+
+        if current_live_session is not None and current_live_session.status in [
+            "predicting",
+            "monitoring",
+        ]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Session already running",
+                    "session_id": current_live_session.session_id,
+                    "date": current_live_session.target_date,
+                    "status": current_live_session.status,
+                },
+            )
+
+        from application.services.live_validator import LiveValidationSession
+        from application.services.bus_type_predictor import BusTypePredictor
+
+        if bus_type_predictor is None:
+            try:
+                bus_type_predictor = BusTypePredictor()
+            except FileNotFoundError:
+                pass
+
+        session_id = str(uuid.uuid4())
+
+        session = LiveValidationSession(
+            session_id=session_id,
+            target_date=request.date,
+            predictor=predictor,
+            observatory=observatory,
+            weather_service=weather_service,
+            bus_type_predictor=bus_type_predictor,
+        )
+
+        success = await session.start()
+
+        if not success:
+            raise HTTPException(
+                status_code=500, detail="Failed to start live validation session"
+            )
+
+        current_live_session = session
+
+        status = session.get_status()
+
+        return LiveValidateScheduleResponse(
+            session_id=session_id,
+            date=request.date,
+            total_scheduled=status.total_scheduled,
+            total_predicted=status.total_predicted,
+            status=status.status,
+            started_at=status.started_at,
+            stops_at=status.stops_at,
+        )
+
+    @app.post("/validate/live/stop")
+    async def stop_live_validation():
+        """Stop the current live validation session."""
+        nonlocal current_live_session
+
+        if current_live_session is None:
+            raise HTTPException(status_code=404, detail="No active session")
+
+        await current_live_session.stop()
+
+        status = current_live_session.get_status()
+
+        return {
+            "session_id": current_live_session.session_id,
+            "status": status.status,
+            "total_validated": status.total_validated,
+        }
+
+    @app.get("/validate/live/status", response_model=LiveValidateStatusResponse)
+    async def get_live_validation_status():
+        """Get the current live validation session status."""
+        if current_live_session is None:
+            return LiveValidateStatusResponse()
+
+        status = current_live_session.get_status()
+
+        return LiveValidateStatusResponse(
+            session_id=status.session_id,
+            date=status.date,
+            status=status.status,
+            total_scheduled=status.total_scheduled,
+            total_predicted=status.total_predicted,
+            total_validated=status.total_validated,
+            total_pending=status.total_pending,
+            median_mse=status.median_mse,
+            median_rmse=status.median_rmse,
+            min_mse=status.min_mse,
+            max_mse=status.max_mse,
+            min_rmse=status.min_rmse,
+            max_rmse=status.max_rmse,
+            started_at=status.started_at,
+            stops_at=status.stops_at,
+            log_file=status.log_file,
+            report_file=status.report_file,
+        )
+
+    @app.websocket("/validate/live/ws/{session_id}")
+    async def live_validation_websocket(websocket: WebSocket, session_id: str):
+        """WebSocket endpoint for real-time validation updates."""
+        if (
+            current_live_session is None
+            or current_live_session.session_id != session_id
+        ):
+            await websocket.close(code=4004, reason="Session not found")
+            return
+
+        await websocket.accept()
+
+        await current_live_session.add_websocket(websocket)
+
+        try:
+            while current_live_session.status in ["predicting", "monitoring"]:
+                await asyncio.sleep(1)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            current_live_session.remove_websocket(websocket)
 
     @app.get("/health")
     async def health():

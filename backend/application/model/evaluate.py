@@ -2,6 +2,8 @@ import os
 import json
 import torch
 import numpy as np
+import joblib
+import pandas as pd
 from torch.utils.data import DataLoader
 from pathlib import Path
 from collections import defaultdict
@@ -239,6 +241,113 @@ def evaluate_model(weights_path: Path, config_path: Path):
         print("\n[INFO] matplotlib non disponibile - immagine non salvata")
 
 
+def evaluate_gbdt_model(pkl_path: Path):
+    print(f"\n--- AVVIO VALUTAZIONE GBDT ---")
+    print(f"[*] Modello: {pkl_path.name}")
+
+    if not TEST_FILE_PATH.exists():
+        print(f"\n[ERRORE FATALE] File di test non trovato: {TEST_FILE_PATH}")
+        return
+
+    print("Caricamento dati di test...")
+    df = pd.read_parquet(str(TEST_FILE_PATH))
+
+    df = df.dropna(subset=["bus_type"])
+
+    features = ["route_id", "time_sin", "time_cos", "day_type"]
+    target = "bus_type"
+
+    missing = [f for f in features + [target] if f not in df.columns]
+    if missing:
+        print(f"\n[ERRORE] Colonne mancanti nel dataset: {missing}")
+        return
+
+    df_trips = df.iloc[::100].copy()
+    print(f"Trip unici estratti: {len(df_trips)}")
+
+    X = df_trips[features].copy()
+    y_true = df_trips[target].astype(int).values
+
+    categorical_features = ["route_id", "day_type"]
+    for col in categorical_features:
+        X[col] = X[col].astype("category")
+
+    print("Caricamento modello GBDT...")
+    model = joblib.load(pkl_path)
+
+    print("Predizione in corso...")
+    y_pred = model.predict(X)
+
+    accuracy = (y_pred == y_true).mean()
+    print(f"\n{'=' * 50}")
+    print("RISULTATI GBDT SU TEST SET")
+    print(f"{'=' * 50}")
+    print(f"Campioni testati     : {len(y_true)}")
+    print(f"Accuratezza Globale  : {accuracy * 100:.2f}%")
+    print(f"{'=' * 50}")
+
+    num_classes = max(y_true.max(), y_pred.max()) + 1
+    cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+    for true, pred in zip(y_true, y_pred):
+        cm[int(true), int(pred)] += 1
+
+    print("\n--- MATRICE DI CONFUSIONE BUS TYPE ---")
+    print("\nMatrice di Confusione (righe=reale, colonne=predetto):\n")
+    header = "     " + "  ".join([f"{i:>5}" for i in range(num_classes)])
+    print(header)
+    print("     " + "-" * (6 * num_classes))
+    for i in range(num_classes):
+        row_str = f"{i:>3} |" + "  ".join(
+            [f"{cm[i, j]:>5}" for j in range(num_classes)]
+        )
+        print(row_str)
+
+    print("\nStatistiche per classe:")
+    print(
+        f"{'Classe':<8} | {'Precision':<10} | {'Recall':<10} | {'F1-Score':<10} | {'Support':<10}"
+    )
+    print("-" * 55)
+
+    precisions = []
+    recalls = []
+    f1s = []
+
+    for cls in range(num_classes):
+        tp = cm[cls, cls]
+        fp = cm[:, cls].sum() - tp
+        fn = cm[cls, :].sum() - tp
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+        support = cm[cls, :].sum()
+
+        if (tp + fp) > 0:
+            precisions.append(precision)
+        if (tp + fn) > 0:
+            recalls.append(recall)
+        if (tp + fp) > 0 and (tp + fn) > 0 and (precision + recall) > 0:
+            f1s.append(f1)
+
+        print(
+            f"{cls:<8} | {precision:<10.3f} | {recall:<10.3f} | {f1:<10.3f} | {support:<10}"
+        )
+
+    print("-" * 55)
+    print(
+        f"{'Macro Avg':<8} | {np.mean(precisions):<10.3f} | {np.mean(recalls):<10.3f} | {np.mean(f1s):<10.3f} | {len(y_true):<10}"
+    )
+
+    if HAS_PLOTTING:
+        save_confusion_matrix_image(cm, num_classes, pkl_path.stem)
+    else:
+        print("\n[INFO] matplotlib non disponibile - immagine non salvata")
+
+
 def save_confusion_matrix_image(cm: np.ndarray, num_classes: int, model_name: str):
     """Salva la matrice di confusione come immagine PNG."""
 
@@ -291,38 +400,44 @@ def save_confusion_matrix_image(cm: np.ndarray, num_classes: int, model_name: st
 if __name__ == "__main__":
     print("\n--- LABORATORIO DI COLLAUDO ---")
 
-    # 1. Scansione modelli
-    modelli_disponibili = list(CURRENT_DIR.glob("bus_model_*.pth"))
+    lstm_models = list(CURRENT_DIR.glob("bus_model_*.pth"))
+    gbdt_models = list(CURRENT_DIR.glob("*.pkl"))
 
-    if not modelli_disponibili:
+    all_models = []
+    for p in lstm_models:
+        all_models.append(("LSTM", p))
+    for p in gbdt_models:
+        all_models.append(("GBDT", p))
+
+    if not all_models:
         print(
             "[ERRORE] Nessun modello trovato in questa cartella. Esegui prima train.py!"
         )
         exit()
 
-    # 2. Menu Interattivo
-    print("\nQuale Digital Twin vuoi testare?")
-    for idx, path_modello in enumerate(modelli_disponibili):
-        print(f"[{idx}] - {path_modello.name}")
+    print("\nModelli disponibili:")
+    for idx, (model_type, path_modello) in enumerate(all_models):
+        print(f"[{idx}] [{model_type}] - {path_modello.name}")
 
     try:
         scelta = int(input("\nInserisci il numero: "))
-        pesi_scelti = modelli_disponibili[scelta]
+        model_type, chosen_path = all_models[scelta]
 
-        # 3. Derivazione nome del JSON
-        nome_json = pesi_scelti.name.replace("bus_model_", "hyperparameters_").replace(
-            ".pth", ".json"
-        )
-        json_scelto = CURRENT_DIR / nome_json
+        if model_type == "LSTM":
+            nome_json = chosen_path.name.replace(
+                "bus_model_", "hyperparameters_"
+            ).replace(".pth", ".json")
+            json_path = CURRENT_DIR / nome_json
 
-        if not json_scelto.exists():
-            print(
-                f"\n[ERRORE] Impossibile trovare il file di configurazione associato: {nome_json}"
-            )
-            exit()
+            if not json_path.exists():
+                print(
+                    f"\n[ERRORE] Impossibile trovare il file di configurazione associato: {nome_json}"
+                )
+                exit()
 
-        # 4. Avvio valutazione
-        evaluate_model(weights_path=pesi_scelti, config_path=json_scelto)
+            evaluate_model(weights_path=chosen_path, config_path=json_path)
+        else:
+            evaluate_gbdt_model(pkl_path=chosen_path)
 
     except (IndexError, ValueError):
         print("\n[ERRORE] Selezione non valida.")
