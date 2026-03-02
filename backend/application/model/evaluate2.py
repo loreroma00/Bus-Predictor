@@ -47,7 +47,7 @@ def evaluate_model(weights_path: Path, config_path: Path):
 
     print("Caricamento nuovi dati spaziali in corso...")
     test_dataset = BusDataset(str(TEST_FILE_PATH))
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
     # 2. Caricamento Architettura Dinamica
     with open(config_path, "r", encoding="utf-8") as f:
@@ -137,11 +137,23 @@ def evaluate_model(weights_path: Path, config_path: Path):
 
             # --- ESTRAZIONE VISIVA (Dal primo batch) ---
             if i == 0:
+                # 1. Recuperiamo l'indice originale del primo viaggio del batch
+                # Assumendo che il tuo dataset mantenga l'ordine del DF originale
+                primo_viaggio_idx = 0 
+                
+                # 2. Estraiamo la riga dal dataframe originale per lo storytelling
+                # Moltiplichiamo per 100 perché ogni viaggio occupa 100 righe nel parquet
+                info_riga = test_dataset.df.iloc[primo_viaggio_idx * 100]
+                
+                route_id = info_riga.get('route_id', 'N/D')
+                start_time = info_riga.get('start_time', 'N/D')
+
                 # Salviamo la prima traiettoria per il fotoromanzo
                 fotoromanzo_reale = true_time_sec[0].cpu().numpy()
                 fotoromanzo_predetto = pred_time_sec[0].cpu().numpy()
                 
-                print("\n[ISPEZIONE VISIVA A CAMPIONE - Viaggio #0]")
+                print(f"\n[ISPEZIONE VISIVA A CAMPIONE - Viaggio #0]")
+                print(f"[*] Soggetto: Linea {route_id} (Partenza: {start_time})")
                 print(
                     f"{'Segmento':<10} | {'Reale (sec)':<15} | {'Previsto (sec)':<15} | {'Errore (sec)':<15} || {'Folla Reale':<15} | {'Folla Prevista':<15}"
                 )
