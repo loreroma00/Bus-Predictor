@@ -179,6 +179,9 @@ def evaluate_model(weights_path: Path, config_path: Path):
     )
     print(f"Errore Estremo (RMSE)     : {rmse:.1f} secondi")
     print(f"Accuratezza Folla         : {accuracy_crowd:.1f}%")
+    print(f"Varianza Errore Tempo    : {variance_time:.1f} s^2")
+    print(f"Deviazione Standard (sigma): {std_dev_time:.1f} secondi (+/- {std_dev_time / 60:.1f} minuti)")
+    print(f"Bias Medio (Errore Medio) : {mean_bias:.1f} secondi")
     print("=" * 50)
 
     # 5. Matrice di Confusione per Occupancy Status
