@@ -11,7 +11,7 @@ def train_bus_type_predictor(parquet_path: str, model_save_path: str):
     # Assicurati di puntare al dataset pulito (quello dal 22 Febbraio 2026 in poi!)
     print(f"Caricamento dati da {parquet_path}...")
     df = pd.read_parquet(parquet_path)
-    df = df.dropna(subset=[target])
+    df = df.dropna(subset=['bus_type'])
     
     # 2. FEATURE ENGINEERING (Il Layer Interno)
     # Selezioniamo solo le colonne che sappiamo a priori prima che il viaggio inizi
