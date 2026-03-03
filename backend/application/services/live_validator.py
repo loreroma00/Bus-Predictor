@@ -8,6 +8,7 @@ against ground truth data as diaries are completed.
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
@@ -117,6 +118,11 @@ class LiveValidationSession:
 
         try:
             scheduled_trips = self._get_scheduled_trips()
+            self.logger.info(
+                "Session start: date=%s, scheduled_trips=%d",
+                self.target_date,
+                len(scheduled_trips),
+            )
 
             if not scheduled_trips:
                 self.status = "failed"
@@ -124,8 +130,12 @@ class LiveValidationSession:
                 return False
 
             self.pending_trip_ids = {t["trip_id"] for t in scheduled_trips}
+            self.logger.info(
+                "Pending trip ids initialized: %d", len(self.pending_trip_ids)
+            )
 
             weather_code = self._get_weather_code(target_dt)
+            self.logger.info("Using weather_code=%s", weather_code)
 
             prediction_results = await self._run_predictions(
                 scheduled_trips, weather_code
@@ -278,6 +288,14 @@ class LiveValidationSession:
                         }
                     )
 
+        self.logger.info(
+            "Scheduled trips extracted for %s: %d",
+            self.target_date,
+            len(scheduled),
+        )
+        if scheduled:
+            preview = scheduled[:3]
+            self.logger.debug("Scheduled trips preview: %s", preview)
         return scheduled
 
     def _get_weather_code(self, target_dt: datetime) -> int:
@@ -318,6 +336,7 @@ class LiveValidationSession:
         results = {}
 
         try:
+            start_ts = time.perf_counter()
             prediction_requests = []
             for trip in trips:
                 prediction_requests.append(
@@ -331,7 +350,24 @@ class LiveValidationSession:
                     }
                 )
 
+            self.logger.info(
+                "Starting batch forecast for %d trips (weather_code=%s)",
+                len(prediction_requests),
+                weather_code,
+            )
+            if prediction_requests:
+                self.logger.debug(
+                    "Prediction requests preview: %s",
+                    prediction_requests[:3],
+                )
+
             forecasts = self.predictor.get_batch_forecast(prediction_requests)
+            elapsed = time.perf_counter() - start_ts
+            self.logger.info(
+                "Batch forecast completed: %d forecasts in %.2fs",
+                len(forecasts),
+                elapsed,
+            )
 
             for i, forecast in enumerate(forecasts):
                 trip_id = trips[i]["trip_id"]
@@ -339,8 +375,10 @@ class LiveValidationSession:
 
             self.logger.info(f"Predicted {len(results)} trips successfully")
 
-        except Exception as e:
-            self.logger.error(f"Batch prediction failed: {e}")
+        except Exception:
+            self.logger.exception("Batch prediction failed for %d trips", len(trips))
+            if trips:
+                self.logger.error("First trip in failed batch: %s", trips[0])
 
         return results
 

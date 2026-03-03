@@ -291,6 +291,11 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, field_validator
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
     sys.path.insert(0, str(PROJECT_ROOT / "application" / "model"))
     from predictor import Predictor, StopPrediction, TripForecast
 
