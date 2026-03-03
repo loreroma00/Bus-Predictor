@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import pandas as pd
 
-from model import BusLSTM
+from model import BusLSTM, BusODELSTM
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent.parent
@@ -70,21 +70,29 @@ class Predictor:
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
 
-        self.model = BusLSTM(
-            n_x1_dense_features=self.config["x1_dense_features"],
-            n_x2_dense_features=self.config["x2_dense_features"],
-            x1_cat_cardinalities=self.config["x1_cat_cards"],
-            x2_cat_cardinalities=self.config["x2_cat_cards"],
-            encoder_hidden_size=self.config["encoder_hidden_size"],
-            lstm_hidden_size=self.config["decoder_hidden_size"],
-            num_lstm_layers=self.config["num_lstm_layers"],
-        )
+        arch = self.config.get("architecture", "lstm")
+        model_class = BusODELSTM if arch == "ode_lstm" else BusLSTM
 
-        self.model.load_state_dict(
-            torch.load(
-                weights_path, map_location=torch.device("cpu"), weights_only=True
-            )
+        model_kwargs = {
+            "n_x1_dense_features": self.config["x1_dense_features"],
+            "n_x2_dense_features": self.config["x2_dense_features"],
+            "x1_cat_cardinalities": self.config["x1_cat_cards"],
+            "x2_cat_cardinalities": self.config["x2_cat_cards"],
+            "encoder_hidden_size": self.config["encoder_hidden_size"],
+            "lstm_hidden_size": self.config["decoder_hidden_size"],
+        }
+        if arch == "lstm":
+            model_kwargs["num_lstm_layers"] = self.config.get("num_lstm_layers", 2)
+
+        self.model = model_class(**model_kwargs)
+
+        state_dict = torch.load(
+            weights_path, map_location=torch.device("cpu"), weights_only=True
         )
+        if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
+        self.model.load_state_dict(state_dict)
         self.model.eval()
         print(f"Model loaded. Encoder hidden: {self.config['encoder_hidden_size']}")
 
