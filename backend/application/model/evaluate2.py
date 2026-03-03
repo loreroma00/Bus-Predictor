@@ -206,7 +206,108 @@ def evaluate_gbdt_model(pkl_path: Path):
     # Qui il codice della matrice (omesso per brevità, ma usa y_true corretto)
 
 
-# [INSERIRE QUI LE FUNZIONI plot_campana_errori E plot_fotoromanzo_viaggio DI PRIMA]
+# =====================================================================
+# MOTORI DI RENDERING GRAFICO
+# =====================================================================
+
+def save_confusion_matrix_image(cm: np.ndarray, num_classes: int, model_name: str):
+    """Salva la matrice di confusione come immagine PNG."""
+    cm_normalized = cm.astype("float") / cm.sum(axis=1, keepdims=True)
+    cm_normalized = np.nan_to_num(cm_normalized)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        ax=axes[0],
+        xticklabels=range(num_classes),
+        yticklabels=range(num_classes),
+        cbar_kws={"label": "Count"},
+    )
+    axes[0].set_xlabel("Predicted Class", fontsize=12)
+    axes[0].set_ylabel("True Class", fontsize=12)
+    axes[0].set_title(f"Confusion Matrix (Counts)\n{model_name}", fontsize=14)
+
+    sns.heatmap(
+        cm_normalized,
+        annot=True,
+        fmt=".2f",
+        cmap="Blues",
+        ax=axes[1],
+        xticklabels=range(num_classes),
+        yticklabels=range(num_classes),
+        cbar_kws={"label": "Proportion"},
+    )
+    axes[1].set_xlabel("Predicted Class", fontsize=12)
+    axes[1].set_ylabel("True Class", fontsize=12)
+    axes[1].set_title(f"Confusion Matrix (Normalized)\n{model_name}", fontsize=14)
+
+    plt.tight_layout()
+    output_path = CURRENT_DIR / f"confusion_matrix_{model_name}.png"
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"\n[OK] Matrice di confusione salvata: {output_path}")
+
+def plot_campana_errori(errori_secondi, save_path):
+    from scipy.stats import gaussian_kde
+    print("[*] Generazione grafico a campana in corso...")
+    
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
+    plt.style.use('seaborn-v0_8-whitegrid')
+    
+    limite = np.percentile(np.abs(errori_secondi), 95)
+    errori_filtrati = errori_secondi[(errori_secondi >= -limite) & (errori_secondi <= limite)]
+    
+    ax.hist(errori_filtrati, bins=60, density=True, alpha=0.4, color='#3498db', edgecolor='white')
+    
+    kde = gaussian_kde(errori_filtrati)
+    x_vals = np.linspace(min(errori_filtrati), max(errori_filtrati), 500)
+    ax.plot(x_vals, kde(x_vals), color='#2980b9', linewidth=2.5, label='Densità di Probabilità')
+    
+    ax.axvline(x=0, color='#e74c3c', linestyle='--', linewidth=2, zorder=5, label='Perfezione (Errore = 0s)')
+    
+    ax.set_title('Densità dell\'Errore di Predizione sul Ritardo', fontsize=14, weight='bold', pad=20)
+    ax.set_xlabel('Errore di Predizione (Secondi)', fontsize=12, weight='bold')
+    ax.set_ylabel('Frequenza (Densità)', fontsize=12, weight='bold')
+    
+    mae_reale = np.mean(np.abs(errori_secondi))
+    ax.annotate(f'MAE Globale: {mae_reale/60:.1f} min\nLa campana stretta dimostra\nche il grosso degli errori\nè concentrato vicino allo zero.',
+                xy=(0.02, 0.8), xycoords='axes fraction',
+                bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="#bdc3c7", lw=1),
+                fontsize=10, color='#2c3e50')
+
+    ax.legend(loc='upper right', frameon=True)
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close()
+    print(f"[+] Campana salvata in: {save_path.name}")
+
+def plot_fotoromanzo_viaggio(segmenti, ritardo_reale, ritardo_predetto, save_path):
+    print("[*] Generazione fotoromanzo spaziale in corso...")
+    
+    fig, ax = plt.subplots(figsize=(12, 5), dpi=300)
+    plt.style.use('seaborn-v0_8-whitegrid')
+    
+    ax.plot(segmenti, ritardo_reale, color='#7f8c8d', linestyle='--', linewidth=2.5, alpha=0.8, label='Ritardo Reale (Ground Truth)')
+    ax.plot(segmenti, ritardo_predetto, color='#2c3e50', linestyle='-', linewidth=3, label='Predizione Modello')
+    ax.fill_between(segmenti, ritardo_reale, ritardo_predetto, color='#e74c3c', alpha=0.15, label='Scarto (Errore)')
+    
+    ax.set_title('Inseguimento della Traiettoria: Analisi di un Singolo Viaggio', fontsize=14, weight='bold', pad=15)
+    ax.set_xlabel('Avanzamento Corsa (Indice del Segmento Spaziale 0-100)', fontsize=12, weight='bold')
+    ax.set_ylabel('Ritardo Cumulato (Secondi)', fontsize=12, weight='bold')
+    
+    ax.grid(True, linestyle=':', alpha=0.6)
+    ax.legend(loc='upper left', frameon=True)
+    ax.set_xlim(0, max(segmenti))
+    
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close()
+    print(f"[+] Fotoromanzo salvato in: {save_path.name}")
+
 
 if __name__ == "__main__":
     print("\n--- LABORATORIO DI COLLAUDO ---")
