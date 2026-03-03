@@ -293,24 +293,76 @@ def evaluate_model(weights_path: Path, config_path: Path):
 
 def evaluate_gbdt_model(pkl_path: Path):
     print(f"\n--- ANALISI GBDT: {pkl_path.name} ---")
-    df = pd.read_parquet(TEST_FILE_PATH).iloc[::100]  # Un punto per viaggio
+    df = pd.read_parquet(TEST_FILE_PATH)
 
-    route_col = "route" if "route" in df.columns else "route_id"
-    required_cols = [route_col, "time_sin", "time_cos", "day_type"]
+    encoder_path = PARQUET_DIR / "route_encoder.pkl"
+    route_encoder = None
+    try:
+        encoder_obj = joblib.load(encoder_path)
+        route_encoder = (
+            encoder_obj.get("route") if isinstance(encoder_obj, dict) else encoder_obj
+        )
+    except Exception:
+        route_encoder = None
+
+    if "route_id" not in df.columns:
+        if "route" not in df.columns:
+            raise KeyError(
+                "Colonna 'route_id' mancante e fallback 'route' non disponibile"
+            )
+        if route_encoder is None:
+            raise KeyError(
+                "Colonna 'route_id' mancante: serve route_encoder.pkl per derivarla da 'route'"
+            )
+
+        class_to_idx = {
+            str(label): idx for idx, label in enumerate(route_encoder.classes_)
+        }
+        mapped_route = df["route"].astype(str).map(class_to_idx)
+        unknown_count = int(mapped_route.isna().sum())
+        if unknown_count > 0:
+            print(
+                f"[!] Attenzione: {unknown_count} route non presenti nell'encoder. Verranno impostate a -1."
+            )
+            mapped_route = mapped_route.fillna(-1)
+        df["route_id"] = mapped_route.astype(np.int64)
+
+    required_cols = ["route_id", "time_sin", "time_cos", "day_type", "bus_type"]
     missing = [col for col in required_cols if col not in df.columns]
     if missing:
         raise KeyError(f"Colonne mancanti per test GBDT: {missing}")
 
-    X = df[required_cols].copy()
-    for col in [route_col, "day_type"]:
+    num_full_trips = len(df) // 100
+    if num_full_trips == 0:
+        raise ValueError("Dataset test GBDT vuoto o con meno di 100 record")
+    if len(df) % 100 != 0:
+        extra_rows = len(df) - (num_full_trips * 100)
+        print(
+            f"[!] Scarto {extra_rows} righe finali per allineare blocchi viaggio da 100"
+        )
+
+    df = df.iloc[: num_full_trips * 100].copy()
+    bus_type_matrix = df["bus_type"].to_numpy().reshape(num_full_trips, 100)
+    inconsistent_trips = np.where(
+        (bus_type_matrix != bus_type_matrix[:, [0]]).any(axis=1)
+    )[0]
+    if len(inconsistent_trips) > 0:
+        print(
+            f"[!] Trovati {len(inconsistent_trips)} viaggi con bus_type non costante nei 100 step. Uso il primo valore del viaggio."
+        )
+
+    df_trip = df.iloc[::100].copy()
+    X = df_trip[["route_id", "time_sin", "time_cos", "day_type"]].copy()
+    for col in ["route_id", "day_type"]:
         X[col] = X[col].astype("category")
 
-    # FIX SCALING: Riportiamo a 0-9
-    y_true = (df["bus_type"] * 9.0).round().astype(int).values
+    # FIX SCALING: Riportiamo a 0-9 (una sola volta per viaggio)
+    y_true = (bus_type_matrix[:, 0] * 9.0).round().astype(int)
 
     model = joblib.load(pkl_path)
     y_pred = model.predict(X)
 
+    print(f"Viaggi valutati (1 predizione per viaggio): {len(y_true)}")
     print(f"Accuratezza Tipo Bus: {(y_pred == y_true).mean() * 100:.2f}%")
     # Qui il codice della matrice (omesso per brevità, ma usa y_true corretto)
 
