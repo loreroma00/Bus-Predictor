@@ -295,8 +295,14 @@ def evaluate_gbdt_model(pkl_path: Path):
     print(f"\n--- ANALISI GBDT: {pkl_path.name} ---")
     df = pd.read_parquet(TEST_FILE_PATH).iloc[::100]  # Un punto per viaggio
 
-    X = df[["route", "time_sin", "time_cos", "day_type"]].copy()
-    for col in ["route", "day_type"]:
+    route_col = "route" if "route" in df.columns else "route_id"
+    required_cols = [route_col, "time_sin", "time_cos", "day_type"]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise KeyError(f"Colonne mancanti per test GBDT: {missing}")
+
+    X = df[required_cols].copy()
+    for col in [route_col, "day_type"]:
         X[col] = X[col].astype("category")
 
     # FIX SCALING: Riportiamo a 0-9
