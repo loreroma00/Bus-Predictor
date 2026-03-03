@@ -71,15 +71,18 @@ def evaluate_model(weights_path: Path, config_path: Path):
     arch = config.get("architecture", "lstm")
     ModelClass = BusODELSTM if arch == "ode_lstm" else BusLSTM
 
-    model = ModelClass(
-        n_x1_dense_features=config["x1_dense_features"],
-        n_x2_dense_features=config["x2_dense_features"],
-        x1_cat_cardinalities=config["x1_cat_cards"],
-        x2_cat_cardinalities=config["x2_cat_cards"],
-        encoder_hidden_size=config["encoder_hidden_size"],
-        lstm_hidden_size=config["decoder_hidden_size"],
-        num_lstm_layers=config.get("num_lstm_layers", 2) if arch == "lstm" else None,
-    ).to(DEVICE)
+    model_kwargs = {
+        "n_x1_dense_features": config["x1_dense_features"],
+        "n_x2_dense_features": config["x2_dense_features"],
+        "x1_cat_cardinalities": config["x1_cat_cards"],
+        "x2_cat_cardinalities": config["x2_cat_cards"],
+        "encoder_hidden_size": config["encoder_hidden_size"],
+        "lstm_hidden_size": config["decoder_hidden_size"],
+    }
+    if arch == "lstm":
+        model_kwargs["num_lstm_layers"] = config.get("num_lstm_layers", 2)
+
+    model = ModelClass(**model_kwargs).to(DEVICE)
 
     state_dict = torch.load(weights_path, map_location=DEVICE)
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
@@ -200,13 +203,72 @@ def evaluate_model(weights_path: Path, config_path: Path):
     print(
         f"Deviazione Standard: {np.std(errors_np):.1f}s | Bias: {np.mean(errors_np):.1f}s"
     )
-    print(f"Accuratezza Folla: {(total_crowd_correct / total_samples) * 100:.1f}%")
+    accuracy_crowd = (total_crowd_correct / total_samples) * 100
+    print(f"Accuratezza Folla: {accuracy_crowd:.1f}%")
     print("=" * 50)
+
+    all_true_crowd_np = np.concatenate(all_true_crowd)
+    all_pred_crowd_np = np.concatenate(all_pred_crowd)
+    num_classes = int(max(all_true_crowd_np.max(), all_pred_crowd_np.max()) + 1)
+    cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+    for true_class, pred_class in zip(all_true_crowd_np, all_pred_crowd_np):
+        cm[int(true_class), int(pred_class)] += 1
+
+    print("\n--- MATRICE DI CONFUSIONE OCCUPANCY STATUS ---")
+    print("\nMatrice di Confusione (righe=reale, colonne=predetto):\n")
+    header = "     " + "  ".join([f"{i:>5}" for i in range(num_classes)])
+    print(header)
+    print("     " + "-" * (6 * num_classes))
+    for i in range(num_classes):
+        row_str = f"{i:>3} |" + "  ".join(
+            [f"{cm[i, j]:>5}" for j in range(num_classes)]
+        )
+        print(row_str)
+
+    print("\nStatistiche per classe:")
+    print(
+        f"{'Classe':<8} | {'Precision':<10} | {'Recall':<10} | {'F1-Score':<10} | {'Support':<10}"
+    )
+    print("-" * 55)
+
+    precisions = []
+    recalls = []
+    f1s = []
+    for cls in range(num_classes):
+        tp = cm[cls, cls]
+        fp = cm[:, cls].sum() - tp
+        fn = cm[cls, :].sum() - tp
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+        support = cm[cls, :].sum()
+
+        if (tp + fp) > 0:
+            precisions.append(precision)
+        if (tp + fn) > 0:
+            recalls.append(recall)
+        if (tp + fp) > 0 and (tp + fn) > 0 and (precision + recall) > 0:
+            f1s.append(f1)
+
+        print(
+            f"{cls:<8} | {precision:<10.3f} | {recall:<10.3f} | {f1:<10.3f} | {support:<10}"
+        )
+
+    print("-" * 55)
+    print(
+        f"{'Macro Avg':<8} | {np.mean(precisions):<10.3f} | {np.mean(recalls):<10.3f} | {np.mean(f1s):<10.3f} | {len(all_true_crowd_np):<10}"
+    )
+    save_confusion_matrix_csv(cm, weights_path.stem)
 
     save_route_metrics_report(route_metrics, route_decoder, weights_path.stem)
 
     if HAS_PLOTTING:
         nome = weights_path.stem
+        save_confusion_matrix_image(cm, num_classes, nome)
         plot_campana_errori(errors_np, CURRENT_DIR / f"campana_{nome}.png")
         plot_fotoromanzo_viaggio(
             np.arange(100),
@@ -360,6 +422,13 @@ def save_route_metrics_report(route_metrics, route_decoder, model_name: str):
     md_path.write_text("\n".join(md_lines), encoding="utf-8")
     print(f"[OK] Report metriche per-route salvato: {md_path}")
     print(f"[OK] Report CSV per-route salvato: {csv_path}")
+
+
+def save_confusion_matrix_csv(cm: np.ndarray, model_name: str):
+    output_path = CURRENT_DIR / f"confusion_matrix_{model_name}.csv"
+    df_cm = pd.DataFrame(cm)
+    df_cm.to_csv(output_path, index_label="true_class")
+    print(f"[OK] Matrice di confusione CSV salvata: {output_path}")
 
 
 # =====================================================================
