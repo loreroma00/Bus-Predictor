@@ -66,6 +66,10 @@ class Predictor:
             self.h3_encoder = json.load(f)
 
         self.static_map = pd.read_parquet(static_path)
+        self.static_map["route_id_norm"] = self.static_map["route_id"].astype(str)
+        self.static_map["direction_id_norm"] = self.static_map["direction_id"].astype(
+            str
+        )
 
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
@@ -95,6 +99,13 @@ class Predictor:
         self.model.load_state_dict(state_dict)
         self.model.eval()
         print(f"Model loaded. Encoder hidden: {self.config['encoder_hidden_size']}")
+
+    def has_trip_template(self, route_id: str, direction_id: Any) -> bool:
+        trip_static = self.static_map[
+            (self.static_map["route_id_norm"] == str(route_id))
+            & (self.static_map["direction_id_norm"] == str(direction_id))
+        ]
+        return not trip_static.empty and len(trip_static) == BATCH_SIZE
 
     def _get_day_type(self, d: date) -> int:
         weekday = d.weekday()
@@ -162,8 +173,8 @@ class Predictor:
         bus_type: int,
     ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
         trip_static = self.static_map[
-            (self.static_map["route_id"] == route_id)
-            & (self.static_map["direction_id"] == direction_id)
+            (self.static_map["route_id_norm"] == str(route_id))
+            & (self.static_map["direction_id_norm"] == str(direction_id))
         ]
 
         if trip_static.empty or len(trip_static) != 100:
@@ -281,11 +292,6 @@ class Predictor:
             delays: (N, 100) - delay in seconds for each segment
             crowd: (N, 100) - crowd level for each segment
         """
-        # Encode route_ids
-        for i in range(len(x1_cat_batch)):
-            route_id_str = x1_cat_batch[i, 0]
-            x1_cat_batch[i, 0] = self.route_encoder.get(str(route_id_str), 0)
-
         # Normalize x1_dense
         x1_dense_batch[:, 13] = np.clip(x1_dense_batch[:, 13], 1, 3) / 3.0
 
@@ -340,19 +346,24 @@ class Predictor:
         if not trips:
             return []
 
-        n_trips = len(trips)
-
         # 1. Validate all trips and collect metadata
         trip_metadata = []
         invalid_trips = []
 
         for idx, trip in enumerate(trips):
-            route_id = trip["route_id"]
+            route_id = str(trip["route_id"])
             direction_id = trip["direction_id"]
+            try:
+                direction_id = int(direction_id)
+            except (TypeError, ValueError):
+                invalid_trips.append(
+                    f"Trip {idx}: route_id={route_id}, direction_id={direction_id} (invalid direction_id)"
+                )
+                continue
 
             trip_static = self.static_map[
-                (self.static_map["route_id"] == route_id)
-                & (self.static_map["direction_id"] == direction_id)
+                (self.static_map["route_id_norm"] == route_id)
+                & (self.static_map["direction_id_norm"] == str(direction_id))
             ]
 
             if trip_static.empty or len(trip_static) != BATCH_SIZE:
@@ -373,6 +384,7 @@ class Predictor:
                     "idx": idx,
                     "route_id": route_id,
                     "direction_id": direction_id,
+                    "route_id_encoded": int(self.route_encoder.get(route_id, 0)),
                     "trip_date": trip["start_date"],
                     "start_time": trip["start_time"],
                     "time_seconds": time_seconds,
@@ -386,6 +398,8 @@ class Predictor:
         if invalid_trips:
             raise ValueError(f"Invalid trips found:\n" + "\n".join(invalid_trips))
 
+        n_trips = len(trip_metadata)
+
         # 2. Build batch tensors
         x1_cat_batch = np.zeros((n_trips, 5), dtype=np.int64)
         x1_dense_batch = np.zeros((n_trips, 16), dtype=np.float32)
@@ -397,11 +411,11 @@ class Predictor:
 
             # x1_cat: [route_id, direction_id, day_type, weather_code, bus_type]
             x1_cat_batch[i] = [
-                meta["route_id"],
-                meta["direction_id"],
-                meta["day_type"],
-                meta["weather_code"],
-                meta["bus_type"],
+                int(meta["route_id_encoded"]),
+                int(meta["direction_id"]),
+                int(meta["day_type"]),
+                int(meta["weather_code"]),
+                int(meta["bus_type"]),
             ]
 
             # x1_dense: 13 zeros + [3.0, time_sin, time_cos]

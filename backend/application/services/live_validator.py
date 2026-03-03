@@ -277,12 +277,22 @@ class LiveValidationSession:
                     start_time = (
                         arrival_time[:5] if len(arrival_time) >= 5 else arrival_time
                     )
+                    direction_id = trip.direction_id
+                    try:
+                        direction_id = int(direction_id)
+                    except (TypeError, ValueError):
+                        self.logger.warning(
+                            "Skipping trip %s: invalid direction_id=%s",
+                            trip_id,
+                            direction_id,
+                        )
+                        continue
 
                     scheduled.append(
                         {
                             "trip_id": trip_id,
                             "route_id": trip.route.id,
-                            "direction_id": trip.direction_id,
+                            "direction_id": direction_id,
                             "start_time": start_time,
                             "start_date": self.target_date,
                         }
@@ -337,8 +347,26 @@ class LiveValidationSession:
 
         try:
             start_ts = time.perf_counter()
+            valid_trips = []
             prediction_requests = []
+            skipped_unsupported = 0
             for trip in trips:
+                if not self.predictor.has_trip_template(
+                    trip["route_id"], trip["direction_id"]
+                ):
+                    skipped_unsupported += 1
+                    trip_id = trip["trip_id"]
+                    self.failed_trip_ids.add(trip_id)
+                    self.pending_trip_ids.discard(trip_id)
+                    self.logger.warning(
+                        "Skipping trip without canonical template: trip_id=%s route_id=%s direction_id=%s",
+                        trip_id,
+                        trip["route_id"],
+                        trip["direction_id"],
+                    )
+                    continue
+
+                valid_trips.append(trip)
                 prediction_requests.append(
                     {
                         "route_id": trip["route_id"],
@@ -351,27 +379,63 @@ class LiveValidationSession:
                 )
 
             self.logger.info(
-                "Starting batch forecast for %d trips (weather_code=%s)",
+                "Prepared live prediction requests: total=%d valid=%d skipped_unsupported=%d",
+                len(trips),
                 len(prediction_requests),
-                weather_code,
+                skipped_unsupported,
             )
+
+            if not prediction_requests:
+                self.logger.warning(
+                    "No valid trips to predict after template filtering"
+                )
+                return results
+
             if prediction_requests:
                 self.logger.debug(
                     "Prediction requests preview: %s",
                     prediction_requests[:3],
                 )
 
-            forecasts = self.predictor.get_batch_forecast(prediction_requests)
+            chunk_size = 512
+            total_forecasts = 0
+            for chunk_start in range(0, len(prediction_requests), chunk_size):
+                chunk_end = min(chunk_start + chunk_size, len(prediction_requests))
+                chunk_requests = prediction_requests[chunk_start:chunk_end]
+                chunk_trips = valid_trips[chunk_start:chunk_end]
+
+                self.logger.info(
+                    "Running forecast chunk %d-%d/%d",
+                    chunk_start + 1,
+                    chunk_end,
+                    len(prediction_requests),
+                )
+
+                try:
+                    forecasts = self.predictor.get_batch_forecast(chunk_requests)
+                except Exception:
+                    self.logger.exception(
+                        "Chunk prediction failed for range %d-%d",
+                        chunk_start + 1,
+                        chunk_end,
+                    )
+                    for failed_trip in chunk_trips:
+                        trip_id = failed_trip["trip_id"]
+                        self.failed_trip_ids.add(trip_id)
+                        self.pending_trip_ids.discard(trip_id)
+                    continue
+
+                total_forecasts += len(forecasts)
+                for i, forecast in enumerate(forecasts):
+                    trip_id = chunk_trips[i]["trip_id"]
+                    results[trip_id] = forecast
+
             elapsed = time.perf_counter() - start_ts
             self.logger.info(
                 "Batch forecast completed: %d forecasts in %.2fs",
-                len(forecasts),
+                total_forecasts,
                 elapsed,
             )
-
-            for i, forecast in enumerate(forecasts):
-                trip_id = trips[i]["trip_id"]
-                results[trip_id] = forecast
 
             self.logger.info(f"Predicted {len(results)} trips successfully")
 
