@@ -84,7 +84,7 @@ class APIClient:
         """
         url = f"{self.base_url}/validate/live/schedule"
         payload = {"date": date}
-        response = requests.post(url, json=payload, timeout=300)
+        response = requests.post(url, json=payload, timeout=600)
         response.raise_for_status()
         return response.json()
 

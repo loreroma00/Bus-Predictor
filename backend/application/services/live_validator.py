@@ -283,9 +283,27 @@ class LiveValidationSession:
         """Extract all trips scheduled for the target date."""
         target_dt = datetime.strptime(self.target_date, "%d-%m-%Y")
         date_yyyymmdd = target_dt.strftime("%Y%m%d")
+        now_dt = datetime.now()
+        apply_today_cutoff = target_dt.date() == now_dt.date()
+
+        def _parse_start_minutes(start_hhmm: str) -> Optional[int]:
+            if not start_hhmm or ":" not in start_hhmm:
+                return None
+            try:
+                hh_str, mm_str = start_hhmm.split(":", 1)
+                hh = int(hh_str)
+                mm = int(mm_str)
+            except (TypeError, ValueError):
+                return None
+            if mm < 0 or mm > 59 or hh < 0:
+                return None
+            return hh * 60 + mm
+
+        cutoff_minutes = now_dt.hour * 60 + now_dt.minute
 
         ledger = self.observatory.get_ledger()
         scheduled = []
+        skipped_started = 0
 
         for trip_id, trip in ledger["trips"].items():
             if date_yyyymmdd in trip.dates:
@@ -296,6 +314,20 @@ class LiveValidationSession:
                     start_time = (
                         arrival_time[:5] if len(arrival_time) >= 5 else arrival_time
                     )
+
+                    if apply_today_cutoff:
+                        start_minutes = _parse_start_minutes(start_time)
+                        if start_minutes is None:
+                            self.logger.warning(
+                                "Skipping trip %s: invalid start_time=%s",
+                                trip_id,
+                                start_time,
+                            )
+                            continue
+                        if start_minutes < cutoff_minutes:
+                            skipped_started += 1
+                            continue
+
                     direction_id = trip.direction_id
                     try:
                         direction_id = int(direction_id)
@@ -322,6 +354,13 @@ class LiveValidationSession:
             self.target_date,
             len(scheduled),
         )
+        if apply_today_cutoff:
+            self.logger.info(
+                "Applied live cutoff for today: now=%02d:%02d, skipped_already_started=%d",
+                now_dt.hour,
+                now_dt.minute,
+                skipped_started,
+            )
         if scheduled:
             preview = scheduled[:3]
             self.logger.debug("Scheduled trips preview: %s", preview)
