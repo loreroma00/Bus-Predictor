@@ -95,6 +95,10 @@ def evaluate_model(weights_path: Path, config_path: Path):
     all_time_errors = []
     all_true_crowd, all_pred_crowd = [], []
     fotoromanzo_reale, fotoromanzo_predetto = None, None
+    sum_true_profile = None
+    sum_pred_profile = None
+    n_trips_profile = 0
+    route_metrics = defaultdict(lambda: {"errors": [], "y_true": [], "y_pred": []})
 
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
@@ -106,6 +110,17 @@ def evaluate_model(weights_path: Path, config_path: Path):
             # Conversione in secondi
             pred_time_sec = pred_time.squeeze(-1) * 3600.0
             true_time_sec = y_time.squeeze(-1) * 3600.0
+
+            pred_batch_np = pred_time_sec.cpu().numpy()
+            true_batch_np = true_time_sec.cpu().numpy()
+
+            if sum_true_profile is None:
+                sum_true_profile = np.zeros(true_batch_np.shape[1], dtype=np.float64)
+                sum_pred_profile = np.zeros(pred_batch_np.shape[1], dtype=np.float64)
+
+            sum_true_profile += true_batch_np.sum(axis=0)
+            sum_pred_profile += pred_batch_np.sum(axis=0)
+            n_trips_profile += true_batch_np.shape[0]
 
             # Accumulo Errori
             err_batch = (pred_time_sec - true_time_sec).cpu().numpy().flatten()
@@ -119,6 +134,17 @@ def evaluate_model(weights_path: Path, config_path: Path):
             all_true_crowd.append(y_crowd.cpu().numpy().flatten())
             all_pred_crowd.append(pred_crowd_classes.cpu().numpy().flatten())
             total_samples += y_time.numel()
+
+            route_ids_batch = x1_cat[:, 0].detach().cpu().numpy().astype(np.int64)
+            pred_crowd_batch_np = pred_crowd_classes.detach().cpu().numpy()
+            true_crowd_batch_np = y_crowd.detach().cpu().numpy()
+            err_batch_2d = pred_batch_np - true_batch_np
+
+            for trip_idx, route_id_enc in enumerate(route_ids_batch):
+                per_route = route_metrics[int(route_id_enc)]
+                per_route["errors"].extend(err_batch_2d[trip_idx].tolist())
+                per_route["y_true"].extend(true_crowd_batch_np[trip_idx].tolist())
+                per_route["y_pred"].extend(pred_crowd_batch_np[trip_idx].tolist())
 
             # --- ESTRAZIONE FOTOROMANZO (Soggetto Unico) ---
             if i == 0:
@@ -177,6 +203,8 @@ def evaluate_model(weights_path: Path, config_path: Path):
     print(f"Accuratezza Folla: {(total_crowd_correct / total_samples) * 100:.1f}%")
     print("=" * 50)
 
+    save_route_metrics_report(route_metrics, route_decoder, weights_path.stem)
+
     if HAS_PLOTTING:
         nome = weights_path.stem
         plot_campana_errori(errors_np, CURRENT_DIR / f"campana_{nome}.png")
@@ -186,6 +214,19 @@ def evaluate_model(weights_path: Path, config_path: Path):
             fotoromanzo_predetto,
             CURRENT_DIR / f"fotoromanzo_{nome}.png",
         )
+        if (
+            n_trips_profile > 0
+            and sum_true_profile is not None
+            and sum_pred_profile is not None
+        ):
+            avg_true_profile = sum_true_profile / n_trips_profile
+            avg_pred_profile = sum_pred_profile / n_trips_profile
+            plot_fotoromanzo_medio(
+                np.arange(len(avg_true_profile)),
+                avg_true_profile,
+                avg_pred_profile,
+                CURRENT_DIR / f"fotoromanzo_medio_{nome}.png",
+            )
 
 
 def evaluate_gbdt_model(pkl_path: Path):
@@ -206,9 +247,125 @@ def evaluate_gbdt_model(pkl_path: Path):
     # Qui il codice della matrice (omesso per brevità, ma usa y_true corretto)
 
 
+def _compute_macro_precision_recall_f1(y_true: np.ndarray, y_pred: np.ndarray):
+    if y_true.size == 0:
+        return 0.0, 0.0, 0.0
+
+    num_classes = int(max(y_true.max(), y_pred.max()) + 1)
+    cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+    for true_class, pred_class in zip(y_true, y_pred):
+        cm[int(true_class), int(pred_class)] += 1
+
+    precisions = []
+    recalls = []
+    f1_scores = []
+
+    for cls in range(num_classes):
+        tp = cm[cls, cls]
+        fp = cm[:, cls].sum() - tp
+        fn = cm[cls, :].sum() - tp
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+
+        if (tp + fp) > 0:
+            precisions.append(precision)
+        if (tp + fn) > 0:
+            recalls.append(recall)
+        if (tp + fp) > 0 and (tp + fn) > 0 and (precision + recall) > 0:
+            f1_scores.append(f1)
+
+    macro_precision = float(np.mean(precisions)) if precisions else 0.0
+    macro_recall = float(np.mean(recalls)) if recalls else 0.0
+    macro_f1 = float(np.mean(f1_scores)) if f1_scores else 0.0
+    return macro_precision, macro_recall, macro_f1
+
+
+def _decode_route_name(route_decoder, route_id_encoded: int):
+    if route_decoder is None:
+        return f"ID {route_id_encoded}"
+
+    try:
+        return str(route_decoder.inverse_transform([int(route_id_encoded)])[0])
+    except Exception:
+        return f"ID {route_id_encoded}"
+
+
+def save_route_metrics_report(route_metrics, route_decoder, model_name: str):
+    rows = []
+    for route_id_encoded in sorted(route_metrics.keys()):
+        route_data = route_metrics[route_id_encoded]
+        errors = np.asarray(route_data["errors"], dtype=np.float64)
+        y_true = np.asarray(route_data["y_true"], dtype=np.int64)
+        y_pred = np.asarray(route_data["y_pred"], dtype=np.int64)
+
+        if errors.size == 0:
+            continue
+
+        macro_precision, macro_recall, macro_f1 = _compute_macro_precision_recall_f1(
+            y_true, y_pred
+        )
+        occupancy_precision_pct = (
+            float((y_true == y_pred).mean() * 100.0) if y_true.size > 0 else 0.0
+        )
+
+        rows.append(
+            {
+                "route_id_encoded": int(route_id_encoded),
+                "route": _decode_route_name(route_decoder, route_id_encoded),
+                "samples": int(errors.size),
+                "precision_macro": macro_precision,
+                "recall_macro": macro_recall,
+                "f1_macro": macro_f1,
+                "sigma_s": float(np.std(errors)),
+                "mae_s": float(np.mean(np.abs(errors))),
+                "rmse_s": float(np.sqrt(np.mean(errors**2))),
+                "bias_s": float(np.mean(errors)),
+                "occupancy_precision_pct": occupancy_precision_pct,
+            }
+        )
+
+    if not rows:
+        print("[!] Nessuna metrica per-route da salvare.")
+        return
+
+    df_report = pd.DataFrame(rows).sort_values(by=["route_id_encoded"], ascending=True)
+
+    csv_path = CURRENT_DIR / f"route_metrics_{model_name}.csv"
+    md_path = CURRENT_DIR / f"route_metrics_{model_name}.md"
+    df_report.to_csv(csv_path, index=False)
+
+    md_lines = [
+        f"# Report metriche per route - {model_name}",
+        "",
+        "Metriche occupancy (precision/recall/f1) calcolate con media macro, come nel report globale.",
+        "",
+        "| route_id_encoded | route | samples | precision_macro | recall_macro | f1_macro | sigma_s | mae_s | rmse_s | bias_s | occupancy_precision_pct |",
+        "|---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+
+    for row in df_report.itertuples(index=False):
+        md_lines.append(
+            f"| {row.route_id_encoded} | {row.route} | {row.samples} | "
+            f"{row.precision_macro:.4f} | {row.recall_macro:.4f} | {row.f1_macro:.4f} | "
+            f"{row.sigma_s:.2f} | {row.mae_s:.2f} | {row.rmse_s:.2f} | {row.bias_s:.2f} | "
+            f"{row.occupancy_precision_pct:.2f} |"
+        )
+
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
+    print(f"[OK] Report metriche per-route salvato: {md_path}")
+    print(f"[OK] Report CSV per-route salvato: {csv_path}")
+
+
 # =====================================================================
 # MOTORI DI RENDERING GRAFICO
 # =====================================================================
+
 
 def save_confusion_matrix_image(cm: np.ndarray, num_classes: int, model_name: str):
     """Salva la matrice di confusione come immagine PNG."""
@@ -251,62 +408,184 @@ def save_confusion_matrix_image(cm: np.ndarray, num_classes: int, model_name: st
     plt.close()
     print(f"\n[OK] Matrice di confusione salvata: {output_path}")
 
+
 def plot_campana_errori(errori_secondi, save_path):
     from scipy.stats import gaussian_kde
+
     print("[*] Generazione grafico a campana in corso...")
-    
+
     fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
-    plt.style.use('seaborn-v0_8-whitegrid')
-    
+    plt.style.use("seaborn-v0_8-whitegrid")
+
     limite = np.percentile(np.abs(errori_secondi), 95)
-    errori_filtrati = errori_secondi[(errori_secondi >= -limite) & (errori_secondi <= limite)]
-    
-    ax.hist(errori_filtrati, bins=60, density=True, alpha=0.4, color='#3498db', edgecolor='white')
-    
+    errori_filtrati = errori_secondi[
+        (errori_secondi >= -limite) & (errori_secondi <= limite)
+    ]
+
+    ax.hist(
+        errori_filtrati,
+        bins=60,
+        density=True,
+        alpha=0.4,
+        color="#3498db",
+        edgecolor="white",
+    )
+
     kde = gaussian_kde(errori_filtrati)
     x_vals = np.linspace(min(errori_filtrati), max(errori_filtrati), 500)
-    ax.plot(x_vals, kde(x_vals), color='#2980b9', linewidth=2.5, label='Densità di Probabilità')
-    
-    ax.axvline(x=0, color='#e74c3c', linestyle='--', linewidth=2, zorder=5, label='Perfezione (Errore = 0s)')
-    
-    ax.set_title('Densità dell\'Errore di Predizione sul Ritardo', fontsize=14, weight='bold', pad=20)
-    ax.set_xlabel('Errore di Predizione (Secondi)', fontsize=12, weight='bold')
-    ax.set_ylabel('Frequenza (Densità)', fontsize=12, weight='bold')
-    
-    mae_reale = np.mean(np.abs(errori_secondi))
-    ax.annotate(f'MAE Globale: {mae_reale/60:.1f} min\nLa campana stretta dimostra\nche il grosso degli errori\nè concentrato vicino allo zero.',
-                xy=(0.02, 0.8), xycoords='axes fraction',
-                bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="#bdc3c7", lw=1),
-                fontsize=10, color='#2c3e50')
+    ax.plot(
+        x_vals,
+        kde(x_vals),
+        color="#2980b9",
+        linewidth=2.5,
+        label="Densità di Probabilità",
+    )
 
-    ax.legend(loc='upper right', frameon=True)
+    ax.axvline(
+        x=0,
+        color="#e74c3c",
+        linestyle="--",
+        linewidth=2,
+        zorder=5,
+        label="Perfezione (Errore = 0s)",
+    )
+
+    ax.set_title(
+        "Densità dell'Errore di Predizione sul Ritardo",
+        fontsize=14,
+        weight="bold",
+        pad=20,
+    )
+    ax.set_xlabel("Errore di Predizione (Secondi)", fontsize=12, weight="bold")
+    ax.set_ylabel("Frequenza (Densità)", fontsize=12, weight="bold")
+
+    mae_reale = np.mean(np.abs(errori_secondi))
+    ax.annotate(
+        f"MAE Globale: {mae_reale / 60:.1f} min\nLa campana stretta dimostra\nche il grosso degli errori\nè concentrato vicino allo zero.",
+        xy=(0.02, 0.8),
+        xycoords="axes fraction",
+        bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="#bdc3c7", lw=1),
+        fontsize=10,
+        color="#2c3e50",
+    )
+
+    ax.legend(loc="upper right", frameon=True)
     plt.tight_layout()
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path, bbox_inches="tight")
     plt.close()
     print(f"[+] Campana salvata in: {save_path.name}")
 
+
 def plot_fotoromanzo_viaggio(segmenti, ritardo_reale, ritardo_predetto, save_path):
     print("[*] Generazione fotoromanzo spaziale in corso...")
-    
+
     fig, ax = plt.subplots(figsize=(12, 5), dpi=300)
-    plt.style.use('seaborn-v0_8-whitegrid')
-    
-    ax.plot(segmenti, ritardo_reale, color='#7f8c8d', linestyle='--', linewidth=2.5, alpha=0.8, label='Ritardo Reale (Ground Truth)')
-    ax.plot(segmenti, ritardo_predetto, color='#2c3e50', linestyle='-', linewidth=3, label='Predizione Modello')
-    ax.fill_between(segmenti, ritardo_reale, ritardo_predetto, color='#e74c3c', alpha=0.15, label='Scarto (Errore)')
-    
-    ax.set_title('Inseguimento della Traiettoria: Analisi di un Singolo Viaggio', fontsize=14, weight='bold', pad=15)
-    ax.set_xlabel('Avanzamento Corsa (Indice del Segmento Spaziale 0-100)', fontsize=12, weight='bold')
-    ax.set_ylabel('Ritardo Cumulato (Secondi)', fontsize=12, weight='bold')
-    
-    ax.grid(True, linestyle=':', alpha=0.6)
-    ax.legend(loc='upper left', frameon=True)
+    plt.style.use("seaborn-v0_8-whitegrid")
+
+    ax.plot(
+        segmenti,
+        ritardo_reale,
+        color="#7f8c8d",
+        linestyle="--",
+        linewidth=2.5,
+        alpha=0.8,
+        label="Ritardo Reale (Ground Truth)",
+    )
+    ax.plot(
+        segmenti,
+        ritardo_predetto,
+        color="#2c3e50",
+        linestyle="-",
+        linewidth=3,
+        label="Predizione Modello",
+    )
+    ax.fill_between(
+        segmenti,
+        ritardo_reale,
+        ritardo_predetto,
+        color="#e74c3c",
+        alpha=0.15,
+        label="Scarto (Errore)",
+    )
+
+    ax.set_title(
+        "Inseguimento della Traiettoria: Analisi di un Singolo Viaggio",
+        fontsize=14,
+        weight="bold",
+        pad=15,
+    )
+    ax.set_xlabel(
+        "Avanzamento Corsa (Indice del Segmento Spaziale 0-100)",
+        fontsize=12,
+        weight="bold",
+    )
+    ax.set_ylabel("Ritardo Cumulato (Secondi)", fontsize=12, weight="bold")
+
+    ax.grid(True, linestyle=":", alpha=0.6)
+    ax.legend(loc="upper left", frameon=True)
     ax.set_xlim(0, max(segmenti))
-    
+
     plt.tight_layout()
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path, bbox_inches="tight")
     plt.close()
     print(f"[+] Fotoromanzo salvato in: {save_path.name}")
+
+
+def plot_fotoromanzo_medio(
+    segmenti, ritardo_reale_medio, ritardo_predetto_medio, save_path
+):
+    print("[*] Generazione fotoromanzo medio in corso...")
+
+    fig, ax = plt.subplots(figsize=(12, 5), dpi=300)
+    plt.style.use("seaborn-v0_8-whitegrid")
+
+    ax.plot(
+        segmenti,
+        ritardo_reale_medio,
+        color="#7f8c8d",
+        linestyle="--",
+        linewidth=2.5,
+        alpha=0.8,
+        label="Ritardo Reale Medio (Ground Truth)",
+    )
+    ax.plot(
+        segmenti,
+        ritardo_predetto_medio,
+        color="#2c3e50",
+        linestyle="-",
+        linewidth=3,
+        label="Predizione Media del Modello",
+    )
+    ax.fill_between(
+        segmenti,
+        ritardo_reale_medio,
+        ritardo_predetto_medio,
+        color="#e74c3c",
+        alpha=0.15,
+        label="Scarto Medio (Errore)",
+    )
+
+    ax.set_title(
+        "Traiettoria Media: Predizione Media vs Viaggio Medio",
+        fontsize=14,
+        weight="bold",
+        pad=15,
+    )
+    ax.set_xlabel(
+        "Avanzamento Corsa (Indice del Segmento Spaziale 0-100)",
+        fontsize=12,
+        weight="bold",
+    )
+    ax.set_ylabel("Ritardo Cumulato Medio (Secondi)", fontsize=12, weight="bold")
+
+    ax.grid(True, linestyle=":", alpha=0.6)
+    ax.legend(loc="upper left", frameon=True)
+    ax.set_xlim(0, max(segmenti))
+
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.close()
+    print(f"[+] Fotoromanzo medio salvato in: {save_path.name}")
 
 
 if __name__ == "__main__":
