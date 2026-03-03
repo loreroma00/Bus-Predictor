@@ -16,6 +16,11 @@ from typing import Optional, List, Dict, Any, Set, Tuple
 
 from fastapi import WebSocket
 
+try:
+    import asyncpg
+except ImportError:
+    asyncpg = None
+
 from application.domain.internal_events import domain_events, DIARY_FINISHED
 from application.domain.observers import Diary
 
@@ -97,6 +102,11 @@ class LiveValidationSession:
         self.stops_at: Optional[datetime] = None
 
         self.logger = logging.getLogger(f"live_validator.{session_id[:8]}")
+        self.trip_expected_last_seq: Dict[str, int] = {}
+        self._db_pool = None
+        self._db_vector_table = None
+        self._db_label_table = None
+        self._last_db_poll_ts: Optional[datetime] = None
 
     async def start(self) -> bool:
         """
@@ -133,6 +143,9 @@ class LiveValidationSession:
             self.logger.info(
                 "Pending trip ids initialized: %d", len(self.pending_trip_ids)
             )
+            self.trip_expected_last_seq = self._build_expected_last_stop_seq(
+                scheduled_trips
+            )
 
             weather_code = self._get_weather_code(target_dt)
             self.logger.info("Using weather_code=%s", weather_code)
@@ -155,7 +168,11 @@ class LiveValidationSession:
             self.status = "monitoring"
             await self._broadcast_status()
 
+            await self._init_db_polling(target_dt)
             domain_events.subscribe(DIARY_FINISHED, self._on_diary_finished)
+
+            # Immediate poll so already-finished trips don't wait for first monitor tick
+            await self._poll_and_validate_from_db()
 
             self._monitor_task = asyncio.create_task(self._monitor_loop())
 
@@ -187,6 +204,8 @@ class LiveValidationSession:
                 await self._monitor_task
             except asyncio.CancelledError:
                 pass
+
+        await self._close_db_polling()
 
         self.status = "stopped"
         await self._write_output_files()
@@ -307,6 +326,206 @@ class LiveValidationSession:
             preview = scheduled[:3]
             self.logger.debug("Scheduled trips preview: %s", preview)
         return scheduled
+
+    def _build_expected_last_stop_seq(
+        self, scheduled_trips: List[Dict]
+    ) -> Dict[str, int]:
+        ledger = self.observatory.get_ledger()
+        expected = {}
+
+        for trip in scheduled_trips:
+            trip_id = trip["trip_id"]
+            trip_obj = ledger["trips"].get(trip_id)
+            if trip_obj is None:
+                continue
+
+            stop_times = trip_obj.get_stop_times() or []
+            if not stop_times:
+                continue
+
+            try:
+                max_seq = max(int(st.get("stop_sequence", 0) or 0) for st in stop_times)
+            except Exception:
+                max_seq = 0
+
+            if max_seq > 0:
+                expected[trip_id] = max_seq
+
+        self.logger.info(
+            "Expected last stop sequence loaded for %d trips", len(expected)
+        )
+        return expected
+
+    async def _init_db_polling(self, target_dt: datetime):
+        if asyncpg is None:
+            self.logger.warning("asyncpg not available: DB polling disabled")
+            return
+
+        try:
+            from config import Prediction
+
+            self._db_vector_table = Prediction.VECTOR_TABLE
+            self._db_label_table = Prediction.LABEL_TABLE
+            self._db_pool = await asyncpg.create_pool(
+                Prediction.VECTOR_DB_CONNECTION,
+                min_size=1,
+                max_size=3,
+                command_timeout=90,
+            )
+            self._last_db_poll_ts = target_dt
+            self.logger.info(
+                "DB polling enabled (vector_table=%s, label_table=%s)",
+                self._db_vector_table,
+                self._db_label_table,
+            )
+        except Exception:
+            self._db_pool = None
+            self.logger.exception("Failed to initialize DB polling")
+
+    async def _close_db_polling(self):
+        if self._db_pool is not None:
+            try:
+                await self._db_pool.close()
+            except Exception:
+                pass
+            self._db_pool = None
+
+    def _compute_validation_result_from_db_rows(self, trip_id: str, forecast, db_rows):
+        pred_by_stop_seq = {int(stop.stop_sequence): stop for stop in forecast.stops}
+
+        delay_squared_errors = []
+        occupancy_matches = []
+
+        for row in db_rows:
+            stop_seq = row["stop_sequence"]
+            if stop_seq is None:
+                continue
+
+            predicted_stop = pred_by_stop_seq.get(int(stop_seq))
+            if predicted_stop is None:
+                continue
+
+            actual_delay = row["schedule_adherence"]
+            if actual_delay is not None:
+                err = float(predicted_stop.cumulative_delay_sec) - float(actual_delay)
+                delay_squared_errors.append(err * err)
+
+            actual_occupancy = row["occupancy_status"]
+            if actual_occupancy is not None:
+                actual_occupancy = int(actual_occupancy)
+                if 0 <= actual_occupancy <= 6:
+                    occupancy_matches.append(
+                        (int(predicted_stop.crowd_level), actual_occupancy)
+                    )
+
+        if delay_squared_errors:
+            mse = sum(delay_squared_errors) / len(delay_squared_errors)
+            rmse = mse**0.5
+        else:
+            mse = 0.0
+            rmse = 0.0
+
+        return TripValidationResult(
+            trip_id=trip_id,
+            route_id=forecast.route_id,
+            direction_id=forecast.direction_id,
+            scheduled_start=forecast.scheduled_start,
+            mse=mse,
+            rmse=rmse,
+            n_measurements=len(delay_squared_errors),
+            delay_errors=[e**0.5 for e in delay_squared_errors],
+            occupancy_matches=occupancy_matches,
+        )
+
+    async def _poll_and_validate_from_db(self):
+        if self._db_pool is None or not self.pending_trip_ids:
+            return
+
+        now = datetime.now()
+        poll_from = self._last_db_poll_ts or (now - timedelta(minutes=2))
+
+        query_recent = f"""
+            SELECT trip_id, MAX(stop_sequence) AS max_stop_sequence, MAX(ts) AS last_ts
+            FROM {self._db_vector_table}
+            WHERE ts > $1 AND ts <= $2
+            GROUP BY trip_id
+        """
+
+        try:
+            async with self._db_pool.acquire() as conn:
+                recent_rows = await conn.fetch(query_recent, poll_from, now)
+        except Exception:
+            self.logger.exception("DB poll query failed")
+            self._last_db_poll_ts = now
+            return
+
+        self._last_db_poll_ts = now
+
+        if not recent_rows:
+            return
+
+        candidates = []
+        for row in recent_rows:
+            trip_id = row["trip_id"]
+            if trip_id not in self.pending_trip_ids:
+                continue
+
+            observed_max = int(row["max_stop_sequence"] or 0)
+            expected_max = int(self.trip_expected_last_seq.get(trip_id, 0))
+
+            if expected_max > 0 and observed_max < expected_max:
+                continue
+
+            candidates.append(trip_id)
+
+        if not candidates:
+            return
+
+        self.logger.info(
+            "DB poll found %d completed-trip candidates (pending=%d)",
+            len(candidates),
+            len(self.pending_trip_ids),
+        )
+
+        max_candidates_per_poll = 200
+        candidates = candidates[:max_candidates_per_poll]
+
+        query_trip_rows = f"""
+            SELECT v.trip_id, v.stop_sequence, v.schedule_adherence, l.occupancy_status
+            FROM {self._db_vector_table} v
+            LEFT JOIN {self._db_label_table} l ON v.id = l.id
+            WHERE v.trip_id = $1
+            ORDER BY v.ts ASC
+        """
+
+        for trip_id in candidates:
+            if trip_id not in self.pending_trip_ids:
+                continue
+
+            prediction = self.predicted_trips.get(trip_id)
+            if not prediction:
+                continue
+
+            try:
+                async with self._db_pool.acquire() as conn:
+                    trip_rows = await conn.fetch(query_trip_rows, trip_id)
+            except Exception:
+                self.logger.exception("DB fetch failed for trip %s", trip_id)
+                continue
+
+            if not trip_rows:
+                continue
+
+            forecast = prediction["forecast"]
+            result = self._compute_validation_result_from_db_rows(
+                trip_id, forecast, trip_rows
+            )
+            self.validated_trips.append(result)
+            self.pending_trip_ids.discard(trip_id)
+            await self._broadcast_trip_validated(result)
+
+        if not self.pending_trip_ids:
+            await self._complete()
 
     def _get_weather_code(self, target_dt: datetime) -> int:
         """Get weather code for the date."""
@@ -607,6 +826,11 @@ class LiveValidationSession:
                 await self._complete()
                 return
 
+            try:
+                await self._poll_and_validate_from_db()
+            except Exception:
+                self.logger.exception("Error while polling DB for completed trips")
+
             await self._broadcast_progress()
 
             await asyncio.sleep(60)
@@ -621,6 +845,7 @@ class LiveValidationSession:
         domain_events.unsubscribe(DIARY_FINISHED, self._on_diary_finished)
 
         self._stop_event.set()
+        await self._close_db_polling()
 
         self.status = "completed"
         await self._write_output_files()
