@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any
 import torch
 import numpy as np
 import pandas as pd
+import joblib
 
 from model import BusLSTM, BusODELSTM
 
@@ -17,6 +18,7 @@ PROJECT_ROOT = CURRENT_DIR.parent.parent
 
 PARQUET_DIR = PROJECT_ROOT / "parquets"
 ROUTE_ENCODING_PATH = PARQUET_DIR / "route_encoding.json"
+ROUTE_ENCODER_PKL_PATH = PARQUET_DIR / "route_encoder.pkl"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
 STATIC_MAP_PATH = PARQUET_DIR / "canonical_route_map.parquet"
 
@@ -56,11 +58,26 @@ class Predictor:
         route_path = (
             Path(route_encoding_path) if route_encoding_path else ROUTE_ENCODING_PATH
         )
+        route_encoder_pkl_path = ROUTE_ENCODER_PKL_PATH
         h3_path = Path(h3_encoding_path) if h3_encoding_path else H3_ENCODING_PATH
         static_path = Path(static_map_path) if static_map_path else STATIC_MAP_PATH
 
-        with open(route_path, "r") as f:
-            self.route_encoder = json.load(f)
+        self.route_encoder = {}
+        if route_encoder_pkl_path.exists():
+            route_obj = joblib.load(route_encoder_pkl_path)
+            route_le = (
+                route_obj.get("route") if isinstance(route_obj, dict) else route_obj
+            )
+            if route_le is not None and hasattr(route_le, "classes_"):
+                self.route_encoder = {
+                    str(label): int(idx) for idx, label in enumerate(route_le.classes_)
+                }
+                print("Loaded route encoder from route_encoder.pkl")
+
+        if not self.route_encoder:
+            with open(route_path, "r") as f:
+                self.route_encoder = {str(k): int(v) for k, v in json.load(f).items()}
+            print("Loaded route encoder from route_encoding.json")
 
         with open(h3_path, "r") as f:
             self.h3_encoder = json.load(f)
@@ -118,11 +135,9 @@ class Predictor:
             invalid_count = int(invalid_mask.sum())
             if invalid_count > 0:
                 print(
-                    f"[WARN] {context}: x1_cat col={col_idx} had {invalid_count} out-of-range values; clipping to [0, {card - 1}]"
+                    f"[WARN] {context}: x1_cat col={col_idx} had {invalid_count} out-of-range values; replacing with fallback=0"
                 )
-                x1_cat_batch[:, col_idx] = np.clip(
-                    x1_cat_batch[:, col_idx], 0, card - 1
-                )
+                x1_cat_batch[invalid_mask, col_idx] = 0
 
         for col_idx, card in enumerate(x2_cards):
             if card <= 0:
@@ -133,11 +148,9 @@ class Predictor:
             invalid_count = int(invalid_mask.sum())
             if invalid_count > 0:
                 print(
-                    f"[WARN] {context}: x2_cat col={col_idx} had {invalid_count} out-of-range values; clipping to [0, {card - 1}]"
+                    f"[WARN] {context}: x2_cat col={col_idx} had {invalid_count} out-of-range values; replacing with fallback=0"
                 )
-                x2_cat_batch[:, :, col_idx] = np.clip(
-                    x2_cat_batch[:, :, col_idx], 0, card - 1
-                )
+                x2_cat_batch[:, :, col_idx][invalid_mask] = 0
 
         return x1_cat_batch, x2_cat_batch
 
@@ -178,7 +191,7 @@ class Predictor:
         x2_cat_raw: np.ndarray,
         x2_dense_raw: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        route_id_str = x1_cat_raw[0]
+        route_id_str = str(x1_cat_raw[0])
         x1_cat_raw[0] = self.route_encoder.get(route_id_str, 0)
 
         x1_dense_raw[13] = np.clip(x1_dense_raw[13], 1, 3) / 3.0
@@ -231,7 +244,13 @@ class Predictor:
 
         trip_static = trip_static.sort_values("segment_idx")
 
-        x1_cat = [route_id, direction_id, day_type, weather_code, bus_type]
+        x1_cat = [
+            route_id,
+            int(direction_id),
+            int(day_type),
+            int(weather_code),
+            int(float(bus_type) / 9.0),
+        ]
         time_sin = math.sin(2 * math.pi * time_seconds / 86400)
         time_cos = math.cos(2 * math.pi * time_seconds / 86400)
         x1_dense = [0.0] * 13 + [3.0, time_sin, time_cos]
@@ -365,7 +384,7 @@ class Predictor:
                 x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor
             )
 
-        delays = pred_time_scaled.numpy() * 3600.0
+        delays = pred_time_scaled.squeeze(-1).numpy() * 3600.0
         crowd = pred_crowd_logits.argmax(dim=-1).numpy()
 
         return delays, crowd
@@ -461,12 +480,21 @@ class Predictor:
             trip_static = meta["trip_static"]
 
             # x1_cat: [route_id, direction_id, day_type, weather_code, bus_type]
+            route_card = int(self.config["x1_cat_cards"][0])
+
+            route_encoded = int(meta["route_id_encoded"])
+            if not (0 <= route_encoded < route_card):
+                route_encoded = 0
+
+            weather_code = int(meta["weather_code"])
+            bus_type = int(float(meta["bus_type"]) / 9.0)
+
             x1_cat_batch[i] = [
-                int(meta["route_id_encoded"]),
+                route_encoded,
                 int(meta["direction_id"]),
                 int(meta["day_type"]),
-                int(meta["weather_code"]),
-                int(meta["bus_type"]),
+                weather_code,
+                bus_type,
             ]
 
             # x1_dense: 13 zeros + [3.0, time_sin, time_cos]
@@ -513,19 +541,19 @@ class Predictor:
                 last_segment_idx = group["segment_idx"].max()
                 last_segment_mask = trip_static["segment_idx"] == last_segment_idx
 
-                delay_at_stop = delays[last_segment_idx]
+                delay_at_stop = float(delays[last_segment_idx])
                 crowd_at_stop = int(crowd[last_segment_idx])
                 distance_m = trip_static.loc[
                     last_segment_mask, "can_shape_dist_travelled"
                 ].values[0]
 
-                expected_arrival_seconds = time_seconds + delay_at_stop
+                expected_arrival_seconds = float(time_seconds) + delay_at_stop
 
                 stop_predictions.append(
                     StopPrediction(
                         stop_sequence=int(stop_seq),
                         distance_m=float(distance_m),
-                        cumulative_delay_sec=float(delay_at_stop),
+                        cumulative_delay_sec=delay_at_stop,
                         delay_formatted=self._format_delay(delay_at_stop),
                         expected_arrival=self._format_time(expected_arrival_seconds),
                         crowd_level=crowd_at_stop,
