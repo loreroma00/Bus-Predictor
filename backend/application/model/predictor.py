@@ -100,6 +100,47 @@ class Predictor:
         self.model.eval()
         print(f"Model loaded. Encoder hidden: {self.config['encoder_hidden_size']}")
 
+    def _sanitize_categorical_inputs(
+        self,
+        x1_cat_batch: np.ndarray,
+        x2_cat_batch: np.ndarray,
+        context: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        x1_cards = self.config["x1_cat_cards"]
+        x2_cards = self.config["x2_cat_cards"]
+
+        for col_idx, card in enumerate(x1_cards):
+            if card <= 0:
+                continue
+            invalid_mask = (x1_cat_batch[:, col_idx] < 0) | (
+                x1_cat_batch[:, col_idx] >= card
+            )
+            invalid_count = int(invalid_mask.sum())
+            if invalid_count > 0:
+                print(
+                    f"[WARN] {context}: x1_cat col={col_idx} had {invalid_count} out-of-range values; clipping to [0, {card - 1}]"
+                )
+                x1_cat_batch[:, col_idx] = np.clip(
+                    x1_cat_batch[:, col_idx], 0, card - 1
+                )
+
+        for col_idx, card in enumerate(x2_cards):
+            if card <= 0:
+                continue
+            invalid_mask = (x2_cat_batch[:, :, col_idx] < 0) | (
+                x2_cat_batch[:, :, col_idx] >= card
+            )
+            invalid_count = int(invalid_mask.sum())
+            if invalid_count > 0:
+                print(
+                    f"[WARN] {context}: x2_cat col={col_idx} had {invalid_count} out-of-range values; clipping to [0, {card - 1}]"
+                )
+                x2_cat_batch[:, :, col_idx] = np.clip(
+                    x2_cat_batch[:, :, col_idx], 0, card - 1
+                )
+
+        return x1_cat_batch, x2_cat_batch
+
     def has_trip_template(self, route_id: str, direction_id: Any) -> bool:
         trip_static = self.static_map[
             (self.static_map["route_id_norm"] == str(route_id))
@@ -148,9 +189,15 @@ class Predictor:
         x2_dense_raw[:, 4] = np.clip(x2_dense_raw[:, 4], 0, 65.0) / 65.0
         x2_dense_raw[:, 5] = np.clip(x2_dense_raw[:, 5], 0.0, 2.0)
 
-        x1_cat_tensor = torch.tensor(x1_cat_raw, dtype=torch.int64).unsqueeze(0)
+        x1_cat_np = np.asarray(x1_cat_raw, dtype=np.int64).reshape(1, -1)
+        x2_cat_np = np.asarray(x2_cat_raw, dtype=np.int64).reshape(1, BATCH_SIZE, -1)
+        x1_cat_np, x2_cat_np = self._sanitize_categorical_inputs(
+            x1_cat_np, x2_cat_np, context="single_trip"
+        )
+
+        x1_cat_tensor = torch.tensor(x1_cat_np[0], dtype=torch.int64).unsqueeze(0)
         x1_dense_tensor = torch.tensor(x1_dense_raw, dtype=torch.float32).unsqueeze(0)
-        x2_cat_tensor = torch.tensor(x2_cat_raw, dtype=torch.int64).unsqueeze(0)
+        x2_cat_tensor = torch.tensor(x2_cat_np[0], dtype=torch.int64).unsqueeze(0)
         x2_dense_tensor = torch.tensor(x2_dense_raw, dtype=torch.float32).unsqueeze(0)
 
         with torch.no_grad():
@@ -292,6 +339,10 @@ class Predictor:
             delays: (N, 100) - delay in seconds for each segment
             crowd: (N, 100) - crowd level for each segment
         """
+        x1_cat_batch, x2_cat_batch = self._sanitize_categorical_inputs(
+            x1_cat_batch, x2_cat_batch, context="batch"
+        )
+
         # Normalize x1_dense
         x1_dense_batch[:, 13] = np.clip(x1_dense_batch[:, 13], 1, 3) / 3.0
 
