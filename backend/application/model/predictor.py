@@ -248,7 +248,7 @@ class Predictor:
             route_id,
             int(direction_id),
             int(day_type),
-            int(weather_code),
+            min(int(int(weather_code) / 33), 2),
             int(float(bus_type) / 9.0),
         ]
         time_sin = math.sin(2 * math.pi * time_seconds / 86400)
@@ -486,7 +486,7 @@ class Predictor:
             if not (0 <= route_encoded < route_card):
                 route_encoded = 0
 
-            weather_code = int(meta["weather_code"])
+            weather_code = min(int(int(meta["weather_code"]) / 33), 2)
             bus_type = int(float(meta["bus_type"]) / 9.0)
 
             x1_cat_batch[i] = [

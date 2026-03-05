@@ -43,6 +43,7 @@ def scaling(input_parquet: str, output_parquet: str, encoder_path: str):
     df['door_number'] = df['door_number'].clip(1, 3) / 3.0
     df['segment_idx'] = df['segment_idx'] / 99.0
     df['bus_type'] = df['bus_type'] / 9.0
+    df['weather_code'] = df['weather_code'] / 33
     
     # B. Cinematica Spaziale (Taglio degli outlier GPS e compressione 0-1)
     df['can_shape_dist_travelled'] = df['can_shape_dist_travelled'].clip(0, 15000) / 15000.0
