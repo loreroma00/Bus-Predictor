@@ -82,6 +82,7 @@ class PredictionVector(Vector):
         delay_genuine: int = 0,
     ):
         self.id = id
+        self.time = time
         self.trip_id = trip_id
 
         ### ======================= ###

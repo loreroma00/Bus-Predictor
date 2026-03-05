@@ -95,6 +95,7 @@ class LiveValidationSession:
         self.predicted_trips: Dict[str, Any] = {}
         self.validated_trips: List[TripValidationResult] = []
         self.pending_trip_ids: Set[str] = set()
+        self._past_trip_ids: Set[str] = set()
         self.failed_trip_ids: Set[str] = set()
 
         self.websockets: List[WebSocket] = []
@@ -152,6 +153,7 @@ class LiveValidationSession:
                 scheduled_trips, weather_code
             )
 
+            now_minutes = datetime.now().hour * 60 + datetime.now().minute
             for trip in scheduled_trips:
                 trip_id = trip["trip_id"]
                 if trip_id in prediction_results:
@@ -159,9 +161,17 @@ class LiveValidationSession:
                         "forecast": prediction_results[trip_id],
                         "request": trip,
                     }
+                    if trip["start_minutes"] < now_minutes:
+                        self._past_trip_ids.add(trip_id)
                 else:
                     self.failed_trip_ids.add(trip_id)
                     self.pending_trip_ids.discard(trip_id)
+
+            self.logger.info(
+                "Trip classification: past=%d (DB poll), future=%d (events only)",
+                len(self._past_trip_ids),
+                len(self.pending_trip_ids) - len(self._past_trip_ids),
+            )
 
             self.status = "monitoring"
             await self._broadcast_status()
@@ -281,8 +291,6 @@ class LiveValidationSession:
         """Extract all trips scheduled for the target date."""
         target_dt = datetime.strptime(self.target_date, "%d-%m-%Y")
         date_yyyymmdd = target_dt.strftime("%Y%m%d")
-        now_dt = datetime.now()
-        apply_today_cutoff = target_dt.date() == now_dt.date()
 
         def _parse_start_minutes(start_hhmm: str) -> Optional[int]:
             if not start_hhmm or ":" not in start_hhmm:
@@ -297,11 +305,8 @@ class LiveValidationSession:
                 return None
             return hh * 60 + mm
 
-        cutoff_minutes = now_dt.hour * 60 + now_dt.minute
-
         ledger = self.observatory.get_ledger()
         scheduled = []
-        skipped_started = 0
 
         for trip_id, trip in ledger["trips"].items():
             if date_yyyymmdd in trip.dates:
@@ -313,18 +318,14 @@ class LiveValidationSession:
                         arrival_time[:5] if len(arrival_time) >= 5 else arrival_time
                     )
 
-                    if apply_today_cutoff:
-                        start_minutes = _parse_start_minutes(start_time)
-                        if start_minutes is None:
-                            self.logger.warning(
-                                "Skipping trip %s: invalid start_time=%s",
-                                trip_id,
-                                start_time,
-                            )
-                            continue
-                        if start_minutes < cutoff_minutes:
-                            skipped_started += 1
-                            continue
+                    start_minutes = _parse_start_minutes(start_time)
+                    if start_minutes is None:
+                        self.logger.warning(
+                            "Skipping trip %s: invalid start_time=%s",
+                            trip_id,
+                            start_time,
+                        )
+                        continue
 
                     direction_id = trip.direction_id
                     try:
@@ -343,6 +344,7 @@ class LiveValidationSession:
                             "route_id": trip.route.id,
                             "direction_id": direction_id,
                             "start_time": start_time,
+                            "start_minutes": start_minutes,
                             "start_date": self.target_date,
                         }
                     )
@@ -352,13 +354,6 @@ class LiveValidationSession:
             self.target_date,
             len(scheduled),
         )
-        if apply_today_cutoff:
-            self.logger.info(
-                "Applied live cutoff for today: now=%02d:%02d, skipped_already_started=%d",
-                now_dt.hour,
-                now_dt.minute,
-                skipped_started,
-            )
         if scheduled:
             preview = scheduled[:3]
             self.logger.debug("Scheduled trips preview: %s", preview)
@@ -445,19 +440,19 @@ class LiveValidationSession:
         )
 
     async def _poll_and_validate_from_db(self):
-        if self._db_pool is None or not self.pending_trip_ids:
+        if self._db_pool is None or not self._past_trip_ids:
             return
 
         now = datetime.now()
-        pending_list = list(self.pending_trip_ids)
+        pending_list = list(self._past_trip_ids)
         target_day_start = datetime.strptime(self.target_date, "%d-%m-%Y").replace(hour=4, minute=30)
 
         query_summary = f"""
-            SELECT trip_id, MAX(ts) AS last_ts, COUNT(*) AS n_rows
+            SELECT trip_id, route_id, MAX(ts) AS last_ts, COUNT(*) AS n_rows
             FROM {self._db_vector_table}
             WHERE trip_id = ANY($1)
               AND ts >= $2
-            GROUP BY trip_id
+            GROUP BY trip_id, route_id
         """
 
         try:
@@ -473,10 +468,20 @@ class LiveValidationSession:
         candidates = []
         skipped_active = 0
         skipped_few = 0
+        skipped_route = 0
         for row in summary_rows:
             trip_id = row["trip_id"]
+            db_route_id = row["route_id"]
             last_ts = row["last_ts"]
             n_rows = row["n_rows"]
+
+            # Verify route_id matches what we predicted
+            prediction = self.predicted_trips.get(trip_id)
+            if prediction:
+                expected_route = prediction["forecast"].route_id
+                if str(db_route_id) != str(expected_route):
+                    skipped_route += 1
+                    continue
 
             now_ts = now.timestamp()
             last_ts_val = last_ts.timestamp() if hasattr(last_ts, 'timestamp') else float(last_ts)
@@ -496,10 +501,11 @@ class LiveValidationSession:
             return
 
         self.logger.info(
-            "DB poll found %d stale-trip candidates (active=%d, too_few=%d, pending=%d)",
+            "DB poll found %d stale-trip candidates (active=%d, too_few=%d, wrong_route=%d, pending=%d)",
             len(candidates),
             skipped_active,
             skipped_few,
+            skipped_route,
             len(self.pending_trip_ids),
         )
 
@@ -538,6 +544,7 @@ class LiveValidationSession:
             )
             self.validated_trips.append(result)
             self.pending_trip_ids.discard(trip_id)
+            self._past_trip_ids.discard(trip_id)
             await self._broadcast_trip_validated(result)
 
         if not self.pending_trip_ids:
