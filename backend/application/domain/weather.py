@@ -33,6 +33,8 @@ WEATHER_MAP = {
 
 
 class Weather:
+    FORECAST_PROBABILITY_UNKNOWN = -1.0
+
     def __init__(
         self,
         valid_time: float,
@@ -42,6 +44,8 @@ class Weather:
         precip_intensity: float,
         wind_speed: float,
         weather_code: int,
+        forecast_probability: float = FORECAST_PROBABILITY_UNKNOWN,
+        is_forecast: bool = False,
     ):
         self.time = valid_time if valid_time else time.time()
         self.temperature = temperature  # in °C
@@ -50,6 +54,12 @@ class Weather:
         self.precip_intensity = precip_intensity  # in mm/h
         self.wind_speed = wind_speed  # in m/s
         self.weather_code = int(weather_code) if weather_code is not None else 0
+        self.forecast_probability = (
+            float(forecast_probability)
+            if forecast_probability is not None
+            else self.FORECAST_PROBABILITY_UNKNOWN
+        )
+        self.is_forecast = bool(is_forecast)
 
     @property
     def temperature(self) -> float:
@@ -95,3 +105,7 @@ class Weather:
     def description(self) -> str:
         """Returns the text description of the weather code."""
         return WEATHER_MAP.get(self._weather_code, "Unknown")
+
+    @property
+    def has_forecast_probability(self) -> bool:
+        return self.forecast_probability != self.FORECAST_PROBABILITY_UNKNOWN

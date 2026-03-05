@@ -135,6 +135,7 @@ class Hexagon:
             "buses": {},  # str -> bus
         }
         self.weather = Weather(0, 0, 0, 0, 0, 0, 0)
+        self.weather_forecast_by_hour: list[dict[int, Weather]] = []
         self.preferentials: list[float] = []
         self.traffic = Traffic()
         self.last_traffic_update: float = 0  # Unix timestamp of last traffic update
@@ -177,6 +178,25 @@ class Hexagon:
 
     def set_weather(self, weather: Weather):
         self.weather = weather
+        hour_bucket = int(float(weather.time) // 3600)
+        self.set_weather_for_hour_bucket(hour_bucket, weather)
+
+    def set_weather_for_hour_bucket(self, hour_bucket: int, weather: Weather):
+        for item in self.weather_forecast_by_hour:
+            if hour_bucket in item:
+                item[hour_bucket] = weather
+                return
+        self.weather_forecast_by_hour.append({hour_bucket: weather})
+
+    def set_weather_forecast(self, weather_forecast: list[dict[int, Weather]]):
+        self.weather_forecast_by_hour = weather_forecast
+
+    def get_weather_for_hour_bucket(self, hour_bucket: int) -> Weather | None:
+        for item in self.weather_forecast_by_hour:
+            weather = item.get(hour_bucket)
+            if weather is not None:
+                return weather
+        return None
 
     def get_temperature(self) -> float:
         return self.weather.temperature
@@ -490,6 +510,14 @@ class City:
 
     def get_weather(self, hex_id: str) -> Weather:
         return self.hexagons[hex_id].weather
+
+    def get_weather_for_hour_bucket(
+        self, hex_id: str, hour_bucket: int
+    ) -> Weather | None:
+        hexagon = self.hexagons.get(hex_id)
+        if not hexagon:
+            return None
+        return hexagon.get_weather_for_hour_bucket(hour_bucket)
 
     def get_bounding_box(self) -> tuple[float, float, float, float] | None:
         """

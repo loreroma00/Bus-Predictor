@@ -24,6 +24,9 @@ except ImportError:
 from application.domain.internal_events import domain_events, DIARY_FINISHED
 from application.domain.observers import Diary
 
+STALE_TIMEOUT_SEC = 600  # 10 min with no updates => trip is done
+MIN_MEASUREMENTS = 7     # discard trips with fewer measurements than this
+
 
 @dataclass
 class TripValidationResult:
@@ -102,11 +105,9 @@ class LiveValidationSession:
         self.stops_at: Optional[datetime] = None
 
         self.logger = logging.getLogger(f"live_validator.{session_id[:8]}")
-        self.trip_expected_last_seq: Dict[str, int] = {}
         self._db_pool = None
         self._db_vector_table = None
         self._db_label_table = None
-        self._last_db_poll_ts: Optional[datetime] = None
 
     async def start(self) -> bool:
         """
@@ -142,9 +143,6 @@ class LiveValidationSession:
             self.pending_trip_ids = {t["trip_id"] for t in scheduled_trips}
             self.logger.info(
                 "Pending trip ids initialized: %d", len(self.pending_trip_ids)
-            )
-            self.trip_expected_last_seq = self._build_expected_last_stop_seq(
-                scheduled_trips
             )
 
             weather_code = self._get_weather_code(target_dt)
@@ -366,35 +364,6 @@ class LiveValidationSession:
             self.logger.debug("Scheduled trips preview: %s", preview)
         return scheduled
 
-    def _build_expected_last_stop_seq(
-        self, scheduled_trips: List[Dict]
-    ) -> Dict[str, int]:
-        ledger = self.observatory.get_ledger()
-        expected = {}
-
-        for trip in scheduled_trips:
-            trip_id = trip["trip_id"]
-            trip_obj = ledger["trips"].get(trip_id)
-            if trip_obj is None:
-                continue
-
-            stop_times = trip_obj.get_stop_times() or []
-            if not stop_times:
-                continue
-
-            try:
-                max_seq = max(int(st.get("stop_sequence", 0) or 0) for st in stop_times)
-            except Exception:
-                max_seq = 0
-
-            if max_seq > 0:
-                expected[trip_id] = max_seq
-
-        self.logger.info(
-            "Expected last stop sequence loaded for %d trips", len(expected)
-        )
-        return expected
-
     async def _init_db_polling(self, target_dt: datetime):
         if asyncpg is None:
             self.logger.warning("asyncpg not available: DB polling disabled")
@@ -411,7 +380,6 @@ class LiveValidationSession:
                 max_size=3,
                 command_timeout=90,
             )
-            self._last_db_poll_ts = target_dt
             self.logger.info(
                 "DB polling enabled (vector_table=%s, label_table=%s)",
                 self._db_vector_table,
@@ -481,38 +449,43 @@ class LiveValidationSession:
             return
 
         now = datetime.now()
-        poll_from = self._last_db_poll_ts or (now - timedelta(minutes=2))
+        pending_list = list(self.pending_trip_ids)
 
-        query_recent = f"""
-            SELECT trip_id, MAX(stop_sequence) AS max_stop_sequence, MAX(ts) AS last_ts
+        query_summary = f"""
+            SELECT trip_id, MAX(ts) AS last_ts, COUNT(*) AS n_rows
             FROM {self._db_vector_table}
-            WHERE ts > $1 AND ts <= $2
+            WHERE trip_id = ANY($1)
             GROUP BY trip_id
         """
 
         try:
             async with self._db_pool.acquire() as conn:
-                recent_rows = await conn.fetch(query_recent, poll_from, now)
+                summary_rows = await conn.fetch(query_summary, pending_list)
         except Exception:
             self.logger.exception("DB poll query failed")
-            self._last_db_poll_ts = now
             return
 
-        self._last_db_poll_ts = now
-
-        if not recent_rows:
+        if not summary_rows:
             return
 
         candidates = []
-        for row in recent_rows:
+        skipped_active = 0
+        skipped_few = 0
+        for row in summary_rows:
             trip_id = row["trip_id"]
-            if trip_id not in self.pending_trip_ids:
+            last_ts = row["last_ts"]
+            n_rows = row["n_rows"]
+
+            now_ts = now.timestamp()
+            last_ts_val = last_ts.timestamp() if hasattr(last_ts, 'timestamp') else float(last_ts)
+            elapsed = now_ts - last_ts_val
+
+            if elapsed < STALE_TIMEOUT_SEC:
+                skipped_active += 1
                 continue
 
-            observed_max = int(row["max_stop_sequence"] or 0)
-            expected_max = int(self.trip_expected_last_seq.get(trip_id, 0))
-
-            if expected_max > 0 and observed_max < expected_max:
+            if n_rows < MIN_MEASUREMENTS:
+                skipped_few += 1
                 continue
 
             candidates.append(trip_id)
@@ -521,8 +494,10 @@ class LiveValidationSession:
             return
 
         self.logger.info(
-            "DB poll found %d completed-trip candidates (pending=%d)",
+            "DB poll found %d stale-trip candidates (active=%d, too_few=%d, pending=%d)",
             len(candidates),
+            skipped_active,
+            skipped_few,
             len(self.pending_trip_ids),
         )
 
@@ -578,6 +553,40 @@ class LiveValidationSession:
             self.logger.warning(f"Could not fetch weather: {e}")
             return 0
 
+    def _get_weather_code_for_trip(self, trip_data: Dict) -> int:
+        if self.weather_service is None:
+            return 0
+
+        try:
+            trip_date = datetime.strptime(trip_data["start_date"], "%d-%m-%Y")
+            hhmm = str(trip_data.get("start_time", "00:00"))
+            hh_str, mm_str = hhmm.split(":", 1)
+            hour = int(hh_str)
+            minute = int(mm_str)
+            day_offset = hour // 24
+            hour = hour % 24
+            trip_dt = trip_date + timedelta(days=day_offset, hours=hour, minutes=minute)
+
+            weather = self.weather_service.get_weather_for_datetime(trip_dt)
+
+            if hasattr(weather, "forecast_probability") and hasattr(
+                weather, "FORECAST_PROBABILITY_UNKNOWN"
+            ):
+                if weather.forecast_probability == weather.FORECAST_PROBABILITY_UNKNOWN:
+                    self.logger.debug(
+                        "Trip %s has unknown forecast_probability for weather bucket",
+                        trip_data.get("trip_id", "?"),
+                    )
+
+            return int(getattr(weather, "weather_code", 0) or 0)
+        except Exception as e:
+            self.logger.warning(
+                "Could not fetch forecast weather for trip %s: %s",
+                trip_data.get("trip_id", "?"),
+                e,
+            )
+            return 0
+
     def _compute_bus_type(self, trip_data: Dict) -> int:
         """Predict bus type for a trip."""
         if self.bus_type_predictor is None:
@@ -631,7 +640,7 @@ class LiveValidationSession:
                         "direction_id": trip["direction_id"],
                         "start_date": trip["start_date"],
                         "start_time": trip["start_time"],
-                        "weather_code": weather_code,
+                        "weather_code": self._get_weather_code_for_trip(trip),
                         "bus_type": self._compute_bus_type(trip),
                     }
                 )
