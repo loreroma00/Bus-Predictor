@@ -663,11 +663,21 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             if not interactive_model_selection():
                 sys.exit(1)
 
-        print("\n[5/6] Starting data collection services...")
+        print("\n[5/7] Starting data collection services...")
         ingestor_services.start_services(observatory, collection_config)
 
-        print("\n[6/6] Starting background tasks...")
+        print("\n[6/7] Starting background tasks...")
         asyncio.create_task(periodic_ledger_check())
+
+        print("\n[7/7] Starting interactive console...")
+        from interaction import console
+        import threading
+
+        console.register_commands(observatory)
+        threading.Thread(
+            target=console.run_console_loop,
+            daemon=True,
+        ).start()
 
         print(f"\nCORS enabled for: {api_config['frontend_url']}")
         print(f"Server ready with integrated data collection.")
