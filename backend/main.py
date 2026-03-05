@@ -280,8 +280,8 @@ async def test_database_connection():
         logger.info("\nVehicle pipeline disabled.")
 
 
-def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int]):
-    """Run the FastAPI prediction server."""
+def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int], lenient_pipeline: bool = False):
+    """Run the FastAPI prediction server with integrated data collection."""
     import configparser
     import glob
     import asyncio
@@ -631,23 +631,23 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         print("Initializing ATAC Backend...")
         print("=" * 50)
 
-        print("\n[1/4] Loading Observatory (GTFS ledger)...")
-        from application.services.shared_state import get_observatory, get_city
+        print("\n[1/6] Initializing collection pipeline (Observatory, City, services)...")
+        from interaction.main import initialize_collection
+        from interaction import services as ingestor_services
 
-        observatory = get_observatory()
+        observatory, city, collection_config = initialize_collection(
+            lenient_pipeline=lenient_pipeline,
+        )
 
-        print("\n[2/4] Loading City (hexagons)...")
-        city = get_city()
-
-        print("\n[3/4] Initializing Weather Service...")
+        print("\n[2/6] Initializing Weather Service...")
         from application.services.weather_service import WeatherService
 
         weather_service = WeatherService(city)
 
-        print("\n[4/4] Generating canonical route map (if needed)...")
+        print("\n[3/6] Generating canonical route map (if needed)...")
         generate_canonical_map()
 
-        print("\n[5/6] Loading ML model...")
+        print("\n[4/6] Loading ML model...")
         available_models = discover_models()
 
         if not available_models:
@@ -663,11 +663,15 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             if not interactive_model_selection():
                 sys.exit(1)
 
+        print("\n[5/6] Starting data collection services...")
+        ingestor_services.start_services(observatory, collection_config)
+
         print("\n[6/6] Starting background tasks...")
         asyncio.create_task(periodic_ledger_check())
 
         print(f"\nCORS enabled for: {api_config['frontend_url']}")
-        print(f"Server ready. API documentation at: /docs")
+        print(f"Server ready with integrated data collection.")
+        print(f"API documentation at: /docs")
         print("=" * 50 + "\n")
 
     @app.get("/models", response_model=list[ModelInfo])
@@ -1220,6 +1224,17 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             "city_loaded": city is not None,
         }
 
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        print("\nShutting down data collection services...")
+        from interaction import services as ingestor_services
+        from interaction.main import last_save
+        from application.live import data as live_data
+
+        ingestor_services.stop_services()
+        if live_data.OBSERVATORY:
+            last_save(live_data.OBSERVATORY)
+
     import uvicorn
 
     final_host = host or api_config["host"]
@@ -1250,10 +1265,11 @@ Commands:
         "--lenient-pipeline", action="store_true", help="Use lenient data cleaning"
     )
 
-    serve_parser = subparsers.add_parser("serve", help="Start prediction API server")
+    serve_parser = subparsers.add_parser("serve", help="Start prediction API server with integrated data collection")
     serve_parser.add_argument("--model", type=str, help="Model filename to load")
     serve_parser.add_argument("--host", type=str, help="Host to bind")
     serve_parser.add_argument("--port", type=int, help="Port to bind")
+    serve_parser.add_argument("--lenient-pipeline", action="store_true", help="Use lenient data cleaning")
 
     subparsers.add_parser("test-db", help="Test database connections")
 
@@ -1262,7 +1278,7 @@ Commands:
     if args.command == "collect":
         run_collect(debug_mode=args.debug, lenient_pipeline=args.lenient_pipeline)
     elif args.command == "serve":
-        run_serve(model_name=args.model, host=args.host, port=args.port)
+        run_serve(model_name=args.model, host=args.host, port=args.port, lenient_pipeline=args.lenient_pipeline)
     elif args.command == "test-db":
         try:
             asyncio.run(test_database_connection())

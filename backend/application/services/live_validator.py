@@ -450,17 +450,19 @@ class LiveValidationSession:
 
         now = datetime.now()
         pending_list = list(self.pending_trip_ids)
+        target_day_start = datetime.strptime(self.target_date, "%d-%m-%Y").replace(hour=4, minute=30)
 
         query_summary = f"""
             SELECT trip_id, MAX(ts) AS last_ts, COUNT(*) AS n_rows
             FROM {self._db_vector_table}
             WHERE trip_id = ANY($1)
+              AND ts >= $2
             GROUP BY trip_id
         """
 
         try:
             async with self._db_pool.acquire() as conn:
-                summary_rows = await conn.fetch(query_summary, pending_list)
+                summary_rows = await conn.fetch(query_summary, pending_list, target_day_start)
         except Exception:
             self.logger.exception("DB poll query failed")
             return

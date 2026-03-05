@@ -35,6 +35,82 @@ CACHE_STRATEGY = "file"  # Options: "file", "none" (add more in persistence.py)
 # ============================================================
 
 
+def initialize_collection(config=None, lenient_pipeline: bool = False):
+    """
+    Initialize the data collection pipeline: Observatory, City, services.
+
+    Returns (observatory, city, config) for use by both the standalone
+    ``collect`` command and the unified ``serve`` mode.
+    """
+    from config import load_config
+
+    if config is None:
+        config = load_config()
+
+    # Check config file (data_cleaning section)
+    file_setting = config.get("data_cleaning", {}).get("lenient_pipeline", "false").lower() == "true"
+    if lenient_pipeline or file_setting:
+        config["lenient_pipeline"] = True
+        logging.info("Lenient Pipeline ENABLED.")
+
+    # Cache strategy
+    logging.info(f"Available cache strategies: {get_available_strategies()}")
+    strategy_name = config.get("services", {}).get("cache_strategy", "file")
+    logging.info(f"Using cache strategy: '{strategy_name}'")
+    cache_strategy = get_cache_strategy(strategy_name)
+
+    logging.info("Creating Observatory...")
+    observatory = domain.Observatory(cache_strategy=cache_strategy, config=config)
+
+    # Initialize data module
+    data.initialize(observatory, cache_strategy=cache_strategy, config=config)
+
+    # Database singleton
+    from persistence import get_db_connection
+    get_db_connection(config)
+
+    # Static bus lane map
+    static_bus_lanes = {}
+    try:
+        loader = FileCacheStrategy(cache_path="static_bus_lanes_roma.pkl")
+        static_bus_lanes = loader.load() or {}
+        if static_bus_lanes:
+            logging.info(f"Loaded static bus lanes map ({len(static_bus_lanes)} hexes)")
+    except Exception as e:
+        logging.warning(f"Could not load static bus lanes: {e}")
+
+    observatory.add_city("Rome", static_bus_lanes=static_bus_lanes)
+    city = observatory.get_city("Rome")
+
+    # City cache (street names)
+    if hasattr(cache_strategy, "load_city_cache"):
+        cache_strategy.load_city_cache(city)
+
+    # Geocoding service
+    geocoding_service = create_geocoding_service(city)
+    observatory._geocoding = geocoding_service
+
+    # Traffic service
+    from application.live.traffic_service import create_traffic_service
+
+    tomtom_api_key = config.get("api", {}).get("tomtom_api_key")
+    if tomtom_api_key:
+        traffic_service = create_traffic_service(
+            city, api_key=tomtom_api_key, zoom=15,
+        )
+        data.TRAFFIC_SERVICE = traffic_service
+        data.wire_traffic_callback()
+        logging.info("Traffic service initialized.")
+    else:
+        logging.warning("TOMTOM_API_KEY not set, traffic updates disabled.")
+
+    # Load static GTFS data
+    logging.info("Loading ledger...")
+    observatory._ensure_static_data_loaded()
+
+    return observatory, city, config
+
+
 def main(debug_mode: bool = False, lenient_pipeline: bool = False):
     # Set up logging
     root_logger = logging.getLogger()
@@ -58,92 +134,26 @@ def main(debug_mode: bool = False, lenient_pipeline: bool = False):
     root_logger.addHandler(file_handler)
 
     try:
-        # Load Configuration
-        from config import load_config
-        config = load_config()
+        observatory, city, config = initialize_collection(
+            lenient_pipeline=lenient_pipeline,
+        )
 
-        # Check config file (data_cleaning section)
-        file_setting = config.get("data_cleaning", {}).get("lenient_pipeline", "false").lower() == "true"
-        
-        # Override config with CLI args or file setting
-        if lenient_pipeline or file_setting:
-            config["lenient_pipeline"] = True
-            logging.info("🔧 Lenient Pipeline ENABLED.")
-
-        # 1. Create and wire dependencies
-        logging.info(f"Available cache strategies: {get_available_strategies()}")
-        
-        # Get cache strategy from config
-        strategy_name = config.get("services", {}).get("cache_strategy", "file")
-        logging.info(f"Using cache strategy: '{strategy_name}'")
-        cache_strategy = get_cache_strategy(strategy_name)
-
-        logging.info("Creating Observatory...")
-        observatory = domain.Observatory(cache_strategy=cache_strategy, config=config)
-
-        # 2. Initialize data module with the observatory and cache strategy
-        data.initialize(observatory, cache_strategy=cache_strategy, config=config)
-
-        # 2a. Initialize Database singleton with config
-        from persistence import get_db_connection
-        get_db_connection(config)
-
-        # 1b. Load static bus lane map
-        static_bus_lanes = {}
-        try:
-            loader = FileCacheStrategy(cache_path="static_bus_lanes_roma.pkl")
-            static_bus_lanes = loader.load() or {}
-            if static_bus_lanes:
-                logging.info(f"Loaded static bus lanes map ({len(static_bus_lanes)} hexes)")
-        except Exception as e:
-            logging.warning(f"Could not load static bus lanes: {e}")
-
-        observatory.add_city("Rome", static_bus_lanes=static_bus_lanes)
-
-        # 2b. Load city cache (street names) if available
-        if hasattr(cache_strategy, "load_city_cache"):
-            cache_strategy.load_city_cache(observatory.get_city("Rome"))
-
-        # 2c. Create geocoding service (auto-selects sync/async based on server)
-        geocoding_service = create_geocoding_service(observatory.get_city("Rome"))
-        observatory._geocoding = geocoding_service
-
-        # 2d. Create traffic service if API key is available
-        from application.live.traffic_service import create_traffic_service
-
-        tomtom_api_key = config.get("api", {}).get("tomtom_api_key")
-        if tomtom_api_key:
-            traffic_service = create_traffic_service(
-                observatory.get_city("Rome"),
-                api_key=tomtom_api_key,
-                zoom=15,  # Street-level detail for better bus route coverage
-            )
-            data.TRAFFIC_SERVICE = traffic_service
-            data.wire_traffic_callback()  # Wire callback for expired traffic handling
-            logging.info("🚗 Traffic service initialized.")
-        else:
-            logging.warning("⚠️ TOMTOM_API_KEY not set, traffic updates disabled.")
-
-        # 3. Load static data
-        logging.info("Loading ledger...")
-        observatory._ensure_static_data_loaded()
-
-        # 4. Register commands with dependencies
+        # Register commands with dependencies
         console.register_commands(observatory)
 
-        # 5. Create state interface for Debug GUI
+        # Create state interface for Debug GUI
         from .state_interface import StateInterface
 
         state_interface = StateInterface(observatory)
         services.set_state_interface(state_interface)
 
-        # 6. Start Services (including Debug GUI)
+        # Start Services (including Debug GUI)
         services.start_services(observatory, config)
 
-        # 6. Start Interactive Console (Main Thread)
+        # Start Interactive Console (Main Thread)
         console.run_console_loop()
 
-        # 7. Cleanup
+        # Cleanup
         services.stop_services()
 
         if services.COLLECTION_THREAD:
