@@ -331,7 +331,7 @@ def set_state_interface(state_interface):
     _state_interface = state_interface
 
 
-def start_batch_validation(date_str, predictor, observatory, weather_service=None):
+def start_batch_validation(date_str, predictor, observatory):
     """Start batch validation in a background thread."""
     global VALIDATOR_THREAD
 
@@ -342,7 +342,7 @@ def start_batch_validation(date_str, predictor, observatory, weather_service=Non
     def _run():
         from application.services.validator import Validator
         try:
-            validator = Validator(predictor, observatory, weather_service)
+            validator = Validator(predictor, observatory)
             report = validator.validate_date(date_str)
             logging.info(
                 f"Batch validation complete: {report.total_trips_validated} trips, "
@@ -356,7 +356,7 @@ def start_batch_validation(date_str, predictor, observatory, weather_service=Non
     logging.info(f"Batch validation started for {date_str}")
 
 
-def start_live_validation(date_str, predictor, observatory, weather_service=None, bus_type_predictor=None):
+def start_live_validation(date_str, predictor, observatory, bus_type_predictor=None):
     """Start live validation in a background thread with its own event loop."""
     global LIVE_VALIDATOR_THREAD, LIVE_VALIDATOR_SESSION, LIVE_VALIDATOR_LOOP
     import asyncio
@@ -374,7 +374,6 @@ def start_live_validation(date_str, predictor, observatory, weather_service=None
         target_date=date_str,
         predictor=predictor,
         observatory=observatory,
-        weather_service=weather_service,
         bus_type_predictor=bus_type_predictor,
     )
     LIVE_VALIDATOR_SESSION = session

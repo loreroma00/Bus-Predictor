@@ -518,7 +518,6 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
     available_models: list[ModelInfo] = []
     observatory = None
     city = None
-    weather_service = None
 
     current_live_session = None
     bus_type_predictor = None
@@ -626,7 +625,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
 
     @app.on_event("startup")
     async def startup_event():
-        nonlocal predictor, available_models, observatory, city, weather_service
+        nonlocal predictor, available_models, observatory, city
 
         print("\n" + "=" * 50)
         print("Initializing ATAC Backend...")
@@ -640,12 +639,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             lenient_pipeline=lenient_pipeline,
         )
 
-        print("\n[2/6] Initializing Weather Service...")
-        from application.services.weather_service import WeatherService
-
-        weather_service = WeatherService(city)
-
-        print("\n[3/6] Generating canonical route map (if needed)...")
+        print("\n[2/6] Generating canonical route map (if needed)...")
         generate_canonical_map()
 
         print("\n[4/6] Loading ML model...")
@@ -677,7 +671,6 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         console.register_commands(
             observatory,
             predictor=predictor,
-            weather_service=weather_service,
             bus_type_predictor=bus_type_predictor,
         )
         threading.Thread(
@@ -696,9 +689,31 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
 
     @app.get("/weather", response_model=WeatherResponse)
     async def get_weather(lat: float = None, lon: float = None, hex_id: str = None):
-        """Get current weather for Rome or specified location (lat/lon or hex_id)."""
+        """Get current weather from hexagons (updated every 15 min by weather thread)."""
         try:
-            weather = weather_service.get_weather(lat=lat, lon=lon, hex_id=hex_id)
+            if city is None:
+                raise HTTPException(status_code=503, detail="City not initialized")
+
+            hexagon = None
+            if hex_id:
+                hexagon = city.get_hexagon(hex_id)
+            elif lat is not None and lon is not None:
+                target_hex = city.get_hex_id(lat, lon)
+                hexagon = city.get_hexagon(target_hex)
+
+            # Get weather from target hexagon or fall back to any with weather
+            weather = None
+            if hexagon:
+                weather = hexagon.get_weather()
+            if weather is None:
+                for h in city.hexagons.values():
+                    weather = h.get_weather()
+                    if weather and weather.temperature is not None:
+                        break
+
+            if weather is None:
+                raise HTTPException(status_code=503, detail="No weather data available yet")
+
             return WeatherResponse(
                 temperature=weather.temperature,
                 apparent_temperature=weather.apparent_temperature,
@@ -708,6 +723,8 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
                 weather_code=weather.weather_code,
                 description=weather.description,
             )
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Weather error: {str(e)}")
 
@@ -1057,7 +1074,6 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         validator = Validator(
             predictor=predictor,
             observatory=observatory,
-            weather_service=weather_service,
         )
 
         try:
@@ -1138,7 +1154,6 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             target_date=request.date,
             predictor=predictor,
             observatory=observatory,
-            weather_service=weather_service,
             bus_type_predictor=bus_type_predictor,
         )
 

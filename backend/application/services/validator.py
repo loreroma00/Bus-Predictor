@@ -60,10 +60,9 @@ class ValidationReport:
 
 
 class Validator:
-    def __init__(self, predictor, observatory, weather_service=None):
+    def __init__(self, predictor, observatory):
         self.predictor = predictor
         self.observatory = observatory
-        self.weather_service = weather_service
         self.logger = logging.getLogger("validator")
 
         self._bus_type_predictor = None
@@ -199,15 +198,21 @@ class Validator:
         return matched
 
     def _get_weather_code(self, target_date: datetime) -> int:
-        """Get weather code for the date. Defaults to 0 if unavailable."""
-        if self.weather_service is None:
-            return 0
-
+        """Get weather code from hexagon forecast. Defaults to 0 if unavailable."""
         try:
-            weather = self.weather_service.get_weather()
-            return weather.weather_code
+            city = self.observatory.get_city("Rome")
+            if city is None:
+                return 0
+            for hexagon in city.hexagons.values():
+                if hexagon.weather is not None:
+                    hour_bucket = target_date.hour
+                    weather = hexagon.get_weather_for_hour_bucket(hour_bucket)
+                    if weather is None:
+                        weather = hexagon.get_weather()
+                    return int(getattr(weather, "weather_code", 0) or 0)
+            return 0
         except Exception as e:
-            self.logger.warning(f"Could not fetch weather: {e}")
+            self.logger.warning(f"Could not fetch weather from hexagon: {e}")
             return 0
 
     def _compute_bus_type(self, trip_data: Dict) -> int:

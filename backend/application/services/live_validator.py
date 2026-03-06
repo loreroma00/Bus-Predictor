@@ -79,14 +79,12 @@ class LiveValidationSession:
         target_date: str,
         predictor,
         observatory,
-        weather_service=None,
         bus_type_predictor=None,
     ):
         self.session_id = session_id
         self.target_date = target_date
         self.predictor = predictor
         self.observatory = observatory
-        self.weather_service = weather_service
         self.bus_type_predictor = bus_type_predictor
 
         self.status = "created"
@@ -500,22 +498,33 @@ class LiveValidationSession:
             occupancy_matches=occupancy_matches,
         )
 
-    def _get_weather_code(self, target_dt: datetime) -> int:
-        """Get weather code for the date."""
-        if self.weather_service is None:
-            return 0
+    def _get_any_hexagon_weather(self):
+        """Get weather from the first available hexagon in the city."""
+        city = self.observatory.get_city("Rome")
+        if city is None:
+            return None
+        for hexagon in city.hexagons.values():
+            if hexagon.weather is not None:
+                return hexagon
+        return None
 
+    def _get_weather_code(self, target_dt: datetime) -> int:
+        """Get weather code from hexagon forecast for the given datetime."""
         try:
-            weather = self.weather_service.get_weather()
-            return weather.weather_code
+            hexagon = self._get_any_hexagon_weather()
+            if hexagon is None:
+                return 0
+            hour_bucket = target_dt.hour
+            weather = hexagon.get_weather_for_hour_bucket(hour_bucket)
+            if weather is None:
+                weather = hexagon.get_weather()
+            return int(getattr(weather, "weather_code", 0) or 0)
         except Exception as e:
-            self.logger.warning(f"Could not fetch weather: {e}")
+            self.logger.warning(f"Could not fetch weather from hexagon: {e}")
             return 0
 
     def _get_weather_code_for_trip(self, trip_data: Dict) -> int:
-        if self.weather_service is None:
-            return 0
-
+        """Get forecast weather code for a specific trip's start time."""
         try:
             trip_date = datetime.strptime(trip_data["start_date"], "%d-%m-%Y")
             hhmm = str(trip_data.get("start_time", "00:00"))
@@ -526,17 +535,13 @@ class LiveValidationSession:
             hour = hour % 24
             trip_dt = trip_date + timedelta(days=day_offset, hours=hour, minutes=minute)
 
-            weather = self.weather_service.get_weather_for_datetime(trip_dt)
-
-            if hasattr(weather, "forecast_probability") and hasattr(
-                weather, "FORECAST_PROBABILITY_UNKNOWN"
-            ):
-                if weather.forecast_probability == weather.FORECAST_PROBABILITY_UNKNOWN:
-                    self.logger.debug(
-                        "Trip %s has unknown forecast_probability for weather bucket",
-                        trip_data.get("trip_id", "?"),
-                    )
-
+            hexagon = self._get_any_hexagon_weather()
+            if hexagon is None:
+                return 0
+            hour_bucket = trip_dt.hour
+            weather = hexagon.get_weather_for_hour_bucket(hour_bucket)
+            if weather is None:
+                weather = hexagon.get_weather()
             return int(getattr(weather, "weather_code", 0) or 0)
         except Exception as e:
             self.logger.warning(

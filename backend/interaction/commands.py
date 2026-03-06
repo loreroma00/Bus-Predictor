@@ -452,10 +452,9 @@ class pause_traffic_service(Command):
 class validate_date(Command):
     command_name = "validate"
 
-    def __init__(self, predictor, observatory, weather_service=None):
+    def __init__(self, predictor, observatory):
         self._predictor = predictor
         self._obs = observatory
-        self._weather = weather_service
 
     def execute(self, args):
         if self._predictor is None:
@@ -468,7 +467,7 @@ class validate_date(Command):
             return
 
         from . import services
-        services.start_batch_validation(date_str, self._predictor, self._obs, self._weather)
+        services.start_batch_validation(date_str, self._predictor, self._obs)
 
     @staticmethod
     def help():
@@ -478,10 +477,9 @@ class validate_date(Command):
 class validate_live(Command):
     command_name = "validate live"
 
-    def __init__(self, predictor, observatory, weather_service=None, bus_type_predictor=None):
+    def __init__(self, predictor, observatory, bus_type_predictor=None):
         self._predictor = predictor
         self._obs = observatory
-        self._weather = weather_service
         self._bus_type_predictor = bus_type_predictor
 
     def execute(self, args):
@@ -497,7 +495,7 @@ class validate_live(Command):
         from . import services
         services.start_live_validation(
             date_str, self._predictor, self._obs,
-            self._weather, self._bus_type_predictor,
+            bus_type_predictor=self._bus_type_predictor,
         )
 
     @staticmethod
