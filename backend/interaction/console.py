@@ -18,7 +18,7 @@ from . import commands
 _command_registry = {}
 
 
-def register_commands(observatory):
+def register_commands(observatory, predictor=None, weather_service=None, bus_type_predictor=None):
     """
     Register all commands with their dependencies.
     Called once at application startup.
@@ -37,8 +37,13 @@ def register_commands(observatory):
         "quit": commands.command_quit(),
         "stop observers": commands.stop_observers(),
         "start observers": commands.start_observers(),
+        "stop validation": commands.stop_validation(),
+        "validation status": commands.validation_status(),
         "help": commands.command_help(),
         "pause traffic service": commands.pause_traffic_service(),
+        # Validation commands (longer prefix first for correct matching)
+        "validate live": commands.validate_live(predictor, observatory, weather_service, bus_type_predictor),
+        "validate": commands.validate_date(predictor, observatory, weather_service),
         # Complex commands
         "normalize diaries": commands.normalize_diaries(
             normalizer_fn=None,  # Uses internal import

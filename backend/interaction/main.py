@@ -138,7 +138,7 @@ def main(debug_mode: bool = False, lenient_pipeline: bool = False):
             lenient_pipeline=lenient_pipeline,
         )
 
-        # Register commands with dependencies
+        # Register commands with dependencies (predictor=None in collect mode)
         console.register_commands(observatory)
 
         # Create state interface for Debug GUI

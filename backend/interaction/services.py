@@ -27,6 +27,12 @@ TRAFFIC_ANALYSIS_QUEUE = None
 VEHICLE_ANALYSIS_THREAD = None
 VEHICLE_ANALYSIS_QUEUE = None
 
+# Validator threads
+VALIDATOR_THREAD = None
+LIVE_VALIDATOR_THREAD = None
+LIVE_VALIDATOR_SESSION = None
+LIVE_VALIDATOR_LOOP = None  # asyncio event loop for live validator
+
 UPDATE_TIME = 900
 TRAFFIC_UPDATE_TIME = 900  # 15 minutes
 
@@ -325,11 +331,148 @@ def set_state_interface(state_interface):
     _state_interface = state_interface
 
 
+def start_batch_validation(date_str, predictor, observatory, weather_service=None):
+    """Start batch validation in a background thread."""
+    global VALIDATOR_THREAD
+
+    if VALIDATOR_THREAD is not None and VALIDATOR_THREAD.is_alive():
+        logging.warning("Batch validation already running.")
+        return
+
+    def _run():
+        from application.services.validator import Validator
+        try:
+            validator = Validator(predictor, observatory, weather_service)
+            report = validator.validate_date(date_str)
+            logging.info(
+                f"Batch validation complete: {report.total_trips_validated} trips, "
+                f"median RMSE={report.median_rmse:.2f}s"
+            )
+        except Exception as e:
+            logging.error(f"Batch validation failed: {e}")
+
+    VALIDATOR_THREAD = threading.Thread(target=_run, daemon=True)
+    VALIDATOR_THREAD.start()
+    logging.info(f"Batch validation started for {date_str}")
+
+
+def start_live_validation(date_str, predictor, observatory, weather_service=None, bus_type_predictor=None):
+    """Start live validation in a background thread with its own event loop."""
+    global LIVE_VALIDATOR_THREAD, LIVE_VALIDATOR_SESSION, LIVE_VALIDATOR_LOOP
+    import asyncio
+    import uuid
+
+    if LIVE_VALIDATOR_THREAD is not None and LIVE_VALIDATOR_THREAD.is_alive():
+        logging.warning("Live validation already running.")
+        return
+
+    from application.services.live_validator import LiveValidationSession
+
+    session_id = str(uuid.uuid4())
+    session = LiveValidationSession(
+        session_id=session_id,
+        target_date=date_str,
+        predictor=predictor,
+        observatory=observatory,
+        weather_service=weather_service,
+        bus_type_predictor=bus_type_predictor,
+    )
+    LIVE_VALIDATOR_SESSION = session
+
+    def _run():
+        global LIVE_VALIDATOR_LOOP
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        LIVE_VALIDATOR_LOOP = loop
+        try:
+            started = loop.run_until_complete(session.start())
+            if started:
+                loop.run_until_complete(_wait_for_session(session))
+            else:
+                logging.warning(f"Live validation session failed to start for {date_str}")
+        except Exception as e:
+            logging.error(f"Live validation error: {e}")
+        finally:
+            loop.close()
+            LIVE_VALIDATOR_LOOP = None
+
+    async def _wait_for_session(session):
+        """Wait until the session completes or is stopped."""
+        while session.status in ("predicting", "monitoring"):
+            await asyncio.sleep(1)
+
+    # Patch _on_diary_finished to be thread-safe with the validator's event loop
+    def _threadsafe_diary_handler(event_data):
+        diary = event_data.get("diary")
+        if diary is None or not hasattr(diary, "trip_id"):
+            return
+        loop = LIVE_VALIDATOR_LOOP
+        if loop is not None and not loop.is_closed():
+            asyncio.run_coroutine_threadsafe(
+                session._validate_diary(diary.trip_id, diary), loop
+            )
+    session._on_diary_finished = _threadsafe_diary_handler
+
+    LIVE_VALIDATOR_THREAD = threading.Thread(target=_run, daemon=True)
+    LIVE_VALIDATOR_THREAD.start()
+    logging.info(f"Live validation started for {date_str} (session {session_id[:8]})")
+
+
+def stop_live_validation():
+    """Stop the active live validation session."""
+    global LIVE_VALIDATOR_SESSION, LIVE_VALIDATOR_LOOP
+    import asyncio
+
+    if LIVE_VALIDATOR_SESSION is None:
+        logging.info("No live validation session running.")
+        return
+
+    session = LIVE_VALIDATOR_SESSION
+    loop = LIVE_VALIDATOR_LOOP
+
+    if loop is not None and not loop.is_closed():
+        future = asyncio.run_coroutine_threadsafe(session.stop(), loop)
+        try:
+            future.result(timeout=10)
+        except Exception as e:
+            logging.error(f"Error stopping live validation: {e}")
+
+    LIVE_VALIDATOR_SESSION = None
+    logging.info("Live validation stopped.")
+
+
+def get_validation_status():
+    """Return status info for both validators."""
+    status = {}
+
+    if VALIDATOR_THREAD is not None and VALIDATOR_THREAD.is_alive():
+        status["batch"] = "running"
+    else:
+        status["batch"] = "idle"
+
+    if LIVE_VALIDATOR_SESSION is not None and LIVE_VALIDATOR_THREAD is not None and LIVE_VALIDATOR_THREAD.is_alive():
+        session = LIVE_VALIDATOR_SESSION
+        status["live"] = session.status
+        status["live_validated"] = len(session.validated_trips)
+        status["live_pending"] = len(session.pending_trip_ids)
+        status["live_predicted"] = len(session.predicted_trips)
+        status["live_discarded"] = len(session.discarded_trip_ids)
+        live_status = session.get_status()
+        status["live_median_rmse"] = live_status.median_rmse
+    else:
+        status["live"] = "idle"
+
+    return status
+
+
 def stop_services():
     """Stop all background services gracefully."""
     logging.info("Stopping Services (Collection & Auto-Save)...")
     data.STOP_COLLECTION_EVENT.set()
-    
+
+    # Stop validators
+    stop_live_validation()
+
     # Unsubscribe
     domain_events.unsubscribe(DIARY_FINISHED, _on_diary_finished)
 

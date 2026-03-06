@@ -502,6 +502,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         total_predicted: int = 0
         total_validated: int = 0
         total_pending: int = 0
+        total_discarded: int = 0
         median_mse: float = 0.0
         median_rmse: float = 0.0
         min_mse: float = 0.0
@@ -673,7 +674,12 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         from interaction import console
         import threading
 
-        console.register_commands(observatory)
+        console.register_commands(
+            observatory,
+            predictor=predictor,
+            weather_service=weather_service,
+            bus_type_predictor=bus_type_predictor,
+        )
         threading.Thread(
             target=console.run_console_loop,
             daemon=True,
@@ -1191,6 +1197,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             total_predicted=status.total_predicted,
             total_validated=status.total_validated,
             total_pending=status.total_pending,
+            total_discarded=status.total_discarded,
             median_mse=status.median_mse,
             median_rmse=status.median_rmse,
             min_mse=status.min_mse,

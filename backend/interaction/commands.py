@@ -444,6 +444,110 @@ class pause_traffic_service(Command):
         )
 
 
+# ============================================================
+# Validation Commands
+# ============================================================
+
+
+class validate_date(Command):
+    command_name = "validate"
+
+    def __init__(self, predictor, observatory, weather_service=None):
+        self._predictor = predictor
+        self._obs = observatory
+        self._weather = weather_service
+
+    def execute(self, args):
+        if self._predictor is None:
+            logging.warning("No predictor loaded. Start with 'serve' mode or load a model first.")
+            return
+
+        date_str = args.strip()
+        if not date_str:
+            logging.warning("Usage: validate <DD-MM-YYYY>")
+            return
+
+        from . import services
+        services.start_batch_validation(date_str, self._predictor, self._obs, self._weather)
+
+    @staticmethod
+    def help():
+        logging.info("validate <DD-MM-YYYY>: Run batch validation for a date (background thread)")
+
+
+class validate_live(Command):
+    command_name = "validate live"
+
+    def __init__(self, predictor, observatory, weather_service=None, bus_type_predictor=None):
+        self._predictor = predictor
+        self._obs = observatory
+        self._weather = weather_service
+        self._bus_type_predictor = bus_type_predictor
+
+    def execute(self, args):
+        if self._predictor is None:
+            logging.warning("No predictor loaded. Start with 'serve' mode or load a model first.")
+            return
+
+        date_str = args.strip()
+        if not date_str:
+            logging.warning("Usage: validate live <DD-MM-YYYY>")
+            return
+
+        from . import services
+        services.start_live_validation(
+            date_str, self._predictor, self._obs,
+            self._weather, self._bus_type_predictor,
+        )
+
+    @staticmethod
+    def help():
+        logging.info("validate live <DD-MM-YYYY>: Start live validation session (background thread)")
+
+
+class stop_validation(Command):
+    command_name = "stop validation"
+
+    def __init__(self):
+        pass
+
+    def execute(self, args):
+        from . import services
+        services.stop_live_validation()
+
+    @staticmethod
+    def help():
+        logging.info("stop validation: Stop any running live validation session")
+
+
+class validation_status(Command):
+    command_name = "validation status"
+
+    def __init__(self):
+        pass
+
+    def execute(self, args):
+        from . import services
+        status = services.get_validation_status()
+
+        logging.info("--- Validation Status ---")
+        logging.info(f"Batch: {status['batch']}")
+        logging.info(f"Live:  {status['live']}")
+
+        if status["live"] != "idle":
+            logging.info(f"  Predicted:  {status.get('live_predicted', 0)}")
+            logging.info(f"  Validated:  {status.get('live_validated', 0)}")
+            logging.info(f"  Pending:    {status.get('live_pending', 0)}")
+            logging.info(f"  Discarded:  {status.get('live_discarded', 0)}")
+            rmse = status.get('live_median_rmse', 0)
+            if rmse > 0:
+                logging.info(f"  Median RMSE: {rmse:.2f}s")
+
+    @staticmethod
+    def help():
+        logging.info("validation status: Show status of running validators")
+
+
 class print_all_diaries_vehicle(Command):
     command_name = "print diaries vehicle"
 
