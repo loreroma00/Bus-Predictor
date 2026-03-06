@@ -464,7 +464,6 @@ def run_live_validation(api_client: APIClient, date: str):
     print(f"Status: {session['status']}")
     print(f"Scheduled trips: {session['total_scheduled']}")
     print(f"Predicted trips: {session['total_predicted']}")
-    print(f"Auto-stops at: {session['stops_at']}")
 
     print("\nConnecting to WebSocket for real-time updates...")
     print("Press Ctrl+C to stop monitoring (session will continue on server).\n")
@@ -482,6 +481,9 @@ def run_live_validation(api_client: APIClient, date: str):
     except KeyboardInterrupt:
         print("\n\nDisconnected from WebSocket.")
         print("Session continues on server. Check status with --live-status.")
+    except Exception:
+        print("\n\nWebSocket connection closed.")
+        print("Session may still be running. Check status with --live-status.")
 
     print(f"\nSession ID: {session_id}")
 
@@ -526,7 +528,6 @@ def get_live_status(api_client: APIClient):
         print(f"Validated:      {status['total_validated']}")
         print(f"Pending:        {status['total_pending']}")
         print(f"Started at:     {status['started_at']}")
-        print(f"Stops at:       {status['stops_at']}")
 
         if status["total_validated"] > 0:
             print(f"\nDelay Metrics:")

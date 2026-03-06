@@ -82,6 +82,14 @@ def initialize_collection(config=None, lenient_pipeline: bool = False):
     observatory.add_city("Rome", static_bus_lanes=static_bus_lanes)
     city = observatory.get_city("Rome")
 
+    # Weather update strategy
+    from application.domain.weather_strategy import get_weather_strategy, get_available_weather_strategies
+    services_cfg = config.get("services", {})
+    weather_strategy_name = services_cfg.get("weather_strategy", "greedy")
+    weather_subsets = int(services_cfg.get("weather_subsets", "4"))
+    city.weather_strategy = get_weather_strategy(weather_strategy_name, n_subsets=weather_subsets)
+    logging.info(f"Weather strategy: '{weather_strategy_name}' (available: {get_available_weather_strategies()})")
+
     # City cache (street names)
     if hasattr(cache_strategy, "load_city_cache"):
         cache_strategy.load_city_cache(city)

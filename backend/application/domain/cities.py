@@ -2,7 +2,6 @@ from .live_data import Autobus as Bus
 from .weather import Weather
 from . import h3_utils
 from typing import overload, Callable
-import requests
 import time
 
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
@@ -297,6 +296,8 @@ class City:
             str, Bus
         ] = {}  # BusID -> Bus (O(1) lookup); Where buses go "to die".
         self.static_bus_lanes = static_bus_lanes if static_bus_lanes else {}
+        # Weather update strategy (set externally, defaults to greedy)
+        self.weather_strategy = None  # Set by initialize_collection()
         # Injected callback for expired traffic handling (LOW COUPLING)
         self._on_bus_entered_expired_hex: Callable[[str, str], None] = None
 
@@ -450,99 +451,11 @@ class City:
         return bus_id in self.bus_deposit
 
     def update_weather(self):
-        """Updates current + hourly forecast weather for all hexagons in a single API call."""
-        import logging
-
-        # Snapshot to avoid "dict changed size during iteration"
-        hex_snapshot = list(self.hexagons.values())
-        if not hex_snapshot:
-            return
-
-        # Collect coordinates for batch request
-        lats = []
-        lons = []
-        for hexagon in hex_snapshot:
-            coords = h3_utils.get_coords_from_h3(hexagon.hex_id)
-            lats.append(str(coords[0]))
-            lons.append(str(coords[1]))
-
-        params = {
-            "latitude": ",".join(lats),
-            "longitude": ",".join(lons),
-            "current": "temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,apparent_temperature",
-            "hourly": "temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,apparent_temperature,precipitation_probability",
-            "wind_speed_unit": "ms",
-            "timeformat": "unixtime",
-            "timezone": "auto",
-        }
-
-        response = requests.get(WEATHER_URL, params=params, timeout=30)
-        response.raise_for_status()
-        results = response.json()
-
-        # Single location returns a dict, multiple returns a list
-        if isinstance(results, dict):
-            results = [results]
-
-        for hexagon, data in zip(hex_snapshot, results):
-            try:
-                self._apply_weather_to_hexagon(hexagon, data)
-            except Exception as e:
-                logging.warning(f"Failed to parse weather for hex {hexagon.hex_id}: {e}")
-
-    @staticmethod
-    def _apply_weather_to_hexagon(hexagon, data: dict):
-        """Parse API response and update a single hexagon's current + forecast weather."""
-        current_data = data["current"]
-
-        interval = current_data.get("interval", 900)
-        precip_intensity = current_data["precipitation"] * (3600 / interval)
-
-        weather = Weather(
-            valid_time=current_data["time"],
-            temperature=current_data["temperature_2m"],
-            apparent_temperature=current_data["apparent_temperature"],
-            humidity=current_data["relative_humidity_2m"],
-            precip_intensity=precip_intensity,
-            wind_speed=current_data["wind_speed_10m"],
-            weather_code=current_data["weather_code"],
-        )
-        hexagon.set_weather(weather)
-
-        # Hourly forecast
-        hourly = data.get("hourly") or {}
-        hourly_times = hourly.get("time") or []
-        hourly_temps = hourly.get("temperature_2m") or []
-        hourly_apparent = hourly.get("apparent_temperature") or []
-        hourly_humidity = hourly.get("relative_humidity_2m") or []
-        hourly_precip = hourly.get("precipitation") or []
-        hourly_wind = hourly.get("wind_speed_10m") or []
-        hourly_code = hourly.get("weather_code") or []
-        hourly_prob = hourly.get("precipitation_probability") or []
-
-        forecast_items = []
-        for i, ts in enumerate(hourly_times):
-            if ts is None:
-                continue
-            bucket = int(ts // 3600)
-            probability = Weather.FORECAST_PROBABILITY_UNKNOWN
-            if i < len(hourly_prob) and hourly_prob[i] is not None:
-                probability = float(hourly_prob[i]) / 100.0
-
-            fw = Weather(
-                valid_time=ts,
-                temperature=hourly_temps[i] if i < len(hourly_temps) else 0,
-                apparent_temperature=hourly_apparent[i] if i < len(hourly_apparent) else 0,
-                humidity=hourly_humidity[i] if i < len(hourly_humidity) else 0,
-                precip_intensity=hourly_precip[i] if i < len(hourly_precip) else 0,
-                wind_speed=hourly_wind[i] if i < len(hourly_wind) else 0,
-                weather_code=hourly_code[i] if i < len(hourly_code) else 0,
-                forecast_probability=probability,
-                is_forecast=True,
-            )
-            forecast_items.append({bucket: fw})
-
-        hexagon.set_weather_forecast(forecast_items)
+        """Delegates weather fetching to the configured strategy."""
+        if self.weather_strategy is None:
+            from .weather_strategy import GreedyWeatherStrategy
+            self.weather_strategy = GreedyWeatherStrategy()
+        self.weather_strategy.update(self, WEATHER_URL)
 
     def get_weather(self, hex_id: str) -> Weather:
         return self.hexagons[hex_id].weather

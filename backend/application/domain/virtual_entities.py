@@ -142,8 +142,11 @@ class Observatory:
 
                     if time.time() - last_active > ttl:
                         logging.info(
-                            f"🗑️ Pruning stale bus {bus_id} (inactive > {ttl}s)"
+                            f"Pruning stale bus {bus_id} (inactive > {ttl}s)"
                         )
+                        observer = bus.get_observer()
+                        if observer and observer.current_diary and observer.current_diary.measurements:
+                            observer.archive_current_diary()
                         city.bus_to_deposit(bus_id)
 
     @overload

@@ -31,7 +31,6 @@ VEHICLE_ANALYSIS_QUEUE = None
 VALIDATOR_THREAD = None
 LIVE_VALIDATOR_THREAD = None
 LIVE_VALIDATOR_SESSION = None
-LIVE_VALIDATOR_LOOP = None  # asyncio event loop for live validator
 
 UPDATE_TIME = 900
 TRAFFIC_UPDATE_TIME = 900  # 15 minutes
@@ -358,7 +357,7 @@ def start_batch_validation(date_str, predictor, observatory):
 
 def start_live_validation(date_str, predictor, observatory, bus_type_predictor=None):
     """Start live validation in a background thread with its own event loop."""
-    global LIVE_VALIDATOR_THREAD, LIVE_VALIDATOR_SESSION, LIVE_VALIDATOR_LOOP
+    global LIVE_VALIDATOR_THREAD, LIVE_VALIDATOR_SESSION
     import asyncio
     import uuid
 
@@ -379,10 +378,8 @@ def start_live_validation(date_str, predictor, observatory, bus_type_predictor=N
     LIVE_VALIDATOR_SESSION = session
 
     def _run():
-        global LIVE_VALIDATOR_LOOP
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        LIVE_VALIDATOR_LOOP = loop
         try:
             started = loop.run_until_complete(session.start())
             if started:
@@ -393,24 +390,11 @@ def start_live_validation(date_str, predictor, observatory, bus_type_predictor=N
             logging.error(f"Live validation error: {e}")
         finally:
             loop.close()
-            LIVE_VALIDATOR_LOOP = None
 
     async def _wait_for_session(session):
         """Wait until the session completes or is stopped."""
         while session.status in ("predicting", "monitoring"):
             await asyncio.sleep(1)
-
-    # Patch _on_diary_finished to be thread-safe with the validator's event loop
-    def _threadsafe_diary_handler(event_data):
-        diary = event_data.get("diary")
-        if diary is None or not hasattr(diary, "trip_id"):
-            return
-        loop = LIVE_VALIDATOR_LOOP
-        if loop is not None and not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(
-                session._validate_diary(diary.trip_id, diary), loop
-            )
-    session._on_diary_finished = _threadsafe_diary_handler
 
     LIVE_VALIDATOR_THREAD = threading.Thread(target=_run, daemon=True)
     LIVE_VALIDATOR_THREAD.start()
@@ -419,7 +403,7 @@ def start_live_validation(date_str, predictor, observatory, bus_type_predictor=N
 
 def stop_live_validation():
     """Stop the active live validation session."""
-    global LIVE_VALIDATOR_SESSION, LIVE_VALIDATOR_LOOP
+    global LIVE_VALIDATOR_SESSION
     import asyncio
 
     if LIVE_VALIDATOR_SESSION is None:
@@ -427,7 +411,7 @@ def stop_live_validation():
         return
 
     session = LIVE_VALIDATOR_SESSION
-    loop = LIVE_VALIDATOR_LOOP
+    loop = session._loop
 
     if loop is not None and not loop.is_closed():
         future = asyncio.run_coroutine_threadsafe(session.stop(), loop)

@@ -492,7 +492,7 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         total_predicted: int
         status: str
         started_at: str
-        stops_at: str
+        stops_at: Optional[str] = None
 
     class LiveValidateStatusResponse(BaseModel):
         session_id: Optional[str] = None

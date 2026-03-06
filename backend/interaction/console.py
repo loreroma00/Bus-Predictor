@@ -41,6 +41,7 @@ def register_commands(observatory, predictor=None, bus_type_predictor=None):
         "validation status": commands.validation_status(),
         "help": commands.command_help(),
         "pause traffic service": commands.pause_traffic_service(),
+        "weather strategy": commands.weather_strategy_cmd(observatory),
         # Validation commands (longer prefix first for correct matching)
         "validate live": commands.validate_live(predictor, observatory, bus_type_predictor),
         "validate": commands.validate_date(predictor, observatory),

@@ -578,3 +578,32 @@ class print_all_diaries_vehicle(Command):
         logging.info(
             "print diaries vehicle <vehicle_label>: Show all diaries for a specific vehicle"
         )
+
+
+class weather_strategy_cmd(Command):
+    command_name = "weather strategy"
+
+    def __init__(self, observatory):
+        self._obs = observatory
+
+    def execute(self, args):
+        from application.domain.weather_strategy import get_weather_strategy, get_available_weather_strategies
+
+        city = self._obs.get_city("Rome")
+        if city is None:
+            logging.warning("City not initialized.")
+            return
+
+        name = args.strip()
+        if not name:
+            current = getattr(city.weather_strategy, "strategy_name", "unknown")
+            logging.info(f"Current weather strategy: {current}")
+            logging.info(f"Available: {get_available_weather_strategies()}")
+            return
+
+        city.weather_strategy = get_weather_strategy(name)
+        logging.info(f"Weather strategy changed to: {name}")
+
+    @staticmethod
+    def help():
+        logging.info("weather strategy [name]: Show or change the weather update strategy")

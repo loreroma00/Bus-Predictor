@@ -101,6 +101,7 @@ class LiveValidationSession:
 
         self.started_at: Optional[datetime] = None
         self.stops_at: Optional[datetime] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self.logger = logging.getLogger(f"live_validator.{session_id[:8]}")
 
@@ -115,9 +116,7 @@ class LiveValidationSession:
             return False
 
         self.started_at = datetime.now()
-
         target_dt = datetime.strptime(self.target_date, "%d-%m-%Y")
-        self.stops_at = target_dt + timedelta(days=1, hours=4)
 
         self.status = "predicting"
         await self._broadcast_status()
@@ -173,6 +172,9 @@ class LiveValidationSession:
             # Resolve past trips: memory first, DB fallback once
             await self._resolve_past_trips()
 
+            # Capture event loop for thread-safe diary event handling
+            self._loop = asyncio.get_running_loop()
+
             # Subscribe for future trips
             domain_events.subscribe(DIARY_FINISHED, self._on_diary_finished)
 
@@ -180,7 +182,7 @@ class LiveValidationSession:
 
             self.logger.info(
                 f"Session started: {len(self.predicted_trips)} trips predicted, "
-                f"{len(self.failed_trip_ids)} failed, stops at {self.stops_at}"
+                f"{len(self.failed_trip_ids)} failed"
             )
             return True
 
@@ -697,7 +699,10 @@ class LiveValidationSession:
             self.logger.debug(f"Ignoring diary for unknown trip: {trip_id}")
             return
 
-        asyncio.create_task(self._validate_diary(trip_id, diary))
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._validate_diary(trip_id, diary), self._loop
+            )
 
     async def _validate_diary(self, trip_id: str, diary: Diary):
         """Validate a completed diary against the prediction."""
@@ -829,13 +834,8 @@ class LiveValidationSession:
         return None
 
     async def _monitor_loop(self):
-        """Background loop to check for timeout and log progress."""
+        """Background loop to log progress."""
         while not self._stop_event.is_set():
-            if self.stops_at and datetime.now() >= self.stops_at:
-                self.logger.info("Session timeout reached (4AM)")
-                await self._complete()
-                return
-
             await self._broadcast_progress()
             await asyncio.sleep(60)
 
