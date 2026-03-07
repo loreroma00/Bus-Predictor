@@ -33,9 +33,17 @@ from config import Prediction, Traffic, Vehicle
 logger = logging.getLogger(__name__)
 
 
+# Shared connection pools keyed by connection_string.
+# All tables on the same server share one pool.
+_shared_pools: dict[str, Any] = {}
+
+
 class TimescaleDBConnection:
     """
     Async connection pool for TimescaleDB.
+
+    Pools are shared across all instances with the same connection_string.
+    Each instance manages its own write queue for a specific table.
     """
 
     def __init__(self, connection_string: str, table_name: str):
@@ -51,9 +59,15 @@ class TimescaleDBConnection:
         self._batch_size = 100
 
     async def connect(self):
-        """Establish connection pool."""
+        """Establish or reuse a shared connection pool."""
         if not ASYNCPG_AVAILABLE:
             return False
+
+        # Reuse existing shared pool if available
+        if self.connection_string in _shared_pools:
+            self.pool = _shared_pools[self.connection_string]
+            logger.info(f"Reusing shared pool for {self.table_name}")
+            return True
 
         try:
             self.pool = await asyncpg.create_pool(
@@ -62,23 +76,21 @@ class TimescaleDBConnection:
                 max_size=10,
                 command_timeout=60,
             )
-            logger.info(f"✅ Connected to TimescaleDB ({self.table_name})")
+            _shared_pools[self.connection_string] = self.pool
+            logger.info(f"Connected to TimescaleDB (shared pool, first table: {self.table_name})")
             return True
         except Exception as e:
-            logger.error(f"❌ TimescaleDB connection failed for {self.table_name}: {e}")
+            logger.error(f"TimescaleDB connection failed for {self.table_name}: {e}")
             return False
 
     async def get_valid_pool(self):
         """Ensure the pool is valid for the current loop."""
         if self.pool:
             try:
-                # Check if pool is bound to a different or closed loop
-                # asyncpg Pool stores the loop in ._loop (private but essential here)
                 current_loop = asyncio.get_running_loop()
                 if getattr(self.pool, "_loop", None) != current_loop:
-                    # Loop changed (likely due to asyncio.run in threads)
-                    # We can't strictly close the old pool if its loop is closed,
-                    # but we must discard it.
+                    # Loop changed — discard shared pool reference too
+                    _shared_pools.pop(self.connection_string, None)
                     self.pool = None
             except Exception:
                 self.pool = None
@@ -93,10 +105,12 @@ class TimescaleDBConnection:
         if self._write_queue:
             await self._flush_queue()
         if self.pool:
-            # Only close if loop matches, otherwise let it die
+            # Only close if this is the last reference and loop matches
             try:
                 current_loop = asyncio.get_running_loop()
                 if getattr(self.pool, "_loop", None) == current_loop:
+                    # Remove from shared pools first
+                    _shared_pools.pop(self.connection_string, None)
                     await self.pool.close()
             except Exception:
                 pass
@@ -414,52 +428,53 @@ def get_db_connection(
 
 
 async def init_database(config: dict = None) -> bool:
-    """Initialize the default database connection."""
+    """Initialize the default database connections (shared pools)."""
 
-    pred_vec = get_db_connection(
-        connection_string=Prediction.VECTOR_DB_CONNECTION,
-        table_name=Prediction.VECTOR_TABLE,
-    )
-    pred_lbl = get_db_connection(
-        connection_string=Prediction.VECTOR_DB_CONNECTION,
-        table_name=Prediction.LABEL_TABLE,
-    )
-
-    # Initialize Traffic if enabled
-    connections = [pred_vec.connect(), pred_lbl.connect()]
+    # Collect all instances that need connecting
+    instances = [
+        get_db_connection(
+            connection_string=Prediction.VECTOR_DB_CONNECTION,
+            table_name=Prediction.VECTOR_TABLE,
+        ),
+        get_db_connection(
+            connection_string=Prediction.VECTOR_DB_CONNECTION,
+            table_name=Prediction.LABEL_TABLE,
+        ),
+    ]
 
     if Traffic.ENABLED:
-        traf_vec = get_db_connection(
+        instances.append(get_db_connection(
             connection_string=Traffic.VECTOR_DB_CONNECTION,
             table_name=Traffic.VECTOR_TABLE,
-        )
-        traf_lbl = get_db_connection(
+        ))
+        instances.append(get_db_connection(
             connection_string=Traffic.VECTOR_DB_CONNECTION,
             table_name=Traffic.LABEL_TABLE,
-        )
-        connections.extend([traf_vec.connect(), traf_lbl.connect()])
+        ))
 
     if Vehicle.ENABLED:
-        veh_vec = get_db_connection(
+        instances.append(get_db_connection(
             connection_string=Vehicle.VECTOR_DB_CONNECTION,
             table_name=Vehicle.VECTOR_TABLE,
-        )
-        veh_lbl = get_db_connection(
+        ))
+        instances.append(get_db_connection(
             connection_string=Vehicle.VECTOR_DB_CONNECTION,
             table_name=Vehicle.LABEL_TABLE,
-        )
-        connections.extend([veh_vec.connect(), veh_lbl.connect()])
+        ))
 
-    results = await asyncio.gather(*connections)
+    # connect() reuses shared pools, so only the first call per
+    # connection_string actually creates a pool.
+    results = await asyncio.gather(*[inst.connect() for inst in instances])
     return all(results)
 
 
 async def close_database():
-    """Close all database connections."""
+    """Close all database connections and shared pools."""
     global _db_instances
     for conn in _db_instances.values():
         await conn.close()
     _db_instances.clear()
+    _shared_pools.clear()
 
 
 def get_sync_engine(connection_string: str = None):
