@@ -9,7 +9,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from dataset import BusDataset
-from model import BusLSTM, BusODELSTM
+from model import BusLSTM, OccupancyLSTM
 
 try:
     import matplotlib
@@ -75,8 +75,8 @@ def evaluate_model(config_path: Path):
     crowd_kwargs = model_kwargs.copy()
     crowd_kwargs["num_lstm_layers"] = config.get("num_lstm_layers", 2)
 
-    model_time = BusODELSTM(**model_kwargs).to(DEVICE)
-    model_crowd = BusLSTM(**crowd_kwargs).to(DEVICE)
+    model_time = BusLSTM(**model_kwargs).to(DEVICE)
+    model_crowd = OccupancyLSTM(**crowd_kwargs).to(DEVICE)
 
     # Caricamento e pulizia chiavi
     state_time = torch.load(time_weights_path, map_location=DEVICE)
@@ -107,8 +107,8 @@ def evaluate_model(config_path: Path):
             x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [b.to(DEVICE) for b in batch]
             
             # ELABORAZIONE DISACCOPPIATA
-            pred_time, _ = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
-            _, pred_crowd_logits = model_crowd(x1_cat, x1_dense, x2_cat, x2_dense)
+            pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
+            pred_crowd_logits = model_crowd(x1_cat, x1_dense, x2_cat, x2_dense)
 
             # SCALING AGGIORNATO A 600.0 (10 Minuti)
             pred_time_sec = pred_time.squeeze(-1) * 600.0

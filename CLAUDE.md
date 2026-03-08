@@ -4,82 +4,102 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ATAC Bus Delay Prediction System — an ML system for predicting bus arrival delays in Rome's ATAC network. Combines real-time GTFS data collection, TomTom traffic data, Open-Meteo weather data, and deep learning models (LSTM/ODE-LSTM) to forecast per-stop delays.
+ATAC Bus Delay Prediction system for Rome's public transit (ATAC). Predicts bus delays and occupancy using LSTM/ODE neural networks trained on GTFS real-time data, traffic, and weather. Two main components: a Python backend (data collection + FastAPI prediction server) and a Python CLI frontend.
 
-**Tech stack**: Python 3.11+, FastAPI, PyTorch, pandas, TimescaleDB/PostgreSQL, asyncio
+## Common Commands
 
-## Repository Layout
-
-- **`backend/`** — Main application (domain models, data collection, ML, API server)
-- **`frontend-thesis/`** — CLI client for predictions and validation
-- **`backend-thesis/`** — Legacy backend (mostly unused)
-- **`thesisProjectReal/`** — Original thesis data files
-
-## Running the Application
-
-All commands run from `backend/`. Always use the venv: `source venv/bin/activate`
+All commands run from `backend/` unless noted. Activate venv first: `source venv/bin/activate` (root-level venv).
 
 ```bash
-# Data collection (GTFS-RT feeds + traffic + weather)
+# Data collection pipeline
 python main.py collect [--debug] [--lenient-pipeline]
 
-# Prediction API server (FastAPI, default 0.0.0.0:8000)
-python main.py serve [--model NAME] [--host HOST] [--port PORT]
+# Start prediction API server
+python main.py serve --model bus_model_mse_ODE.pth
 
 # Test database connections
 python main.py test-db
 
-# ML dataset preparation
-python prepare_dataset.py [--skip-db] [--force-canonical] [--start-date YYYY-MM-DD]
+# Run tests
+cd backend && python -m pytest tests/
+python -m pytest tests/test_domain.py        # single test file
+python -m pytest tests/test_domain.py -k "test_name"  # single test
 
-# Model training
-cd application/model && python train.py
+# Dataset preparation (from backend/)
+python prepare_dataset.py [--skip-db] [--start-date YYYY-MM-DD] [--force-canonical]
+
+# Model training (from backend/application/model/)
+python train.py
 
 # Frontend CLI (from frontend-thesis/)
-python cli.py                              # Interactive prediction
-python cli.py --test-model 2026-02-28      # Retrospective validation
-python cli.py --live-validate 02-03-2026   # Live validation via WebSocket
+python cli.py                          # interactive prediction
+python cli.py --test-model 28-02-2026  # retrospective validation
+python cli.py --live-validate 02-03-2026  # live validation via WebSocket
 ```
-
-## Tests
-
-```bash
-pytest backend/tests/
-```
-
-15 test files covering domain entities, data cleaning pipelines, traffic services, cache strategies, geocoding, events, and integration tests.
 
 ## Architecture
 
-**Domain-Driven Design** with clear layer separation:
+### Dual-Model Prediction System
 
-- **`application/domain/`** — Core entities: Route, Trip, Stop, Bus, Measurement, Diary. The `Observatory` is the main facade coordinating data flow.
-- **`application/live/`** — Real-time GTFS-RT feed fetching (protobuf), TomTom traffic fetching.
-- **`application/post_processing/`** — Data cleaning pipelines (prediction/traffic/lenient) and feature vectorization.
-- **`application/preprocessing/`** — ML dataset preparation: canonical shape mapping (routes to 100 segments), vector processing, feature scaling.
-- **`application/model/`** — `BusLSTM` / `BusODELSTM` architectures, training, and inference (`Predictor` class).
-- **`application/services/`** — Application services: shared state, live validation, bus type prediction.
-- **`persistence/`** — TimescaleDB async connections, file/no-cache strategies, Parquet diary storage.
-- **`interaction/`** — CLI console commands, Dash debug GUI, wiring/initialization in `interaction/main.py`.
+The predictor (`application/model/predictor.py`) uses **two separate models** for a single trip:
+- **BusLSTM** (`model.py`) — predicts delay (time). Uses Neural ODE + LSTM. Output scaled by 600.0 (10 minutes).
+- **OccupancyLSTM** (`model.py`) — predicts occupancy/crowd level (classification, 7 classes).
 
-**Key patterns**:
-- **Observer pattern**: `ObserverManager` manages `Diary` objects (one per active trip), each tracking `Measurement` observations. `DIARY_FINISHED` domain event fires on trip completion.
-- **Strategy pattern**: `CacheStrategy` (file/none), `TripVerificationStrategy` (basic/scaled), `WeatherStrategy` (greedy, etc.) — all injected into Observatory.
-- **Dependency injection**: Observatory and commands receive dependencies via constructor; wiring happens in `interaction/main.py`.
+Both share the same encoder-decoder architecture (categorical embeddings → FCNN encoder → LSTM decoder) but have different output heads. Each trip is represented as 100 fixed segments (`BATCH_SIZE = 100`).
 
-**Data flow**: GTFS-RT feeds → Observatory → Buses → Observers → Diaries → Data Cleaning → Vectorization → TimescaleDB / Parquet storage → ML training → Predictor inference → REST API response.
+Model inputs are split into:
+- **x1** (trip-level): route_id, direction_id, day_type, weather_code, bus_type, time_sin/cos
+- **x2** (segment-level, 100 steps): H3 hex index, stop_sequence, shape_dist, distance_to_next_stop, segment_idx, speed, speed_ratio
+
+A **LightGBM classifier** (`model_bus.py`) separately predicts bus_type from route/time/day features.
+
+### Data Pipeline (4 stages)
+
+1. `canonical_shape_mapper` — Maps GTFS static shapes to 100 uniform segments per route
+2. `preprocessing` — Extracts raw data from TimescaleDB into daily parquet files
+3. `vector_processing` — Converts to LSTM-ready vectors
+4. `scaling_2` — Feature scaling → `dataset_lstm_final.parquet`
+
+### Real-Time Collection (`main.py collect`)
+
+Uses an observer pattern to track buses in real-time:
+- **Observatory** / **ObserverManager** (`domain/`) — manages per-vehicle Observers that record Diaries (trip measurement logs)
+- **FeedFetcher** (`live/`) — polls GTFS-RT protobuf feeds for vehicle positions and trip updates
+- **TrafficService** (`live/`) — fetches TomTom traffic flow tiles, mapped to H3 hexagons
+- **WeatherService** (`services/`) — Open-Meteo weather data, with configurable update strategy (greedy/subset)
+- **Diaries** are persisted as parquet files in `diaries/`
+
+### Persistence Layer
+
+- **TimescaleDB** (PostgreSQL) — stores transit vectors, prediction vectors, traffic vectors
+- **File-based caching** — `ledger_cache.pkl`, `city_cache.pkl` for GTFS static data
+- Configurable cache strategy via `config.ini` (`[services] cache_strategy`)
+
+### API Server (`main.py serve`)
+
+FastAPI app with endpoints for prediction, routes, weather, and live validation. Key endpoints:
+- `POST /predict` — single trip delay prediction
+- `POST /validate/live/schedule` — start live validation session
+- `WS /validate/live/ws/{session_id}` — WebSocket for real-time validation updates
+
+### Frontend CLI
+
+`frontend-thesis/cli.py` — interactive prediction client and validation tool. Connects to backend via HTTP (`api_client.py`) and WebSocket for live validation.
 
 ## Configuration
 
-`backend/config.ini` (copy from `config.ini.example`). Sections: `[api]`, `[prediction]`, `[traffic]`, `[vehicle]` (DB connections), `[urls]` (GTFS/weather/traffic feeds), `[paths]`, `[timings]`, `[services]`, `[data_cleaning]`.
+`backend/config.ini` (copied from `config.ini.example`). Environment variables override config values:
+- `TOMTOM_API_KEY` — TomTom traffic API key
+- `TIMESCALE_CONNECTION_STRING` — PostgreSQL connection string
 
-Environment variable overrides: `TOMTOM_API_KEY`, `TIMESCALE_CONNECTION_STRING`.
+Config is loaded via `config.py` which exposes typed classes: `API`, `URLs`, `Paths`, `Timings`, `Services`, `DataCleaning`, `Prediction`, `Traffic`, `Vehicle`.
 
-## Code Style & Conventions
+## Key Spatial Concepts
 
-- Avoid warnings in all code.
-- Low coupling, high cohesion, top-down imports (never bottom-up).
-- Reuse and generalize existing code when possible.
-- Use `pip` for package management.
-- Parquet files go in `backend/parquets/`, diary data in `backend/diaries/`.
-- If anything is unclear, ask before acting. If something can be improved, point it out with reasoning.
+- **H3 hexagons** — Uber's H3 spatial indexing used throughout for location encoding
+- Routes are normalized to 100 segments via canonical shape mapping
+- Stop sequences are mapped to segments; predictions are per-segment, then aggregated to stops
+
+## Dependencies
+
+Root `requirements.txt` covers both components. Key: PyTorch, torchdiffeq (Neural ODE), LightGBM, FastAPI, asyncpg, h3, geopandas, scikit-learn, pandas.

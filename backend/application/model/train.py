@@ -47,7 +47,7 @@ def train(
     # 2. INIZIALIZZAZIONE MODELLO
     print(f"Initializing model for iteration {hyperparameter_iteration}...")
 
-    model_time = BusODELSTM(
+    model_time = BusLSTM(
         n_x1_dense_features=n_x1_dense,
         n_x2_dense_features=n_x2_dense,
         x1_cat_cardinalities=x1_cat_cards,
@@ -55,7 +55,7 @@ def train(
         encoder_hidden_size=ENCODER_HIDDEN_SIZE,
         lstm_hidden_size=DECODER_HIDDEN_SIZE,
     ).to(DEVICE)
-    model_occupancy = BusLSTM(
+    model_occupancy = OccupancyLSTM(
         n_x1_dense_features=n_x1_dense,
         n_x2_dense_features=n_x2_dense,
         x1_cat_cardinalities=x1_cat_cards,
@@ -89,7 +89,7 @@ def train(
     sch_crowd = optim.lr_scheduler.CosineAnnealingLR(opt_crowd, T_max=EPOCHS, eta_min=1e-6)
     
     print(f"Starting training on {DEVICE}...")
-    print(f"Using architecture {arch}...")
+    print(f"Using dual-model architecture (BusLSTM + OccupancyLSTM)...")
     print(f"Using loss function: {loss_type.upper()}")
 
     best_val_loss_time = float("inf")
@@ -125,7 +125,7 @@ def train(
             # --- CATENA RITARDO (Aggiorna solo se non in early stop) ---
             if not time_done:
                 opt_time.zero_grad()
-                pred_time, _ = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
+                pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
                 
                 if loss_type == "nll":
                     dummy_variance = torch.ones_like(pred_time)
@@ -140,7 +140,7 @@ def train(
             # --- CATENA PASSEGGERI (Aggiorna solo se non in early stop) ---
             if not crowd_done:
                 opt_crowd.zero_grad()
-                _, pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
+                pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
                 pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
                 
                 loss_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
@@ -160,7 +160,7 @@ def train(
                 
                 # Valutazione Tempo
                 if not time_done:
-                    pred_time, _ = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
+                    pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
                     if loss_type == "nll":
                         dummy_variance = torch.ones_like(pred_time)
                         l_time = criterion_time(pred_time, y_time, dummy_variance)
@@ -170,7 +170,7 @@ def train(
 
                 # Valutazione Passeggeri
                 if not crowd_done:
-                    _, pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
+                    pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
                     pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
                     l_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
                     val_loss_crowd += l_crowd.item()
@@ -274,7 +274,6 @@ def batch_train():
             hyperparameter_iteration=idx,
             preloaded_data=preloaded_data,
             config_modello=exp,
-            arch=args.arch,
         )
 
 if __name__ == "__main__":

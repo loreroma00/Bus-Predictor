@@ -14,7 +14,7 @@ class OccupancyLSTM(nn.Module):
                  num_lstm_layers: int = 2,
                  num_occupancy_classes: int = 7
         ): 
-        super(BusLSTM, self).__init__()
+        super(OccupancyLSTM, self).__init__()
 
         self.num_lstm_layers = num_lstm_layers
         self.lstm_hidden_size = lstm_hidden_size
@@ -23,8 +23,8 @@ class OccupancyLSTM(nn.Module):
         # 1. ENCODER
         # ================================
 
-        # A - Embeddings 
-        
+        # A - Embeddings
+
         self.x1_embeddings = nn.ModuleList()
         x1_total_emb_dim = 0
 
@@ -144,9 +144,9 @@ class ODEFunc(nn.Module):
         return self.net(h)
 
 class BusLSTM(nn.Module):
-    def __init__(self, n_x1_dense_features: int, n_x2_dense_features: int, x1_cat_cardinalities: list, x2_cat_cardinalities: list, encoder_hidden_size: int = 128, lstm_hidden_size: int = 128, num_occupancy_classes: int = 7):
+    def __init__(self, n_x1_dense_features: int, n_x2_dense_features: int, x1_cat_cardinalities: list, x2_cat_cardinalities: list, encoder_hidden_size: int = 128, lstm_hidden_size: int = 128):
 
-        super(BusODELSTM, self).__init__()
+        super(BusLSTM, self).__init__()
         self.lstm_hidden_size = lstm_hidden_size
 
         # ================================

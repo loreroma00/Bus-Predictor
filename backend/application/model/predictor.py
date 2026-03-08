@@ -96,8 +96,8 @@ class Predictor:
         crowd_kwargs["num_lstm_layers"] = self.config.get("num_lstm_layers", 2)
 
         # Inizializziamo i DUE modelli
-        self.model_time = BusODELSTM(**model_kwargs)
-        self.model_crowd = BusLSTM(**crowd_kwargs)
+        self.model_time = BusLSTM(**model_kwargs)
+        self.model_crowd = OccupancyLSTM(**crowd_kwargs)
 
         # Carichiamo i pesi
         state_dict_time = torch.load(time_weights_path, map_location=torch.device("cpu"), weights_only=True)
@@ -183,8 +183,8 @@ class Predictor:
 
         with torch.no_grad():
             # ISTRUZIONE AI DUE EMISFERI
-            pred_time_scaled, _ = self.model_time(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
-            _, pred_crowd_logits = self.model_crowd(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
+            pred_time_scaled = self.model_time(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
+            pred_crowd_logits = self.model_crowd(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
 
         # FATTORE DI SCALING MODIFICATO A 600.0 (10 MINUTI)
         delays = pred_time_scaled.squeeze().numpy() * 600.0
@@ -274,8 +274,8 @@ class Predictor:
         x2_dense_tensor = torch.tensor(x2_dense_batch, dtype=torch.float32)
 
         with torch.no_grad():
-            pred_time_scaled, _ = self.model_time(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
-            _, pred_crowd_logits = self.model_crowd(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
+            pred_time_scaled = self.model_time(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
+            pred_crowd_logits = self.model_crowd(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
 
         # FATTORE DI SCALING MODIFICATO A 600.0 (10 MINUTI)
         delays = pred_time_scaled.squeeze(-1).numpy() * 600.0
