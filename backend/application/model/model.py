@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint 
 
-class BusLSTM(nn.Module):
+class OccupancyLSTM(nn.Module):
     
     def __init__(self,
                  n_x1_dense_features: int,
@@ -72,15 +72,7 @@ class BusLSTM(nn.Module):
         # 3. OUTPUTS
         # ================================
 
-        # Head 1 - Delay
-        self.head_time = nn.Sequential(
-            nn.Linear(lstm_hidden_size, 64),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, 1)
-        )
-
-        # Head 2 - Occupancy
+        # Head - Occupancy
         self.head_crowd = nn.Sequential(
             nn.Linear(lstm_hidden_size, 32),
             nn.ReLU(),
@@ -135,10 +127,9 @@ class BusLSTM(nn.Module):
         # 3. OUTPUTS
         # ===============================
 
-        pred_time = self.head_time(lstm_out)
         pred_crowd = self.head_crowd(lstm_out)
 
-        return pred_time, pred_crowd
+        return pred_crowd
         
 class ODEFunc(nn.Module):
     def __init__(self, hidden_dim):
@@ -152,7 +143,7 @@ class ODEFunc(nn.Module):
     def forward(self, t, h):
         return self.net(h)
 
-class BusODELSTM(nn.Module):
+class BusLSTM(nn.Module):
     def __init__(self, n_x1_dense_features: int, n_x2_dense_features: int, x1_cat_cardinalities: list, x2_cat_cardinalities: list, encoder_hidden_size: int = 128, lstm_hidden_size: int = 128, num_occupancy_classes: int = 7):
 
         super(BusODELSTM, self).__init__()
@@ -207,12 +198,6 @@ class BusODELSTM(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(64, 1)
-        )
-
-        self.head_crowd = nn.Sequential(
-            nn.Linear(lstm_hidden_size, 32),
-            nn.ReLU(),
-            nn.Linear(32, num_occupancy_classes)
         )
 
     def forward(self, x1_cat, x1_dense, x2_cat, x2_dense):
@@ -297,7 +282,5 @@ class BusODELSTM(nn.Module):
         outputs = torch.stack(outputs, dim=1)
 
         pred_time = self.head_time(outputs)
-        pred_crowd = self.head_crowd(outputs)
 
-        return pred_time, pred_crowd
-            
+        return pred_time            

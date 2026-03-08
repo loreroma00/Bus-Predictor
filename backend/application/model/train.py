@@ -7,7 +7,7 @@ import json
 import argparse
 
 from dataset import load_dataset
-from model import BusLSTM, BusODELSTM
+from model import BusLSTM, OccupancyLSTM
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,8 +28,7 @@ def train(
     loss_type: str,
     hyperparameter_iteration: int = 1,
     preloaded_data=None,
-    config_modello=None,
-    arch: str = "lstm",
+    config_modello=None
 ):
     # 1. GESTIONE DELLA MEMORIA (Caricamento o Iniezione)
     if preloaded_data is None:
@@ -48,25 +47,23 @@ def train(
     # 2. INIZIALIZZAZIONE MODELLO
     print(f"Initializing model for iteration {hyperparameter_iteration}...")
 
-    if arch == "ode_lstm":
-        model = BusODELSTM(
-            n_x1_dense_features=n_x1_dense,
-            n_x2_dense_features=n_x2_dense,
-            x1_cat_cardinalities=x1_cat_cards,
-            x2_cat_cardinalities=x2_cat_cards,
-            encoder_hidden_size=ENCODER_HIDDEN_SIZE,
-            lstm_hidden_size=DECODER_HIDDEN_SIZE,
-        ).to(DEVICE)
-    if arch == "lstm":
-        model = BusLSTM(
-            n_x1_dense_features=n_x1_dense,
-            n_x2_dense_features=n_x2_dense,
-            x1_cat_cardinalities=x1_cat_cards,
-            x2_cat_cardinalities=x2_cat_cards,
-            encoder_hidden_size=ENCODER_HIDDEN_SIZE,
-            lstm_hidden_size=DECODER_HIDDEN_SIZE,
-            num_lstm_layers=LSTM_LAYERS,
-        ).to(DEVICE)
+    model_time = BusODELSTM(
+        n_x1_dense_features=n_x1_dense,
+        n_x2_dense_features=n_x2_dense,
+        x1_cat_cardinalities=x1_cat_cards,
+        x2_cat_cardinalities=x2_cat_cards,
+        encoder_hidden_size=ENCODER_HIDDEN_SIZE,
+        lstm_hidden_size=DECODER_HIDDEN_SIZE,
+    ).to(DEVICE)
+    model_occupancy = BusLSTM(
+        n_x1_dense_features=n_x1_dense,
+        n_x2_dense_features=n_x2_dense,
+        x1_cat_cardinalities=x1_cat_cards,
+        x2_cat_cardinalities=x2_cat_cards,
+        encoder_hidden_size=ENCODER_HIDDEN_SIZE,
+        lstm_hidden_size=DECODER_HIDDEN_SIZE,
+        num_lstm_layers=LSTM_LAYERS,
+    ).to(DEVICE)
 
     CROWD_LOSS_WEIGHT: float = 1.0
 
@@ -74,156 +71,178 @@ def train(
     match loss_type:
         case "mae":
             criterion_time = nn.L1Loss()
-            CROWD_LOSS_WEIGHT = 0.25
         case "huber":
             criterion_time = nn.HuberLoss()
-            CROWD_LOSS_WEIGHT = 0.025
         case "nll":
             criterion_time = nn.GaussianNLLLoss()
-            CROWD_LOSS_WEIGHT = 0.03
         case _:
             criterion_time = nn.MSELoss()
-            CROWD_LOSS_WEIGHT = 0.05
 
-    criterion_crowd = nn.CrossEntropyLoss(ignore_index=7)
+    OCCUPANCY_WEIGHTS = torch.tensor([0.01, 0.05, 1.0, 5.0, 10.0, 10.0, 20.0], dtype=torch.float32).to(DEVICE)
+    criterion_crowd = nn.CrossEntropyLoss(OCCUPANCY_WEIGHTS, ignore_index=7)
 
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=EPOCHS,  # Il numero totale di epoche (es. 100). Indica quando la curva tocca il fondo.
-        eta_min=1e-6,  # Il pavimento assoluto. Evita che il learning rate arrivi esattamente a 0.
-    )
+   # 4. DUE OTTIMIZZATORI E DUE SCHEDULER INDIPENDENTI
+    opt_time = optim.Adam(model_time.parameters(), lr=LEARNING_RATE)
+    opt_crowd = optim.Adam(model_occupancy.parameters(), lr=LEARNING_RATE)
 
+    sch_time = optim.lr_scheduler.CosineAnnealingLR(opt_time, T_max=EPOCHS, eta_min=1e-6)
+    sch_crowd = optim.lr_scheduler.CosineAnnealingLR(opt_crowd, T_max=EPOCHS, eta_min=1e-6)
+    
     print(f"Starting training on {DEVICE}...")
     print(f"Using architecture {arch}...")
     print(f"Using loss function: {loss_type.upper()}")
 
-    best_val_loss = float("inf")
+    best_val_loss_time = float("inf")
+    best_val_loss_crowd = float("inf")
     patience = 12
-    patience_counter = 0
+    patience_counter_time = 0
+    patience_counter_crowd = 0
 
     # Nomi file dinamici per non sovrascrivere
-    best_model_path = f"bus_model_{loss_type}_{hyperparameter_iteration}.pth"
-    json_filename = f"hyperparameters_{loss_type}_{hyperparameter_iteration}.json"
+    best_time_path = f"bus_model_TIME_{loss_type}_{hyperparameter_iteration}.pth"
+    best_crowd_path = f"bus_model_CROWD_{loss_type}_{hyperparameter_iteration}.pth"
+    json_filename = f"hyperparameters_DUAL_{loss_type}_{hyperparameter_iteration}.json"
 
-    # 4. TRAINING LOOP
+    # Flag per capire se un modello ha finito
+    time_done = False
+    crowd_done = False
+    
+# 5. TRAINING LOOP
     for epoch in range(EPOCHS):
-        model.train()
-        running_loss = 0.0
+        if time_done and crowd_done:
+            print(f"\n[!] ENTRAMBI I MODELLI HANNO RAGGIUNTO L'EARLY STOPPING. Addestramento concluso all'epoca {epoch}.")
+            break
+
+        model_time.train() if not time_done else model_time.eval()
+        model_occupancy.train() if not crowd_done else model_occupancy.eval()
+        
         running_loss_time = 0.0
         running_loss_crowd = 0.0
 
         for batch in train_loader:
-            x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [
-                b.to(DEVICE) for b in batch
-            ]
+            x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [b.to(DEVICE) for b in batch]
 
-            optimizer.zero_grad()
-            pred_time, pred_crowd = model(x1_cat, x1_dense, x2_cat, x2_dense)
+            # --- CATENA RITARDO (Aggiorna solo se non in early stop) ---
+            if not time_done:
+                opt_time.zero_grad()
+                pred_time, _ = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
+                
+                if loss_type == "nll":
+                    dummy_variance = torch.ones_like(pred_time)
+                    loss_time = criterion_time(pred_time, y_time, dummy_variance)
+                else:
+                    loss_time = criterion_time(pred_time, y_time)
+                
+                loss_time.backward()
+                opt_time.step()
+                running_loss_time += loss_time.item()
 
-            # --- IL TRICK DELLA NLL ---
-            if loss_type == "nll":
-                dummy_variance = torch.ones_like(pred_time)
-                loss_time = criterion_time(pred_time, y_time, dummy_variance)
-            else:
-                loss_time = criterion_time(pred_time, y_time)
-            # --------------------------
-
-            pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
-            loss_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
-
-            total_loss = (loss_time * TIME_LOSS_WEIGHT) + (
-                loss_crowd * CROWD_LOSS_WEIGHT
-            )
-            total_loss.backward()
-            optimizer.step()
-
-            running_loss += total_loss.item()
-            running_loss_time += loss_time.item()
-            running_loss_crowd += loss_crowd.item()
-
-        # --- CALCOLO MEDIE TRAIN ---
-        avg_train_loss = running_loss / len(train_loader)
-        avg_train_loss_time = running_loss_time / len(train_loader)
-        avg_train_loss_crowd = running_loss_crowd / len(train_loader)
+            # --- CATENA PASSEGGERI (Aggiorna solo se non in early stop) ---
+            if not crowd_done:
+                opt_crowd.zero_grad()
+                _, pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
+                pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
+                
+                loss_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
+                loss_crowd.backward()
+                opt_crowd.step()
+                running_loss_crowd += loss_crowd.item()
 
         # --- VALIDATION ---
-        model.eval()
-        val_loss = 0.0
+        model_time.eval()
+        model_occupancy.eval()
         val_loss_time = 0.0
         val_loss_crowd = 0.0
 
         with torch.no_grad():
             for batch in val_loader:
-                x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [
-                    b.to(DEVICE) for b in batch
-                ]
-                pred_time, pred_crowd = model(x1_cat, x1_dense, x2_cat, x2_dense)
+                x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [b.to(DEVICE) for b in batch]
+                
+                # Valutazione Tempo
+                if not time_done:
+                    pred_time, _ = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
+                    if loss_type == "nll":
+                        dummy_variance = torch.ones_like(pred_time)
+                        l_time = criterion_time(pred_time, y_time, dummy_variance)
+                    else:
+                        l_time = criterion_time(pred_time, y_time)
+                    val_loss_time += l_time.item()
 
-                if loss_type == "nll":
-                    dummy_variance = torch.ones_like(pred_time)
-                    l_time = criterion_time(pred_time, y_time, dummy_variance)
-                else:
-                    l_time = criterion_time(pred_time, y_time)
+                # Valutazione Passeggeri
+                if not crowd_done:
+                    _, pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
+                    pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
+                    l_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
+                    val_loss_crowd += l_crowd.item()
 
-                pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
-                l_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
+        # Medie Train/Val
+        avg_train_time = running_loss_time / len(train_loader) if not time_done else 0
+        avg_train_crowd = running_loss_crowd / len(train_loader) if not crowd_done else 0
+        avg_val_time = val_loss_time / len(val_loader) if not time_done else best_val_loss_time
+        avg_val_crowd = val_loss_crowd / len(val_loader) if not crowd_done else best_val_loss_crowd
 
-                val_loss += (l_time + (l_crowd * CROWD_LOSS_WEIGHT)).item()
-                val_loss_time += l_time.item()
-                val_loss_crowd += l_crowd.item()
+        if not time_done: sch_time.step()
+        if not crowd_done: sch_crowd.step()
+        
+        curr_lr_time = opt_time.param_groups[0]["lr"] if not time_done else 0
+        curr_lr_crowd = opt_crowd.param_groups[0]["lr"] if not crowd_done else 0
 
-        # --- CALCOLO MEDIE VAL ---
-        avg_val_loss = val_loss / len(val_loader)
-        avg_val_loss_time = val_loss_time / len(val_loader)
-        avg_val_loss_crowd = val_loss_crowd / len(val_loader)
+        # --- REPORT TELEMETRIA DUAL ---
+        print(f"Epoch [{epoch + 1}/{EPOCHS}]")
+        if not time_done:
+            print(f"  [TIME]  LR: {curr_lr_time:.6f} | Train: {avg_train_time:.4f} | Val: {avg_val_time:.4f}")
+        if not crowd_done:
+            print(f"  [CROWD] LR: {curr_lr_crowd:.6f} | Train: {avg_train_crowd:.4f} | Val: {avg_val_crowd:.4f}")
 
-        scheduler.step()
-        current_lr = optimizer.param_groups[0]["lr"]
+        # --- EARLY STOPPING INDIPENDENTE ---
+        # 1. RITARDO
+        if not time_done:
+            if avg_val_time < best_val_loss_time:
+                best_val_loss_time = avg_val_time
+                patience_counter_time = 0
+                torch.save(model_time.state_dict(), best_time_path)
+                print(f"    [+] Modello TIME migliorato e salvato!")
+            else:
+                patience_counter_time += 1
+                if patience_counter_time >= patience:
+                    print(f"    [!] EARLY STOPPING INNESCATO per il modello TIME.")
+                    time_done = True
 
-        # --- REPORT TELEMETRIA ---
-        print(
-            f"Epoch [{epoch + 1}/{EPOCHS}] (LR: {current_lr:.6f}) | "
-            f"Tot Train: {avg_train_loss:.4f} (Val: {avg_val_loss:.4f}) | "
-            f"Time {loss_type.upper()}: {avg_train_loss_time:.4f} (Val: {avg_val_loss_time:.4f}) | "
-            f"Crowd CE: {avg_train_loss_crowd:.4f} (Val: {avg_val_loss_crowd:.4f})"
-        )
+        # 2. PASSEGGERI
+        if not crowd_done:
+            if avg_val_crowd < best_val_loss_crowd:
+                best_val_loss_crowd = avg_val_crowd
+                patience_counter_crowd = 0
+                torch.save(model_occupancy.state_dict(), best_crowd_path)
+                print(f"    [+] Modello CROWD migliorato e salvato!")
+            else:
+                patience_counter_crowd += 1
+                if patience_counter_crowd >= patience:
+                    print(f"    [!] EARLY STOPPING INNESCATO per il modello CROWD.")
+                    crowd_done = True
 
-        # --- EARLY STOPPING E SALVATAGGIO METADATI ---
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), best_model_path)
-            print(
-                f"  [+] Modello migliorato e salvato! (Best Val Loss: {best_val_loss:.4f})"
-            )
-        else:
-            patience_counter += 1
-            print(f"  [-] Nessun miglioramento da {patience_counter} epoche.")
-            if patience_counter >= patience:
-                print(f"\n[!] EARLY STOPPING INNESCATO all'epoca {epoch + 1}.")
+    # Salvataggio Metadati finale
+    model_config = {
+        "x1_dense_features": n_x1_dense,
+        "x2_dense_features": n_x2_dense,
+        "x1_cat_cards": x1_cat_cards,
+        "x2_cat_cards": x2_cat_cards,
+        "epochs_run": epoch + 1,
+        "loss_type": loss_type,
+        "encoder_hidden_size": ENCODER_HIDDEN_SIZE,
+        "decoder_hidden_size": DECODER_HIDDEN_SIZE,
+        "num_lstm_layers": LSTM_LAYERS,
+        "Learning_Rate": LEARNING_RATE,
+        "time_model_stopped": time_done,
+        "crowd_model_stopped": crowd_done
+    }
 
-                model_config = {
-                    "architecture": arch,
-                    "x1_dense_features": n_x1_dense,
-                    "x2_dense_features": n_x2_dense,
-                    "x1_cat_cards": x1_cat_cards,
-                    "x2_cat_cards": x2_cat_cards,
-                    "epochs": epoch + 1,
-                    "loss_type": loss_type,
-                    "encoder_hidden_size": ENCODER_HIDDEN_SIZE,
-                    "decoder_hidden_size": DECODER_HIDDEN_SIZE,
-                    "num_lstm_layers": LSTM_LAYERS,
-                    "Learning_Rate": LEARNING_RATE,
-                }
-
-                with open(json_filename, "w", encoding="utf-8") as f:
-                    json.dump(model_config, f, indent=2, ensure_ascii=False)
-                break
+    with open(json_filename, "w", encoding="utf-8") as f:
+        json.dump(model_config, f, indent=2, ensure_ascii=False)
 
 
 # ==========================================
-# GESTORE DEL BATCH (LA FABBRICA DEI MODELLI)
+# GESTORE DEL BATCH
 # ==========================================
 def batch_train():
     print("Initializing batch training...")
@@ -258,34 +277,14 @@ def batch_train():
             arch=args.arch,
         )
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--loss",
-        type=str,
-        default="mse",
-        choices=["mse", "mae", "huber", "nll"],
-        help="Choose loss function",
-    )
-    parser.add_argument(
-        "--batch-train",
-        action="store_true",
-        help="Uses 'grid_search.json' to batch train several models",
-    )
-    parser.add_argument(
-        "--arch",
-        type=str,
-        default="lstm",
-        choices=["lstm", "ode_lstm"],
-        help="Architecture to use",
-    )
+    parser.add_argument("--loss", type=str, default="mse", choices=["mse", "mae", "huber", "nll"])
+    parser.add_argument("--batch-train", action="store_true")
 
     args = parser.parse_args()
 
     if args.batch_train:
         batch_train()
     else:
-        train(
-            loss_type=args.loss, hyperparameter_iteration=99, arch=args.arch
-        )  # Il 99 indica che è una run isolata
+        train(loss_type=args.loss, hyperparameter_iteration=99)

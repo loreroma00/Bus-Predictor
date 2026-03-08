@@ -51,7 +51,7 @@ def scaling(input_parquet: str, output_parquet: str, encoder_path: str):
     df['can_avg_traffic_speed'] = df['can_avg_traffic_speed'].clip(0, 65) / 65.0
     
     # C. Il Target (Ritardi tra -1.0 e +1.0)
-    df['schedule_adherence'] = df['schedule_adherence'] / 3600.0
+    df['schedule_adherence'] = df['schedule_adherence'] / 600.0
 
     # NOTA: I depositi (0 o 1) e i time_sin/cos (-1 a 1) NON si toccano!
 
