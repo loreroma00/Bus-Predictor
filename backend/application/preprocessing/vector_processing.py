@@ -806,6 +806,7 @@ def process_data(start_date: str = None):
             pad_df["direction_id"] = group["direction_id"].iloc[0]
             # Mark padding rows
             pad_df["is_genuine"] = 0
+            pad_df["h3_index"] = ""
             pad_df["h3_index_encoded"] = -1
             pad_df["stop_sequence"] = -1
             padded_dfs.append(pd.concat([group, pad_df], ignore_index=True))
