@@ -91,6 +91,9 @@ class BusDataset(Dataset):
         )
 
         # Sequence-level features: reshape to [num_trips, max_stops, features]
+        # Clamp x2_cat to >= 0: padded rows have -1 which is invalid for nn.Embedding on CUDA.
+        # Padded positions are masked during loss, so the embedding output there is irrelevant.
+        self.x2_cat = np.clip(self.x2_cat, 0, None)
         self.x2_cat = torch.tensor(self.x2_cat.reshape(self.num_trips, ms, -1))
         self.x2_dense = torch.tensor(self.x2_dense.reshape(self.num_trips, ms, -1))
         self.y_time = torch.tensor(self.y_time.reshape(self.num_trips, ms, 1))
