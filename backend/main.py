@@ -280,7 +280,7 @@ async def test_database_connection():
         logger.info("\nVehicle pipeline disabled.")
 
 
-def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int], lenient_pipeline: bool = False):
+def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], host: Optional[str], port: Optional[int], lenient_pipeline: bool = False):
     """Run the FastAPI prediction server with integrated data collection."""
     import configparser
     import glob
@@ -535,42 +535,71 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         }
 
     def discover_models() -> list[ModelInfo]:
-        pattern = str(MODEL_DIR / "bus_model_*.pth")
-        model_files = glob.glob(pattern)
+        """Discover paired TIME+CROWD model sets from bus_model_TIME_*.pth files."""
+        pattern = str(MODEL_DIR / "bus_model_TIME_*.pth")
+        time_files = glob.glob(pattern)
         models = []
-        for path in sorted(model_files):
-            models.append(ModelInfo(filename=os.path.basename(path), path=path))
+        for time_path in sorted(time_files):
+            time_filename = os.path.basename(time_path)
+            # Derive experiment id: bus_model_TIME_mse_0.pth -> mse_0
+            exp_id = time_filename.replace("bus_model_TIME_", "").replace(".pth", "")
+            crowd_filename = f"bus_model_CROWD_{exp_id}.pth"
+            crowd_path = MODEL_DIR / crowd_filename
+            config_filename = f"hyperparameters_DUAL_{exp_id}.json"
+            config_path = MODEL_DIR / config_filename
+            if crowd_path.exists() and config_path.exists():
+                models.append(ModelInfo(filename=exp_id, path=time_path))
+            else:
+                missing = []
+                if not crowd_path.exists(): missing.append(crowd_filename)
+                if not config_path.exists(): missing.append(config_filename)
+                print(f"[WARN] Skipping {time_filename}: missing {', '.join(missing)}")
         return models
 
-    def load_model_by_name(model_name_arg: str) -> bool:
+    def load_model_pair(time_name_arg: str, crowd_name_arg: str) -> bool:
+        """Load a TIME + CROWD model pair into the predictor."""
         nonlocal predictor
-        model_path = MODEL_DIR / model_name_arg
-        if not model_path.exists():
-            print(f"[ERROR] Model file not found: {model_name_arg}")
+        time_path = MODEL_DIR / time_name_arg
+        crowd_path = MODEL_DIR / crowd_name_arg
+        if not time_path.exists():
+            print(f"[ERROR] TIME model not found: {time_name_arg}")
+            return False
+        if not crowd_path.exists():
+            print(f"[ERROR] CROWD model not found: {crowd_name_arg}")
             return False
 
-        config_filename = model_name_arg.replace(
-            "bus_model_", "hyperparameters_"
-        ).replace(".pth", ".json")
+        # Derive config from the TIME model filename
+        exp_id = time_name_arg.replace("bus_model_TIME_", "").replace(".pth", "")
+        config_filename = f"hyperparameters_DUAL_{exp_id}.json"
         config_path = MODEL_DIR / config_filename
-
         if not config_path.exists():
             print(f"[ERROR] Config file not found: {config_filename}")
             return False
 
         predictor = Predictor(
-            weights_path=str(model_path), config_path=str(config_path)
+            config_path=str(config_path),
+            time_weights_path=str(time_path),
+            crowd_weights_path=str(crowd_path),
         )
         return True
+
+    def load_model_by_exp_id(exp_id: str) -> bool:
+        """Load a model pair given an experiment id (e.g. 'mse_0')."""
+        return load_model_pair(
+            f"bus_model_TIME_{exp_id}.pth",
+            f"bus_model_CROWD_{exp_id}.pth",
+        )
 
     def interactive_model_selection():
         nonlocal predictor
         print("\n" + "=" * 50)
         print("ATAC Bus Delay Prediction - Model Selection")
         print("=" * 50)
-        print("\nAvailable models:")
+        print("\nAvailable model pairs:")
         for i, m in enumerate(available_models):
             print(f"  [{i}] {m.filename}")
+            print(f"       TIME:  bus_model_TIME_{m.filename}.pth")
+            print(f"       CROWD: bus_model_CROWD_{m.filename}.pth")
 
         while True:
             try:
@@ -584,12 +613,12 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
             except (ValueError, EOFError):
                 print("Invalid input. Please enter a number.")
 
-        selected_model = available_models[choice_idx]
-        return load_model_by_name(selected_model.filename)
+        selected = available_models[choice_idx]
+        return load_model_by_exp_id(selected.filename)
 
     def generate_canonical_map():
-        if not (PARQUET_DIR / "canonical_route_map.parquet").exists():
-            print("Generating canonical_route_map.parquet...")
+        if not (PARQUET_DIR / "stop_route_map.parquet").exists():
+            print("Generating stop_route_map.parquet...")
             from application.preprocessing.canonical_shape_mapper import (
                 main as gen_main,
             )
@@ -646,13 +675,20 @@ def run_serve(model_name: Optional[str], host: Optional[str], port: Optional[int
         available_models = discover_models()
 
         if not available_models:
-            print("\n[ERROR] No trained models found in application/model/")
-            print("Expected files matching: bus_model_*.pth")
+            print("\n[ERROR] No trained model pairs found in application/model/")
+            print("Expected files matching: bus_model_TIME_*.pth + bus_model_CROWD_*.pth + hyperparameters_DUAL_*.json")
             sys.exit(1)
 
-        cli_model = model_name or os.environ.get("MODEL_NAME")
-        if cli_model:
-            if not load_model_by_name(cli_model):
+        # Resolve model pair: CLI flags > env vars > interactive selection
+        cli_time  = time_model_name  or os.environ.get("TIME_MODEL_NAME")
+        cli_crowd = crowd_model_name or os.environ.get("CROWD_MODEL_NAME")
+        if cli_time and cli_crowd:
+            if not load_model_pair(cli_time, cli_crowd):
+                sys.exit(1)
+        elif cli_time:
+            # Derive crowd model from time model name
+            exp_id = cli_time.replace("bus_model_TIME_", "").replace(".pth", "")
+            if not load_model_by_exp_id(exp_id):
                 sys.exit(1)
         else:
             if not interactive_model_selection():
@@ -1298,7 +1334,8 @@ Commands:
     )
 
     serve_parser = subparsers.add_parser("serve", help="Start prediction API server with integrated data collection")
-    serve_parser.add_argument("--model", type=str, help="Model filename to load")
+    serve_parser.add_argument("--time-model",  type=str, help="TIME model filename (e.g. bus_model_TIME_mse_0.pth)")
+    serve_parser.add_argument("--crowd-model", type=str, help="CROWD model filename (e.g. bus_model_CROWD_mse_0.pth)")
     serve_parser.add_argument("--host", type=str, help="Host to bind")
     serve_parser.add_argument("--port", type=int, help="Port to bind")
     serve_parser.add_argument("--lenient-pipeline", action="store_true", help="Use lenient data cleaning")
@@ -1310,7 +1347,7 @@ Commands:
     if args.command == "collect":
         run_collect(debug_mode=args.debug, lenient_pipeline=args.lenient_pipeline)
     elif args.command == "serve":
-        run_serve(model_name=args.model, host=args.host, port=args.port, lenient_pipeline=args.lenient_pipeline)
+        run_serve(time_model_name=args.time_model, crowd_model_name=args.crowd_model, host=args.host, port=args.port, lenient_pipeline=args.lenient_pipeline)
     elif args.command == "test-db":
         try:
             asyncio.run(test_database_connection())
