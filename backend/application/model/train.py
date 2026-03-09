@@ -120,19 +120,24 @@ def train(
         running_loss_crowd = 0.0
 
         for batch in train_loader:
-            x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [b.to(DEVICE) for b in batch]
+            x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd, lengths, t_grid = [b.to(DEVICE) for b in batch]
+            seq_len = x2_dense.size(1)
+            mask = torch.arange(seq_len, device=DEVICE).unsqueeze(0) < lengths.unsqueeze(1)
 
             # --- CATENA RITARDO (Aggiorna solo se non in early stop) ---
             if not time_done:
                 opt_time.zero_grad()
-                pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
-                
+                pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense, lengths=lengths, t_grid=t_grid)
+
+                pred_time_masked = pred_time.squeeze(-1)[mask]
+                y_time_masked = y_time.squeeze(-1)[mask]
+
                 if loss_type == "nll":
-                    dummy_variance = torch.ones_like(pred_time)
-                    loss_time = criterion_time(pred_time, y_time, dummy_variance)
+                    dummy_variance = torch.ones_like(pred_time_masked)
+                    loss_time = criterion_time(pred_time_masked, y_time_masked, dummy_variance)
                 else:
-                    loss_time = criterion_time(pred_time, y_time)
-                
+                    loss_time = criterion_time(pred_time_masked, y_time_masked)
+
                 loss_time.backward()
                 opt_time.step()
                 running_loss_time += loss_time.item()
@@ -140,10 +145,12 @@ def train(
             # --- CATENA PASSEGGERI (Aggiorna solo se non in early stop) ---
             if not crowd_done:
                 opt_crowd.zero_grad()
-                pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
-                pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
-                
-                loss_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
+                pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense, lengths=lengths)
+
+                pred_crowd_masked = pred_crowd[mask]   # [N_valid, 7]
+                y_crowd_masked = y_crowd[mask]         # [N_valid]
+
+                loss_crowd = criterion_crowd(pred_crowd_masked, y_crowd_masked)
                 loss_crowd.backward()
                 opt_crowd.step()
                 running_loss_crowd += loss_crowd.item()
@@ -156,23 +163,28 @@ def train(
 
         with torch.no_grad():
             for batch in val_loader:
-                x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [b.to(DEVICE) for b in batch]
-                
+                x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd, lengths, t_grid = [b.to(DEVICE) for b in batch]
+                seq_len = x2_dense.size(1)
+                mask = torch.arange(seq_len, device=DEVICE).unsqueeze(0) < lengths.unsqueeze(1)
+
                 # Valutazione Tempo
                 if not time_done:
-                    pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
+                    pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense, lengths=lengths, t_grid=t_grid)
+                    pred_time_masked = pred_time.squeeze(-1)[mask]
+                    y_time_masked = y_time.squeeze(-1)[mask]
                     if loss_type == "nll":
-                        dummy_variance = torch.ones_like(pred_time)
-                        l_time = criterion_time(pred_time, y_time, dummy_variance)
+                        dummy_variance = torch.ones_like(pred_time_masked)
+                        l_time = criterion_time(pred_time_masked, y_time_masked, dummy_variance)
                     else:
-                        l_time = criterion_time(pred_time, y_time)
+                        l_time = criterion_time(pred_time_masked, y_time_masked)
                     val_loss_time += l_time.item()
 
                 # Valutazione Passeggeri
                 if not crowd_done:
-                    pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense)
-                    pred_crowd_permuted = pred_crowd.permute(0, 2, 1)
-                    l_crowd = criterion_crowd(pred_crowd_permuted, y_crowd)
+                    pred_crowd = model_occupancy(x1_cat, x1_dense, x2_cat, x2_dense, lengths=lengths)
+                    pred_crowd_masked = pred_crowd[mask]   # [N_valid, 7]
+                    y_crowd_masked = y_crowd[mask]         # [N_valid]
+                    l_crowd = criterion_crowd(pred_crowd_masked, y_crowd_masked)
                     val_loss_crowd += l_crowd.item()
 
         # Medie Train/Val
@@ -227,6 +239,7 @@ def train(
         "x2_dense_features": n_x2_dense,
         "x1_cat_cards": x1_cat_cards,
         "x2_cat_cards": x2_cat_cards,
+        "max_stops": full_dataset.max_stops,
         "epochs_run": epoch + 1,
         "loss_type": loss_type,
         "encoder_hidden_size": ENCODER_HIDDEN_SIZE,

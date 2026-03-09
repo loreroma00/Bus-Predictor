@@ -98,60 +98,58 @@ def evaluate_model(config_path: Path):
     total_samples = 0
     all_time_errors, all_true_crowd, all_pred_crowd = [], [], []
     fotoromanzo_reale, fotoromanzo_predetto = None, None
-    sum_true_profile, sum_pred_profile = None, None
-    n_trips_profile = 0
     route_metrics = defaultdict(lambda: {"errors": [], "y_true": [], "y_pred": []})
 
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
-            x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd = [b.to(DEVICE) for b in batch]
-            
+            x1_cat, x1_dense, x2_cat, x2_dense, y_time, y_crowd, lengths, t_grid = [b.to(DEVICE) for b in batch]
+            seq_len = x2_dense.size(1)
+            mask = torch.arange(seq_len, device=DEVICE).unsqueeze(0) < lengths.unsqueeze(1)
+
             # ELABORAZIONE DISACCOPPIATA
-            pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense)
-            pred_crowd_logits = model_crowd(x1_cat, x1_dense, x2_cat, x2_dense)
+            pred_time = model_time(x1_cat, x1_dense, x2_cat, x2_dense, lengths=lengths, t_grid=t_grid)
+            pred_crowd_logits = model_crowd(x1_cat, x1_dense, x2_cat, x2_dense, lengths=lengths)
 
             # SCALING AGGIORNATO A 600.0 (10 Minuti)
             pred_time_sec = pred_time.squeeze(-1) * 600.0
             true_time_sec = y_time.squeeze(-1) * 600.0
 
+            # Apply mask: only evaluate real stops
+            mask_np = mask.cpu().numpy()
             pred_batch_np = pred_time_sec.cpu().numpy()
             true_batch_np = true_time_sec.cpu().numpy()
 
-            if sum_true_profile is None:
-                sum_true_profile = np.zeros(true_batch_np.shape[1], dtype=np.float64)
-                sum_pred_profile = np.zeros(pred_batch_np.shape[1], dtype=np.float64)
-
-            sum_true_profile += true_batch_np.sum(axis=0)
-            sum_pred_profile += pred_batch_np.sum(axis=0)
-            n_trips_profile += true_batch_np.shape[0]
-
-            err_batch = (pred_time_sec - true_time_sec).cpu().numpy().flatten()
-            all_time_errors.extend(err_batch)
+            # Masked error computation
+            err_batch = (pred_batch_np - true_batch_np)[mask_np]
+            all_time_errors.extend(err_batch.tolist())
             total_time_mae_seconds += np.sum(np.abs(err_batch))
             total_time_mse_seconds += np.sum(err_batch**2)
 
             pred_crowd_classes = pred_crowd_logits.argmax(dim=-1)
-            total_crowd_correct += (pred_crowd_classes == y_crowd).sum().item()
-            all_true_crowd.append(y_crowd.cpu().numpy().flatten())
-            all_pred_crowd.append(pred_crowd_classes.cpu().numpy().flatten())
-            total_samples += y_time.numel()
+            total_crowd_correct += (pred_crowd_classes[mask] == y_crowd[mask]).sum().item()
+            all_true_crowd.append(y_crowd[mask].cpu().numpy())
+            all_pred_crowd.append(pred_crowd_classes[mask].cpu().numpy())
+            total_samples += int(mask.sum().item())
 
+            # Per-route metrics (masked)
             route_ids_batch = x1_cat[:, 0].detach().cpu().numpy().astype(np.int64)
             pred_crowd_batch_np = pred_crowd_classes.detach().cpu().numpy()
             true_crowd_batch_np = y_crowd.detach().cpu().numpy()
             err_batch_2d = pred_batch_np - true_batch_np
+            lengths_np = lengths.cpu().numpy()
 
             for trip_idx, route_id_enc in enumerate(route_ids_batch):
+                n_real = int(lengths_np[trip_idx])
                 per_route = route_metrics[int(route_id_enc)]
-                per_route["errors"].extend(err_batch_2d[trip_idx].tolist())
-                per_route["y_true"].extend(true_crowd_batch_np[trip_idx].tolist())
-                per_route["y_pred"].extend(pred_crowd_batch_np[trip_idx].tolist())
+                per_route["errors"].extend(err_batch_2d[trip_idx, :n_real].tolist())
+                per_route["y_true"].extend(true_crowd_batch_np[trip_idx, :n_real].tolist())
+                per_route["y_pred"].extend(pred_crowd_batch_np[trip_idx, :n_real].tolist())
 
             if i == 0:
                 route_name, s_time = "N/D", "N/D"
-                # ... (resto invariato: ispezione visiva e metadata)
-                fotoromanzo_reale = true_time_sec[0].cpu().numpy()
-                fotoromanzo_predetto = pred_time_sec[0].cpu().numpy()
+                n_real_0 = int(lengths_np[0])
+                fotoromanzo_reale = true_time_sec[0, :n_real_0].cpu().numpy()
+                fotoromanzo_predetto = pred_time_sec[0, :n_real_0].cpu().numpy()
 
     # (Calcoli finali e plot invariati)
     avg_mae = total_time_mae_seconds / total_samples

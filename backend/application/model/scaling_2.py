@@ -1,4 +1,5 @@
 import os
+import json
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 import joblib
@@ -7,14 +8,21 @@ PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 PARQUET_DIR = os.path.join(PROJECT_ROOT, "parquets")
+STOP_ROUTE_CONFIG = os.path.join(PARQUET_DIR, "stop_route_config.json")
 
 
 def scaling(input_parquet: str, output_parquet: str, encoder_path: str):
     print("Reading Dataset...")
     df = pd.read_parquet(input_parquet)
 
+    # Load MAX_STOPS from config for stop_idx normalization
+    with open(STOP_ROUTE_CONFIG, "r") as f:
+        config = json.load(f)
+    max_stops = config["max_stops"]
+    print(f"MAX_STOPS = {max_stops}")
+
     # ==========================================
-    # 0. CHIRURGIA DEGLI OUTLIER (Salva il Reshape)
+    # 0. CHIRURGIA DEGLI OUTLIER
     # ==========================================
     print("Individuazione anomalie nei ritardi...")
     # Troviamo i viaggi in cui c'è almeno un ritardo/anticipo maggiore di 1 ora
@@ -23,7 +31,6 @@ def scaling(input_parquet: str, output_parquet: str, encoder_path: str):
     ]['trip_id'].unique()
 
     print(f"Rimozione di {len(viaggi_anomali)} viaggi interi per guasti/anomalie...")
-    # Teniamo solo i viaggi sani, per non rompere i blocchi da 100 step
     df = df[~df['trip_id'].isin(viaggi_anomali)].copy()
     df.reset_index(drop=True, inplace=True)
 
@@ -41,7 +48,7 @@ def scaling(input_parquet: str, output_parquet: str, encoder_path: str):
     
     # A. Gradini Fissi (Normalizzati tra 0 e 1)
     df['door_number'] = df['door_number'].clip(1, 3) / 3.0
-    df['segment_idx'] = df['segment_idx'] / 99.0
+    df['stop_idx'] = df['stop_idx'] / max(max_stops - 1, 1)
     df['bus_type'] = df['bus_type'] / 9.0
     df['weather_code'] = df['weather_code'] / 33
     

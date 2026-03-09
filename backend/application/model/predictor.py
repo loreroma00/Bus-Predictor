@@ -20,9 +20,9 @@ PARQUET_DIR = PROJECT_ROOT / "parquets"
 ROUTE_ENCODING_PATH = PARQUET_DIR / "route_encoding.json"
 ROUTE_ENCODER_PKL_PATH = PARQUET_DIR / "route_encoder.pkl"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
-STATIC_MAP_PATH = PARQUET_DIR / "canonical_route_map.parquet"
+STATIC_MAP_PATH = PARQUET_DIR / "stop_route_map.parquet"
+STOP_ROUTE_CONFIG_PATH = PARQUET_DIR / "stop_route_config.json"
 
-BATCH_SIZE = 100  # Number of segments per trip
 
 @dataclass
 class StopPrediction:
@@ -41,6 +41,7 @@ class TripForecast:
     scheduled_start: str
     stops: list[StopPrediction]
 
+
 class Predictor:
     def __init__(
         self,
@@ -58,6 +59,7 @@ class Predictor:
         h3_path = Path(h3_encoding_path) if h3_encoding_path else H3_ENCODING_PATH
         static_path = Path(static_map_path) if static_map_path else STATIC_MAP_PATH
 
+        # Load route encoder
         self.route_encoder = {}
         if route_encoder_pkl_path.exists():
             route_obj = joblib.load(route_encoder_pkl_path)
@@ -73,15 +75,26 @@ class Predictor:
                 self.route_encoder = {str(k): int(v) for k, v in json.load(f).items()}
             print("Loaded route encoder from route_encoding.json")
 
+        # Load H3 encoder
         with open(h3_path, "r") as f:
             self.h3_encoder = json.load(f)
 
+        # Load static stop map
         self.static_map = pd.read_parquet(static_path)
         self.static_map["route_id_norm"] = self.static_map["route_id"].astype(str)
         self.static_map["direction_id_norm"] = self.static_map["direction_id"].astype(str)
 
+        # Load model config
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
+
+        self.max_stops = self.config.get("max_stops")
+        if self.max_stops is None:
+            # Fallback: load from stop_route_config.json
+            fallback_path = STOP_ROUTE_CONFIG_PATH
+            with open(fallback_path, "r") as f:
+                self.max_stops = json.load(f)["max_stops"]
+        print(f"MAX_STOPS = {self.max_stops}")
 
         model_kwargs = {
             "n_x1_dense_features": self.config["x1_dense_features"],
@@ -91,19 +104,19 @@ class Predictor:
             "encoder_hidden_size": self.config["encoder_hidden_size"],
             "lstm_hidden_size": self.config["decoder_hidden_size"],
         }
-        
+
         crowd_kwargs = model_kwargs.copy()
         crowd_kwargs["num_lstm_layers"] = self.config.get("num_lstm_layers", 2)
 
-        # Inizializziamo i DUE modelli
+        # Initialize the two models
         self.model_time = BusLSTM(**model_kwargs)
         self.model_crowd = OccupancyLSTM(**crowd_kwargs)
 
-        # Carichiamo i pesi
+        # Load weights
         state_dict_time = torch.load(time_weights_path, map_location=torch.device("cpu"), weights_only=True)
         state_dict_crowd = torch.load(crowd_weights_path, map_location=torch.device("cpu"), weights_only=True)
-        
-        # Pulizia chiavi se necessario
+
+        # Clean keys if needed (torch.compile prefix)
         if any(k.startswith("_orig_mod.") for k in state_dict_time.keys()):
             state_dict_time = {k.replace("_orig_mod.", ""): v for k, v in state_dict_time.items()}
         if any(k.startswith("_orig_mod.") for k in state_dict_crowd.keys()):
@@ -111,23 +124,25 @@ class Predictor:
 
         self.model_time.load_state_dict(state_dict_time)
         self.model_crowd.load_state_dict(state_dict_crowd)
-        
+
         self.model_time.eval()
         self.model_crowd.eval()
         print(f"Dual models loaded successfully.")
 
-    def _sanitize_categorical_inputs(self, x1_cat_batch: np.ndarray, x2_cat_batch: np.ndarray, context: str) -> tuple[np.ndarray, np.ndarray]:
+    def _sanitize_categorical_inputs(self, x1_cat_batch: np.ndarray, x2_cat_batch: np.ndarray, context: str = "") -> tuple[np.ndarray, np.ndarray]:
         x1_cards = self.config["x1_cat_cards"]
         x2_cards = self.config["x2_cat_cards"]
 
         for col_idx, card in enumerate(x1_cards):
-            if card <= 0: continue
+            if card <= 0:
+                continue
             invalid_mask = (x1_cat_batch[:, col_idx] < 0) | (x1_cat_batch[:, col_idx] >= card)
             if int(invalid_mask.sum()) > 0:
                 x1_cat_batch[invalid_mask, col_idx] = 0
 
         for col_idx, card in enumerate(x2_cards):
-            if card <= 0: continue
+            if card <= 0:
+                continue
             invalid_mask = (x2_cat_batch[:, :, col_idx] < 0) | (x2_cat_batch[:, :, col_idx] >= card)
             if int(invalid_mask.sum()) > 0:
                 x2_cat_batch[:, :, col_idx][invalid_mask] = 0
@@ -136,14 +151,17 @@ class Predictor:
 
     def has_trip_template(self, route_id: str, direction_id: Any) -> bool:
         trip_static = self.static_map[
-            (self.static_map["route_id_norm"] == str(route_id)) & (self.static_map["direction_id_norm"] == str(direction_id))
+            (self.static_map["route_id_norm"] == str(route_id)) &
+            (self.static_map["direction_id_norm"] == str(direction_id))
         ]
-        return not trip_static.empty and len(trip_static) == BATCH_SIZE
+        return not trip_static.empty
 
     def _get_day_type(self, d: date) -> int:
         weekday = d.weekday()
-        if weekday == 5: return 1
-        elif weekday == 6: return 2
+        if weekday == 5:
+            return 1
+        elif weekday == 6:
+            return 2
         return 0
 
     def _format_delay(self, delay_seconds: float) -> str:
@@ -161,92 +179,166 @@ class Predictor:
         seconds = total_seconds % 60
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    def _predict_tensors(self, x1_cat_raw: list, x1_dense_raw: list, x2_cat_raw: np.ndarray, x2_dense_raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        route_id_str = str(x1_cat_raw[0])
-        x1_cat_raw[0] = self.route_encoder.get(route_id_str, 0)
+    def _build_trip_tensors(self, trip_stops: pd.DataFrame, route_id: str, direction_id: int,
+                            time_seconds: int, day_type: int, weather_code: int, bus_type: int):
+        """Build padded and scaled input tensors for a single trip from its stop map data.
 
-        x1_dense_raw[13] = np.clip(x1_dense_raw[13], 1, 3) / 3.0
-        x2_dense_raw[:, 0] = np.clip(x2_dense_raw[:, 0], 0, 15000) / 15000.0
-        x2_dense_raw[:, 1] = np.clip(x2_dense_raw[:, 1], 0, 1000) / 1000.0
-        x2_dense_raw[:, 2] = x2_dense_raw[:, 2] / 99.0
-        x2_dense_raw[:, 4] = np.clip(x2_dense_raw[:, 4], 0, 65.0) / 65.0
-        x2_dense_raw[:, 5] = np.clip(x2_dense_raw[:, 5], 0.0, 2.0)
+        Returns x1_cat, x1_dense, x2_cat, x2_dense, t_grid, lengths, num_stops.
+        All x2 arrays are padded to max_stops and pre-scaled.
+        """
+        ms = self.max_stops
+        num_stops = len(trip_stops)
+        trip_stops = trip_stops.sort_values("stop_idx")
 
-        x1_cat_np = np.asarray(x1_cat_raw, dtype=np.int64).reshape(1, -1)
-        x2_cat_np = np.asarray(x2_cat_raw, dtype=np.int64).reshape(1, BATCH_SIZE, -1)
+        # ==============================
+        # x1: trip-level categorical
+        # ==============================
+        route_enc = self.route_encoder.get(str(route_id), 0)
+        x1_cat = np.array([
+            route_enc,
+            int(direction_id),
+            int(day_type),
+            min(int(int(weather_code) / 33), 2),
+            int(float(bus_type) / 9.0),
+        ], dtype=np.int64)
+
+        # ==============================
+        # x1: trip-level dense
+        # ==============================
+        time_sin = math.sin(2 * math.pi * time_seconds / 86400)
+        time_cos = math.cos(2 * math.pi * time_seconds / 86400)
+        # 13 deposit flags (default 0) + door_number (scaled) + time_sin + time_cos
+        x1_dense = np.zeros(16, dtype=np.float32)
+        x1_dense[13] = 1.0  # door_number: clip(3, 1, 3) / 3.0 = 1.0
+        x1_dense[14] = time_sin
+        x1_dense[15] = time_cos
+
+        # ==============================
+        # x2: stop-level categorical (h3_index_encoded, stop_sequence)
+        # ==============================
+        h3_raw = trip_stops["h3_index"].values
+        h3_encoded = np.array(
+            [self.h3_encoder.get(str(h), 0) if h else 0 for h in h3_raw],
+            dtype=np.int64
+        )
+        stop_seq = trip_stops["stop_sequence"].fillna(0).astype(int).values
+
+        x2_cat = np.zeros((ms, 2), dtype=np.int64)
+        x2_cat[:num_stops, 0] = h3_encoded
+        x2_cat[:num_stops, 1] = stop_seq
+
+        # ==============================
+        # x2: stop-level dense (pre-scaled)
+        # Columns: shape_dist, dist_to_next, stop_idx, is_genuine, speed_ratio, traffic_speed
+        # ==============================
+        shape_dist = trip_stops["shape_dist_at_stop"].values.astype(np.float64)
+        dist_to_next = trip_stops["distance_to_next_stop"].values.astype(np.float64)
+        stop_idx_vals = trip_stops["stop_idx"].values.astype(np.float64)
+
+        x2_dense = np.zeros((ms, 6), dtype=np.float32)
+        x2_dense[:num_stops, 0] = np.clip(shape_dist, 0, 15000) / 15000.0
+        x2_dense[:num_stops, 1] = np.clip(dist_to_next, 0, 1000) / 1000.0
+        x2_dense[:num_stops, 2] = stop_idx_vals / max(ms - 1, 1)
+        x2_dense[:num_stops, 3] = 1.0                                        # is_genuine
+        x2_dense[:num_stops, 4] = 1.0                                        # speed_ratio (default)
+        x2_dense[:num_stops, 5] = np.clip(25.0, 0, 65.0) / 65.0             # traffic_speed (default, scaled)
+
+        # ==============================
+        # t_grid: normalized cumulative stop distances for ODE integration
+        # ==============================
+        route_len = float(trip_stops["route_len_m"].iloc[0]) if "route_len_m" in trip_stops.columns else float(shape_dist[-1])
+        t_grid = np.zeros(ms, dtype=np.float32)
+        if route_len > 0:
+            t_grid[:num_stops] = (shape_dist / route_len).astype(np.float32)
+        else:
+            t_grid[:num_stops] = np.linspace(0, 1, num_stops, dtype=np.float32)
+
+        lengths = np.array([num_stops], dtype=np.int64)
+
+        return x1_cat, x1_dense, x2_cat, x2_dense, t_grid, lengths, num_stops
+
+    def _predict_tensors(self, x1_cat: np.ndarray, x1_dense: np.ndarray,
+                         x2_cat: np.ndarray, x2_dense: np.ndarray,
+                         t_grid: np.ndarray, lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Run inference through both models with lengths/t_grid for variable-length support."""
+        ms = self.max_stops
+
+        x1_cat_np = x1_cat.reshape(1, -1)
+        x2_cat_np = x2_cat.reshape(1, ms, -1)
         x1_cat_np, x2_cat_np = self._sanitize_categorical_inputs(x1_cat_np, x2_cat_np, context="single_trip")
 
-        x1_cat_tensor = torch.tensor(x1_cat_np[0], dtype=torch.int64).unsqueeze(0)
-        x1_dense_tensor = torch.tensor(x1_dense_raw, dtype=torch.float32).unsqueeze(0)
-        x2_cat_tensor = torch.tensor(x2_cat_np[0], dtype=torch.int64).unsqueeze(0)
-        x2_dense_tensor = torch.tensor(x2_dense_raw, dtype=torch.float32).unsqueeze(0)
+        x1_cat_tensor = torch.tensor(x1_cat_np, dtype=torch.int64)
+        x1_dense_tensor = torch.tensor(x1_dense.reshape(1, -1), dtype=torch.float32)
+        x2_cat_tensor = torch.tensor(x2_cat_np, dtype=torch.int64)
+        x2_dense_tensor = torch.tensor(x2_dense.reshape(1, ms, -1), dtype=torch.float32)
+        lengths_tensor = torch.tensor(lengths, dtype=torch.int64)
+        t_grid_tensor = torch.tensor(t_grid.reshape(1, ms), dtype=torch.float32)
 
         with torch.no_grad():
-            # ISTRUZIONE AI DUE EMISFERI
-            pred_time_scaled = self.model_time(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
-            pred_crowd_logits = self.model_crowd(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
+            pred_time_scaled = self.model_time(
+                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
+                lengths=lengths_tensor, t_grid=t_grid_tensor
+            )
+            pred_crowd_logits = self.model_crowd(
+                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
+                lengths=lengths_tensor
+            )
 
-        # FATTORE DI SCALING MODIFICATO A 600.0 (10 MINUTI)
-        delays = pred_time_scaled.squeeze().numpy() * 600.0
-        crowd = pred_crowd_logits.argmax(dim=-1).squeeze().numpy()
+        # Descale delays (factor 600.0 = 10 minutes)
+        delays = pred_time_scaled.squeeze(0).squeeze(-1).numpy() * 600.0
+        crowd = pred_crowd_logits.argmax(dim=-1).squeeze(0).numpy()
 
         return delays, crowd
 
-    def get_trip_forecast_raw(self, route_id: str, direction_id: int, time_seconds: int, day_type: int, weather_code: int, bus_type: int) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-        trip_static = self.static_map[
-            (self.static_map["route_id_norm"] == str(route_id)) & (self.static_map["direction_id_norm"] == str(direction_id))
+    def get_trip_forecast_raw(self, route_id: str, direction_id: int,
+                              time_seconds: int, day_type: int,
+                              weather_code: int, bus_type: int) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+        trip_stops = self.static_map[
+            (self.static_map["route_id_norm"] == str(route_id)) &
+            (self.static_map["direction_id_norm"] == str(direction_id))
         ]
-        if trip_static.empty or len(trip_static) != 100:
-            raise ValueError(f"Route {route_id} not found")
+        if trip_stops.empty:
+            raise ValueError(f"Route {route_id} direction {direction_id} not found in stop map")
 
-        trip_static = trip_static.sort_values("segment_idx")
+        x1_cat, x1_dense, x2_cat, x2_dense, t_grid, lengths, num_stops = \
+            self._build_trip_tensors(trip_stops, route_id, direction_id,
+                                    time_seconds, day_type, weather_code, bus_type)
 
-        x1_cat = [route_id, int(direction_id), int(day_type), min(int(int(weather_code) / 33), 2), int(float(bus_type) / 9.0)]
-        time_sin = math.sin(2 * math.pi * time_seconds / 86400)
-        time_cos = math.cos(2 * math.pi * time_seconds / 86400)
-        x1_dense = [0.0] * 13 + [3.0, time_sin, time_cos]
+        delays, crowd = self._predict_tensors(x1_cat, x1_dense, x2_cat, x2_dense, t_grid, lengths)
 
-        h3_encoded = [self.h3_encoder.get(h, 0) if h else 0 for h in trip_static["h3_index"].values]
-        stop_seq = trip_static["stop_sequence"].fillna(-1).astype(int).values
-        x2_cat = np.column_stack((h3_encoded, stop_seq))
+        # Only return predictions for real stops (not padding)
+        delays = delays[:num_stops]
+        crowd = crowd[:num_stops]
 
-        shape_dist = trip_static["can_shape_dist_travelled"].values
-        dist_to_next = trip_static["can_distance_to_next_stop"].values
-        seg_idx = trip_static["segment_idx"].values
-        is_gen = np.ones(100)
-        base_speed = np.full(100, 25.0)
-        speed_ratio = np.full(100, 1.0)
+        trip_stops_sorted = trip_stops.sort_values("stop_idx")
+        return delays, crowd, trip_stops_sorted
 
-        x2_dense = np.column_stack((shape_dist, dist_to_next, seg_idx, is_gen, base_speed, speed_ratio))
-
-        delays, crowd = self._predict_tensors(x1_cat, x1_dense, x2_cat, x2_dense)
-        return delays, crowd, trip_static
-
-    def get_trip_forecast(self, route_id: str, direction_id: int, start_date: str, start_time: str, weather_code: int, bus_type: int) -> TripForecast:
+    def get_trip_forecast(self, route_id: str, direction_id: int,
+                          start_date: str, start_time: str,
+                          weather_code: int, bus_type: int) -> TripForecast:
         from datetime import datetime
         trip_date = datetime.strptime(start_date, "%d-%m-%Y").date()
         time_parts = start_time.split(":")
         time_seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60
         day_type = self._get_day_type(trip_date)
 
-        delays, crowd, trip_static = self.get_trip_forecast_raw(route_id, direction_id, time_seconds, day_type, weather_code, bus_type)
+        delays, crowd, trip_stops = self.get_trip_forecast_raw(
+            route_id, direction_id, time_seconds, day_type, weather_code, bus_type
+        )
 
-        stop_groups = trip_static.groupby("stop_sequence", sort=True)
+        # Predictions are per-stop — direct mapping (no segment groupby needed)
         stop_predictions = []
-        for stop_seq, group in stop_groups:
-            last_segment_idx = group["segment_idx"].max()
-            last_segment_mask = trip_static["segment_idx"] == last_segment_idx
-
-            delay_at_stop = delays[last_segment_idx]
-            crowd_at_stop = int(crowd[last_segment_idx])
-            distance_m = trip_static.loc[last_segment_mask, "can_shape_dist_travelled"].values[0]
+        for i, (_, row) in enumerate(trip_stops.iterrows()):
+            delay_at_stop = float(delays[i])
+            crowd_at_stop = int(crowd[i])
+            distance_m = float(row["shape_dist_at_stop"])
             expected_arrival_seconds = time_seconds + delay_at_stop
 
             stop_predictions.append(
                 StopPrediction(
-                    stop_sequence=int(stop_seq),
-                    distance_m=float(distance_m),
-                    cumulative_delay_sec=float(delay_at_stop),
+                    stop_sequence=int(row["stop_sequence"]),
+                    distance_m=distance_m,
+                    cumulative_delay_sec=delay_at_stop,
                     delay_formatted=self._format_delay(delay_at_stop),
                     expected_arrival=self._format_time(expected_arrival_seconds),
                     crowd_level=crowd_at_stop,
@@ -258,31 +350,36 @@ class Predictor:
             scheduled_start=start_time + ":00", stops=stop_predictions,
         )
 
-    def _predict_batch_tensors(self, x1_cat_batch: np.ndarray, x1_dense_batch: np.ndarray, x2_cat_batch: np.ndarray, x2_dense_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        x1_cat_batch, x2_cat_batch = self._sanitize_categorical_inputs(x1_cat_batch, x2_cat_batch, context="batch")
-
-        x1_dense_batch[:, 13] = np.clip(x1_dense_batch[:, 13], 1, 3) / 3.0
-        x2_dense_batch[:, :, 0] = np.clip(x2_dense_batch[:, :, 0], 0, 15000) / 15000.0
-        x2_dense_batch[:, :, 1] = np.clip(x2_dense_batch[:, :, 1], 0, 1000) / 1000.0
-        x2_dense_batch[:, :, 2] = x2_dense_batch[:, :, 2] / 99.0
-        x2_dense_batch[:, :, 4] = np.clip(x2_dense_batch[:, :, 4], 0, 65.0) / 65.0
-        x2_dense_batch[:, :, 5] = np.clip(x2_dense_batch[:, :, 5], 0.0, 2.0)
+    def _predict_batch_tensors(self, x1_cat_batch: np.ndarray, x1_dense_batch: np.ndarray,
+                               x2_cat_batch: np.ndarray, x2_dense_batch: np.ndarray,
+                               t_grid_batch: np.ndarray, lengths_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Run batch inference through both models with variable-length support."""
+        x1_cat_batch, x2_cat_batch = self._sanitize_categorical_inputs(
+            x1_cat_batch, x2_cat_batch, context="batch"
+        )
 
         x1_cat_tensor = torch.tensor(x1_cat_batch, dtype=torch.int64)
         x1_dense_tensor = torch.tensor(x1_dense_batch, dtype=torch.float32)
         x2_cat_tensor = torch.tensor(x2_cat_batch, dtype=torch.int64)
         x2_dense_tensor = torch.tensor(x2_dense_batch, dtype=torch.float32)
+        lengths_tensor = torch.tensor(lengths_batch, dtype=torch.int64)
+        t_grid_tensor = torch.tensor(t_grid_batch, dtype=torch.float32)
 
         with torch.no_grad():
-            pred_time_scaled = self.model_time(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
-            pred_crowd_logits = self.model_crowd(x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor)
+            pred_time_scaled = self.model_time(
+                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
+                lengths=lengths_tensor, t_grid=t_grid_tensor
+            )
+            pred_crowd_logits = self.model_crowd(
+                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
+                lengths=lengths_tensor
+            )
 
-        # FATTORE DI SCALING MODIFICATO A 600.0 (10 MINUTI)
         delays = pred_time_scaled.squeeze(-1).numpy() * 600.0
         crowd = pred_crowd_logits.argmax(dim=-1).numpy()
 
         return delays, crowd
 
     def get_batch_forecast(self, trips: List[Dict[str, Any]]) -> List[TripForecast]:
-        # ... Rimane invariata eccetto il richiamo nativo a _predict_batch_tensors ...
+        # TODO: Implement batch prediction using _build_trip_tensors + _predict_batch_tensors
         pass

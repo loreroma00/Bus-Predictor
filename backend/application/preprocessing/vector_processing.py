@@ -1,7 +1,7 @@
 """
 Vector Processing - Optimized for performance.
 
-Interpolates dynamic trip data onto fixed 100-segment grid.
+Interpolates dynamic trip data onto stop-based sequences (variable length per route).
 Uses:
 - Pre-indexed lookups for static_map and traffic_avg
 - Parallel processing with joblib
@@ -21,12 +21,11 @@ PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 PARQUET_DIR = os.path.join(PROJECT_ROOT, "parquets")
-STATIC_MAP_FILE = os.path.join(PARQUET_DIR, "canonical_route_map.parquet")
+STATIC_MAP_FILE = os.path.join(PARQUET_DIR, "stop_route_map.parquet")
+STOP_ROUTE_CONFIG_FILE = os.path.join(PARQUET_DIR, "stop_route_config.json")
 TRAFFIC_AVG_FILE = os.path.join(PARQUET_DIR, "traffic_averages.parquet")
 OUTPUT_FILE = os.path.join(PARQUET_DIR, "dataset_lstm_unscaled.parquet")
 ENCODING_MAP_FILE = os.path.join(PARQUET_DIR, "route_encoding.json")
-
-GRID_SIZE = 100
 
 DYNAMIC_FEATURES = [
     "shape_dist_travelled",
@@ -130,7 +129,7 @@ def build_static_map_index(
 ) -> Dict[Tuple[str, int], pd.DataFrame]:
     """
     Pre-index static_map by (route_id, direction_id).
-    Returns dict mapping (route_id, direction_id) -> sorted DataFrame of segments.
+    Returns dict mapping (route_id, direction_id) -> sorted DataFrame of stops.
     """
     print("Building static map index...")
     index = {}
@@ -138,7 +137,7 @@ def build_static_map_index(
         ["route_id", "direction_id"]
     ):
         index[(str(route_id), int(direction_id))] = group.sort_values(
-            "segment_idx"
+            "stop_idx"
         ).reset_index(drop=True)
     print(f"  Indexed {len(index)} route+direction combinations")
     return index
@@ -332,7 +331,7 @@ def process_single_trip(
 ) -> Optional[pd.DataFrame]:
     """
     Process a single trip - designed for parallelization.
-    Returns DataFrame with 100 rows (one per segment) or None if invalid.
+    Returns DataFrame with N rows (one per stop, variable per route) or None if invalid.
     """
     try:
         route_id = str(trip_df["route_id"].iloc[0])
@@ -345,23 +344,19 @@ def process_single_trip(
         print(f"Available columns: {list(trip_df.columns)}")
         raise
 
-    # O(1) lookup for static map
+    # O(1) lookup for stop-based static map
     trip_static = static_map_index.get((route_id, direction_id))
     if trip_static is None or trip_static.empty:
         return None
 
-    # Check for distance-based mapping
-    use_distance = (
-        "can_shape_dist_travelled" in trip_static.columns
-        and "shape_dist_travelled" in trip_df.columns
-    )
+    num_stops = int(trip_static["num_stops"].iloc[0])
+    stop_dists = trip_static["shape_dist_at_stop"].values  # interpolation targets
 
-    if use_distance:
-        can_shape_dists = trip_static["can_shape_dist_travelled"].values
+    # Determine x column for measurements
+    if "shape_dist_travelled" in trip_df.columns:
         x_col = "shape_dist_travelled"
     else:
-        can_shape_dists = None
-        x_col = "progress"
+        return None  # Need distance-based data for stop mapping
 
     # Sort and dedupe
     trip_df = trip_df.sort_values(x_col).drop_duplicates(subset=[x_col], keep="last")
@@ -370,33 +365,27 @@ def process_single_trip(
         return None
 
     x = trip_df[x_col].values
-    x_new = can_shape_dists if use_distance else np.linspace(0, 1, GRID_SIZE)
+    x_new = stop_dists
 
     # Initialize result arrays
-    result = {"segment_idx": np.arange(GRID_SIZE)}
+    result = {"stop_idx": np.arange(num_stops)}
 
-    # Mark genuine measurements
-    if use_distance:
-        segment_has_measurement = np.zeros(GRID_SIZE, dtype=bool)
-        for shape_dist in x:
-            idx = np.searchsorted(can_shape_dists, shape_dist)
-            if idx == 0:
-                seg_idx = 0
-            elif idx >= len(can_shape_dists):
-                seg_idx = len(can_shape_dists) - 1
-            else:
-                dist_left = abs(shape_dist - can_shape_dists[idx - 1])
-                dist_right = abs(shape_dist - can_shape_dists[idx])
-                seg_idx = idx - 1 if dist_left < dist_right else idx
-            segment_has_measurement[seg_idx] = True
-        result["is_genuine"] = segment_has_measurement.astype(int)
-    else:
-        seg_indices = np.minimum((x * GRID_SIZE).astype(int), GRID_SIZE - 1)
-        segment_has_measurement = np.zeros(GRID_SIZE, dtype=bool)
-        segment_has_measurement[seg_indices] = True
-        result["is_genuine"] = segment_has_measurement.astype(int)
+    # Mark genuine measurements (which stops have a real measurement nearby)
+    stop_has_measurement = np.zeros(num_stops, dtype=bool)
+    for shape_dist in x:
+        idx = np.searchsorted(stop_dists, shape_dist)
+        if idx == 0:
+            stop_i = 0
+        elif idx >= num_stops:
+            stop_i = num_stops - 1
+        else:
+            dist_left = abs(shape_dist - stop_dists[idx - 1])
+            dist_right = abs(shape_dist - stop_dists[idx])
+            stop_i = idx - 1 if dist_left < dist_right else idx
+        stop_has_measurement[stop_i] = True
+    result["is_genuine"] = stop_has_measurement.astype(int)
 
-    # Interpolate dynamic features
+    # Interpolate dynamic features to stop positions
     for feat in DYNAMIC_FEATURES:
         if feat not in trip_df.columns:
             continue
@@ -427,7 +416,7 @@ def process_single_trip(
                     y_new[x_new > x[-1]] = y[-1]
                 result[feat] = y_new
             except Exception:
-                result[feat] = np.full(GRID_SIZE, y[0])
+                result[feat] = np.full(num_stops, y[0])
 
         elif feat == "occupancy_status":
             f_zoh = interp1d(
@@ -457,65 +446,31 @@ def process_single_trip(
         is_evening = (day_seconds >= 61200) & (day_seconds <= 70200)
         result["rush_hour_status"] = (is_morning | is_evening).astype(int)
 
-    # Static enrichment from trip_static (vectorized)
-    segment_idx_arr = trip_static["segment_idx"].values
-
-    # Far status
-    if "can_distance_to_next_stop" in trip_static.columns:
-        if "can_shape_dist_travelled" in trip_static.columns:
-            dist_diff = (
-                trip_static["can_distance_to_next_stop"].values
-                - trip_static["can_shape_dist_travelled"].values
-            )
-        else:
-            canonical_len = trip_static["canonical_len_m"].iloc[0]
-            pos = (segment_idx_arr / 100) * canonical_len
-            dist_diff = trip_static["can_distance_to_next_stop"].values - pos
-
-        is_near = (dist_diff > 0) & (dist_diff < 250)
-        far_status = np.full(GRID_SIZE, 1, dtype=int)
-        far_status[segment_idx_arr] = (~is_near).astype(int)
-        result["far_status"] = far_status
+    # Static enrichment directly from stop-based static map
+    # Far status (distance_to_next_stop at each stop)
+    if "distance_to_next_stop" in trip_static.columns:
+        result["far_status"] = (trip_static["distance_to_next_stop"].values > 250).astype(int)
     else:
-        result["far_status"] = np.ones(GRID_SIZE, dtype=int)
+        result["far_status"] = np.ones(num_stops, dtype=int)
 
-    # H3 Index
-    if "h3_index" in trip_static.columns:
-        h3_arr = np.full(GRID_SIZE, None, dtype=object)
-        h3_arr[segment_idx_arr] = trip_static["h3_index"].values
-        result["h3_index"] = h3_arr
+    # H3 index — directly from stop map (each stop has its own H3 hex)
+    h3_values = trip_static["h3_index"].values
+    result["h3_index"] = h3_values
+    h3_encoded = np.array(
+        [h3_encoding.get(str(h), -1) for h in h3_values], dtype=int
+    )
+    result["h3_index_encoded"] = h3_encoded
 
-        # H3 encoding
-        h3_encoded = np.full(GRID_SIZE, -1, dtype=int)
-        for i in range(GRID_SIZE):
-            if h3_arr[i] is not None and str(h3_arr[i]) in h3_encoding:
-                h3_encoded[i] = h3_encoding[str(h3_arr[i])]
-        result["h3_index_encoded"] = h3_encoded
-    else:
-        result["h3_index"] = np.full(GRID_SIZE, None, dtype=object)
-        result["h3_index_encoded"] = np.full(GRID_SIZE, -1, dtype=int)
+    # Stop sequence — directly from stop map
+    result["stop_sequence"] = trip_static["stop_sequence"].values.astype(int)
 
-    # Stop sequence
-    if "stop_sequence" in trip_static.columns:
-        stop_seq = np.full(GRID_SIZE, -1, dtype=int)
-        stop_seq[segment_idx_arr] = trip_static["stop_sequence"].values
-        result["stop_sequence"] = stop_seq
-    else:
-        result["stop_sequence"] = np.full(GRID_SIZE, -1, dtype=int)
+    # Distance features — directly from stop map
+    result["can_shape_dist_travelled"] = trip_static["shape_dist_at_stop"].values
+    result["can_distance_to_next_stop"] = trip_static["distance_to_next_stop"].values
 
-    # Canonical distance features
-    if "can_shape_dist_travelled" in trip_static.columns:
-        can_dist = np.full(GRID_SIZE, 0.0)
-        can_dist[segment_idx_arr] = trip_static["can_shape_dist_travelled"].values
-        result["can_shape_dist_travelled"] = can_dist
-
-    if "can_distance_to_next_stop" in trip_static.columns:
-        can_dist_next = np.full(GRID_SIZE, 0.0)
-        can_dist_next[segment_idx_arr] = trip_static["can_distance_to_next_stop"].values
-        result["can_distance_to_next_stop"] = can_dist_next
-
-    # Route ID
+    # Metadata columns
     result["route_id"] = route_id
+    result["num_stops"] = num_stops
 
     # Time sin/cos
     if "time_seconds" in result:
@@ -526,13 +481,12 @@ def process_single_trip(
     # Traffic averages (using pre-built index)
     if traffic_avg_index and "h3_index" in result and "time_seconds" in result:
         hours = (result["time_seconds"] % 86400).astype(int) // 3600
-        h3_indices = result["h3_index"]
 
         avg_speed_ratios = []
         avg_traffic_speeds = []
 
-        for i in range(GRID_SIZE):
-            key = (str(h3_indices[i]), day_type, hours[i])
+        for i in range(num_stops):
+            key = (str(h3_values[i]), day_type, hours[i])
             if key in traffic_avg_index:
                 sr, ts = traffic_avg_index[key]
                 avg_speed_ratios.append(sr)
@@ -544,11 +498,11 @@ def process_single_trip(
         result["can_avg_speed_ratio"] = avg_speed_ratios
         result["can_avg_traffic_speed"] = avg_traffic_speeds
     else:
-        result["can_avg_speed_ratio"] = [0.0] * GRID_SIZE
-        result["can_avg_traffic_speed"] = [0.0] * GRID_SIZE
+        result["can_avg_speed_ratio"] = [0.0] * num_stops
+        result["can_avg_traffic_speed"] = [0.0] * num_stops
 
-    # Compute static features
-    static_result = compute_static_features(trip_df)
+    # Compute static features (trip-level, replicated per stop)
+    static_result = compute_static_features(trip_df, num_stops)
     result.update(static_result)
 
     # Post-interpolation validation
@@ -567,14 +521,14 @@ def process_single_trip(
     return df_result
 
 
-def compute_static_features(trip_df: pd.DataFrame) -> Dict[str, Any]:
-    """Compute static trip features."""
+def compute_static_features(trip_df: pd.DataFrame, num_stops: int) -> Dict[str, Any]:
+    """Compute static trip features, replicated for each stop."""
     first_row = trip_df.iloc[0]
     result = {}
 
     for feat in STATIC_TRIP_FEATURES:
         if feat in trip_df.columns:
-            result[feat] = [first_row[feat]] * GRID_SIZE
+            result[feat] = [first_row[feat]] * num_stops
 
     # Start time features
     start_time_cols = [
@@ -594,14 +548,14 @@ def compute_static_features(trip_df: pd.DataFrame) -> Dict[str, Any]:
         )
         if valid_mask.any():
             row = trip_df[valid_mask].iloc[0]
-            result["actual_start_time_sin"] = [row["starting_time_sin"]] * GRID_SIZE
-            result["actual_start_time_cos"] = [row["starting_time_cos"]] * GRID_SIZE
+            result["actual_start_time_sin"] = [row["starting_time_sin"]] * num_stops
+            result["actual_start_time_cos"] = [row["starting_time_cos"]] * num_stops
             result["scheduled_start_time_sin"] = [
                 row["sch_starting_time_sin"]
-            ] * GRID_SIZE
+            ] * num_stops
             result["scheduled_start_time_cos"] = [
                 row["sch_starting_time_cos"]
-            ] * GRID_SIZE
+            ] * num_stops
             return result
 
     # Compute start times from distance_to_next_stop
@@ -645,16 +599,16 @@ def compute_static_features(trip_df: pd.DataFrame) -> Dict[str, Any]:
 
         result["actual_start_time_sin"] = [
             np.sin(2 * np.pi * actual_sec / 86400)
-        ] * GRID_SIZE
+        ] * num_stops
         result["actual_start_time_cos"] = [
             np.cos(2 * np.pi * actual_sec / 86400)
-        ] * GRID_SIZE
+        ] * num_stops
         result["scheduled_start_time_sin"] = [
             np.sin(2 * np.pi * scheduled_sec / 86400)
-        ] * GRID_SIZE
+        ] * num_stops
         result["scheduled_start_time_cos"] = [
             np.cos(2 * np.pi * scheduled_sec / 86400)
-        ] * GRID_SIZE
+        ] * num_stops
 
     return result
 
@@ -667,8 +621,18 @@ def process_data(start_date: str = None):
         start_date: Optional start date (YYYY-MM-DD). Only process data from this date onwards.
     """
     print("=" * 60)
-    print("VECTOR PROCESSING (Optimized)")
+    print("VECTOR PROCESSING (Stop-Based)")
     print("=" * 60)
+
+    # Load stop route config for MAX_STOPS
+    if not os.path.exists(STOP_ROUTE_CONFIG_FILE):
+        print(f"Error: Stop route config not found at {STOP_ROUTE_CONFIG_FILE}")
+        print("Run the canonical shape mapper first (Stage 1).")
+        return
+    with open(STOP_ROUTE_CONFIG_FILE, "r") as f:
+        stop_config = json.load(f)
+    max_stops = stop_config["max_stops"]
+    print(f"MAX_STOPS = {max_stops}")
 
     # Load data
     print("\nLoading data...")
@@ -697,9 +661,6 @@ def process_data(start_date: str = None):
         print(f"Available columns: {list(df.columns)}")
         return
     print(f"Using trip column: {trip_col}")
-    print(
-        f"DEBUG: Columns after trip_col detection: {trip_col in df.columns}, {list(df.columns)[:15]}..."
-    )
 
     # Pre-build indexes
     print("\nBuilding lookup indexes...")
@@ -725,30 +686,25 @@ def process_data(start_date: str = None):
     # Unroll time
     print("\nUnrolling time...")
     df = unroll_time(df, trip_col)
-    print(f"DEBUG: After unroll_time, {trip_col} in columns: {trip_col in df.columns}")
 
     # Fill distance_to_next_stop NaN
     if "distance_to_next_stop" in df.columns:
         df["distance_to_next_stop"] = df["distance_to_next_stop"].fillna(-1000)
 
-    # Attach canonical length and compute progress
-    print("\nAttaching canonical length...")
+    # Attach route length and compute progress
+    print("\nAttaching route length...")
     lookup = static_map[
-        ["route_id", "direction_id", "canonical_len_m"]
+        ["route_id", "direction_id", "route_len_m"]
     ].drop_duplicates()
     df = df.merge(lookup, on=["route_id", "direction_id"], how="left")
-    df = df.dropna(subset=["canonical_len_m"])
-    print(f"DEBUG: After merge, {trip_col} in columns: {trip_col in df.columns}")
+    df = df.dropna(subset=["route_len_m"])
 
-    df["progress"] = df["shape_dist_travelled"] / df["canonical_len_m"]
+    df["progress"] = df["shape_dist_travelled"] / df["route_len_m"]
     df["progress"] = df["progress"].clip(0.0, 1.0)
 
     # Combined filtering
     print("\n" + "-" * 40)
     df = filter_trips_combined(df, trip_col, outlier_stats)
-    print(
-        f"DEBUG: After filter_trips, shape={df.shape}, {trip_col} in columns: {trip_col in df.columns}"
-    )
 
     if df.empty:
         print("No trips remaining after filtering.")
@@ -756,9 +712,6 @@ def process_data(start_date: str = None):
 
     # Interpolate schedule_adherence
     df = interpolate_schedule_adherence(df, trip_col)
-    print(
-        f"DEBUG: After interpolate, shape={df.shape}, {trip_col} in columns: {trip_col in df.columns}"
-    )
 
     # Drop stop_sequence (will be replaced from static map)
     if "stop_sequence" in df.columns:
@@ -766,12 +719,10 @@ def process_data(start_date: str = None):
 
     # Parallel processing
     print("\n" + "-" * 40)
-    print("Processing trips in parallel...")
+    print("Processing trips...")
 
-    # Final check that trip_col exists
     if trip_col not in df.columns:
         print(f"ERROR: trip_col '{trip_col}' not found in DataFrame!")
-        print(f"Available columns: {list(df.columns)}")
         return
 
     trip_groups = list(df.groupby(trip_col))
@@ -779,7 +730,6 @@ def process_data(start_date: str = None):
     print(f"Processing {total_trips} trips...")
 
     try:
-        # Use n_jobs=1 for debugging to avoid parallelization issues
         results = Parallel(
             n_jobs=1,  # Set to -1 for parallel after debugging
             verbose=10,
@@ -828,12 +778,57 @@ def process_data(start_date: str = None):
     # Final filter: drop NaN h3_index
     combined_df = combined_df.dropna(subset=["h3_index"])
 
-    # Validate 100 rows per trip
-    trip_counts = combined_df[trip_col].value_counts()
-    valid_trips = trip_counts[trip_counts == 100].index
+    # Validate each trip has correct num_stops rows
+    trip_counts = combined_df.groupby(trip_col).agg(
+        actual_rows=("stop_idx", "count"),
+        expected_rows=("num_stops", "first"),
+    )
+    valid_trips = trip_counts[
+        trip_counts["actual_rows"] == trip_counts["expected_rows"]
+    ].index
     combined_df = combined_df[combined_df[trip_col].isin(valid_trips)]
 
-    print(f"\nFinal dataset: {len(valid_trips)} trips, {len(combined_df)} rows.")
+    n_valid = len(valid_trips)
+    print(f"\nValid trips (correct stop count): {n_valid}")
+
+    # Pad all trips to MAX_STOPS
+    print(f"Padding trips to MAX_STOPS={max_stops}...")
+    padded_dfs = []
+    for tid, group in combined_df.groupby(trip_col):
+        n = len(group)
+        if n < max_stops:
+            pad_rows = max_stops - n
+            pad_df = pd.DataFrame(0, index=range(pad_rows), columns=group.columns)
+            pad_df[trip_col] = tid
+            pad_df["stop_idx"] = range(n, max_stops)
+            pad_df["num_stops"] = group["num_stops"].iloc[0]
+            pad_df["route_id"] = group["route_id"].iloc[0]
+            pad_df["direction_id"] = group["direction_id"].iloc[0]
+            # Mark padding rows
+            pad_df["is_genuine"] = 0
+            pad_df["h3_index_encoded"] = -1
+            pad_df["stop_sequence"] = -1
+            padded_dfs.append(pd.concat([group, pad_df], ignore_index=True))
+        else:
+            padded_dfs.append(group)
+
+    combined_df = pd.concat(padded_dfs, ignore_index=True)
+
+    # Compute t_grid: normalized cumulative stop distances (for ODE integration)
+    print("Computing t_grid...")
+    t_grid_values = []
+    for tid, group in combined_df.groupby(trip_col):
+        n_stops = int(group["num_stops"].iloc[0])
+        dists = group["can_shape_dist_travelled"].values
+        route_len = dists[:n_stops].max() if n_stops > 0 and dists[:n_stops].max() > 0 else 1.0
+        t_grid = dists / route_len
+        t_grid[n_stops:] = 0.0  # zero out padding
+        t_grid_values.extend(t_grid.tolist())
+
+    combined_df["t_grid"] = t_grid_values
+
+    print(f"\nFinal dataset: {n_valid} trips, {len(combined_df)} rows "
+          f"(padded to {max_stops} stops each).")
 
     # Save
     print(f"Saving to {OUTPUT_FILE}...")

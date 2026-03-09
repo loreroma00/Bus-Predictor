@@ -83,7 +83,6 @@ def compute_traffic_averages(output_path=None):
 
 
 # Constants
-INTERPOLATION_POINTS = 100
 H3_RESOLUTION = 9
 R_EARTH = 6371000  # Meters
 
@@ -96,23 +95,11 @@ from application.domain.static_data_fetcher import StaticDataFetcher
 
 
 def get_h3_index(lat: float, lng: float, resolution: int = H3_RESOLUTION) -> str:
-    """
-    Get H3 index for a given lat/lng.
-    Using local implementation to avoid dependency issues with osmnx in h3_utils.
-    """
     return h3.latlng_to_cell(lat, lng, resolution)
 
 
 def haversine_np(lat1, lon1, lat2, lon2):
-    """
-    Calculate the great circle distance between two points
-    on the earth (specified in decimal degrees).
-    Vectorized version using numpy.
-    """
-    # convert decimal degrees to radians
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-
-    # haversine formula
     dlon = lon2 - lon1
     dlat = lat2 - lat1
     a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
@@ -120,252 +107,189 @@ def haversine_np(lat1, lon1, lat2, lon2):
     return c * R_EARTH
 
 
-def process_canonical_shapes(
+def process_stop_route_map(
     trips_path: str,
-    shapes_path: str,
     stop_times_path: str,
     stops_path: str,
     output_path: str,
+    config_output_path: str,
 ):
-    print(
-        f"Loading data from {trips_path}, {shapes_path}, {stop_times_path}, and {stops_path}..."
-    )
+    """
+    Build a stop-based route map from GTFS data.
+    No shapes.txt required — only stop_times.txt, stops.txt, and trips.txt.
+
+    For each (route_id, direction_id), identifies the canonical stop pattern
+    (most common number of stops), then builds a map with one row per stop
+    including H3 hex indices and inter-stop distances.
+
+    Output columns:
+        route_id, direction_id, stop_idx, stop_id, stop_sequence,
+        h3_index, stop_lat, stop_lon, shape_dist_at_stop,
+        distance_to_next_stop, num_stops, route_len_m
+    """
+    print(f"Loading GTFS data from {trips_path}, {stop_times_path}, {stops_path}...")
 
     try:
-        trips = pd.read_csv(
-            trips_path, dtype={"route_id": str, "shape_id": str}, low_memory=False
-        )
-        shapes = pd.read_csv(shapes_path, dtype={"shape_id": str}, low_memory=False)
+        trips = pd.read_csv(trips_path, dtype={"route_id": str}, low_memory=False)
         stop_times = pd.read_csv(stop_times_path, low_memory=False)
         stops = pd.read_csv(stops_path, low_memory=False)
     except FileNotFoundError as e:
         print(f"Error loading files: {e}")
         return
 
-    print("Phase A: Identifying Canonical Shapes...")
+    # =========================================================
+    # Phase A: Identify canonical stop pattern per route+direction
+    # =========================================================
+    print("Phase A: Identifying canonical stop patterns...")
 
-    trips_subset = trips[["route_id", "direction_id", "shape_id"]].dropna()
+    # Link stop_times to route_id + direction_id via trips
+    trip_route = trips[["trip_id", "route_id", "direction_id"]].dropna(
+        subset=["route_id", "direction_id"]
+    )
+    st = stop_times.merge(trip_route, on="trip_id", how="inner")
 
-    shape_counts = (
-        trips_subset.groupby(["route_id", "direction_id", "shape_id"])
+    # Count stops per trip
+    stops_per_trip = (
+        st.groupby(["route_id", "direction_id", "trip_id"])
         .size()
-        .reset_index(name="count")
+        .reset_index(name="n_stops")
     )
 
-    canonical_shapes = shape_counts.sort_values(
-        ["route_id", "direction_id", "count"], ascending=[True, True, False]
+    # For each (route_id, direction_id), find the most common stop count
+    most_common_count = (
+        stops_per_trip.groupby(["route_id", "direction_id", "n_stops"])
+        .size()
+        .reset_index(name="freq")
+        .sort_values(
+            ["route_id", "direction_id", "freq"], ascending=[True, True, False]
+        )
+        .drop_duplicates(subset=["route_id", "direction_id"], keep="first")
     )
-    canonical_shapes = canonical_shapes.drop_duplicates(
+
+    # Pick one representative trip per (route_id, direction_id) with that stop count
+    canonical_trips = most_common_count.merge(
+        stops_per_trip, on=["route_id", "direction_id", "n_stops"], how="inner"
+    )
+    canonical_trips = canonical_trips.drop_duplicates(
         subset=["route_id", "direction_id"], keep="first"
     )
 
-    print(f"Identified {len(canonical_shapes)} canonical shapes.")
+    print(f"Identified {len(canonical_trips)} canonical route+direction pairs.")
 
-    print("Phase A.5: Mapping stops to canonical shapes...")
+    # =========================================================
+    # Phase B: Extract stop sequences with coordinates
+    # =========================================================
+    print("Phase B: Extracting stop sequences with coordinates...")
 
-    trips_with_shape = trips[
-        ["trip_id", "route_id", "direction_id", "shape_id"]
-    ].dropna()
-    stop_times_with_shape = stop_times.merge(
-        trips_with_shape, on="trip_id", how="inner"
+    canonical_trip_ids = set(canonical_trips["trip_id"].values)
+    canonical_st = st[st["trip_id"].isin(canonical_trip_ids)].copy()
+
+    # Attach stop coordinates
+    canonical_st = canonical_st.merge(
+        stops[["stop_id", "stop_lat", "stop_lon"]], on="stop_id", how="left"
     )
 
-    canonical_trips = canonical_shapes[["route_id", "direction_id", "shape_id"]].merge(
-        stop_times_with_shape, on=["route_id", "direction_id", "shape_id"], how="inner"
+    # Drop stops without coordinates
+    before = len(canonical_st)
+    canonical_st = canonical_st.dropna(subset=["stop_lat", "stop_lon"])
+    if len(canonical_st) < before:
+        print(f"  Dropped {before - len(canonical_st)} stops without coordinates.")
+
+    canonical_st = canonical_st.sort_values(
+        ["route_id", "direction_id", "trip_id", "stop_sequence"]
     )
 
-    if "shape_dist_traveled" not in canonical_trips.columns:
-        print("Warning: shape_dist_traveled not in stop_times.")
-        canonical_trips["shape_dist_traveled"] = np.nan
+    # =========================================================
+    # Phase C: Compute distances and H3 indices
+    # =========================================================
+    print("Phase C: Computing inter-stop distances and H3 indices...")
 
-    stop_map = canonical_trips[
-        ["shape_id", "stop_sequence", "stop_id", "shape_dist_traveled"]
-    ].drop_duplicates()
-
-    missing_dist = stop_map["shape_dist_traveled"].isna()
-    if missing_dist.any():
-        print(
-            f"Calculating distances for {missing_dist.sum()} stops missing shape_dist_traveled..."
-        )
-        stop_map = stop_map.merge(
-            stops[["stop_id", "stop_lat", "stop_lon"]], on="stop_id", how="left"
-        )
-
-        missing_dist = stop_map["shape_dist_traveled"].isna()
-
-        for shape_id in stop_map.loc[missing_dist, "shape_id"].unique():
-            shape_mask = (stop_map["shape_id"] == shape_id) & missing_dist
-            shape_stops = stop_map[shape_mask].sort_values("stop_sequence")
-
-            if shape_stops.empty:
-                continue
-
-            lats = shape_stops["stop_lat"].values
-            lons = shape_stops["stop_lon"].values
-
-            if np.any(np.isnan(lats)) or np.any(np.isnan(lons)):
-                print(f"  Warning: Missing coordinates for shape {shape_id}")
-                continue
-
-            distances = [0.0]
-            for i in range(1, len(lats)):
-                dist = haversine_np(lats[i - 1], lons[i - 1], lats[i], lons[i])
-                distances.append(distances[-1] + dist)
-
-            stop_map.loc[shape_stops.index, "shape_dist_traveled"] = distances
-
-        stop_map = stop_map.drop(columns=["stop_lat", "stop_lon"])
-
-    stop_map = stop_map.dropna(subset=["shape_dist_traveled"])
-    stop_map = stop_map.sort_values(["shape_id", "stop_sequence"])
-
-    print("Phase B: Building Map (Normalization & H3)...")
-
-    # Filter shapes DataFrame to include only the canonical shape_ids
-    canonical_shape_ids = set(canonical_shapes["shape_id"].unique())
-    shapes_filtered = shapes[shapes["shape_id"].isin(canonical_shape_ids)].copy()
-
-    # Ensure sorted by sequence
-    shapes_filtered = shapes_filtered.sort_values(["shape_id", "shape_pt_sequence"])
-
-    # Check if we need to calculate distances
-    cols = shapes_filtered.columns
-    if (
-        "shape_dist_traveled" not in cols
-        or shapes_filtered["shape_dist_traveled"].isnull().any()
-    ):
-        print("Calculating shape distances...")
-        # Calculate distance from previous point
-        # Shift lat/lon to get previous point
-        shapes_filtered["prev_lat"] = shapes_filtered.groupby("shape_id")[
-            "shape_pt_lat"
-        ].shift(1)
-        shapes_filtered["prev_lon"] = shapes_filtered.groupby("shape_id")[
-            "shape_pt_lon"
-        ].shift(1)
-
-        # Calculate distance using Haversine
-        # Fill NaN (first point) with 0 distance
-        dists = haversine_np(
-            shapes_filtered["prev_lat"],
-            shapes_filtered["prev_lon"],
-            shapes_filtered["shape_pt_lat"],
-            shapes_filtered["shape_pt_lon"],
-        )
-        shapes_filtered["dist_seg"] = dists.fillna(0)
-
-        # Cumulative sum
-        shapes_filtered["shape_dist_traveled"] = shapes_filtered.groupby("shape_id")[
-            "dist_seg"
-        ].cumsum()
-
-        # Cleanup
-        shapes_filtered.drop(columns=["prev_lat", "prev_lon", "dist_seg"], inplace=True)
-
-    # Now, for each canonical shape, we interpolate 100 points
     results = []
+    max_stops = 0
 
-    # Iterate over each unique shape_id in our filtered shapes
-    grouped = shapes_filtered.groupby("shape_id")
+    for (route_id, direction_id, trip_id), group in canonical_st.groupby(
+        ["route_id", "direction_id", "trip_id"]
+    ):
+        group = group.sort_values("stop_sequence").reset_index(drop=True)
+        n_stops = len(group)
 
-    for shape_id, group in grouped:
-        distances = group["shape_dist_traveled"].values
-        lats = group["shape_pt_lat"].values
-        lons = group["shape_pt_lon"].values
+        if n_stops < 2:
+            continue
 
-        total_dist = distances[-1]
+        lats = group["stop_lat"].values
+        lons = group["stop_lon"].values
+        stop_ids = group["stop_id"].values
+        stop_seqs = group["stop_sequence"].values
 
-        shape_stops = stop_map[stop_map["shape_id"] == shape_id]
-        stop_distances = (
-            shape_stops["shape_dist_traveled"].values
-            if len(shape_stops) > 0
-            else np.array([])
-        )
-        stop_sequences = (
-            shape_stops["stop_sequence"].values
-            if len(shape_stops) > 0
-            else np.array([])
-        )
+        # Cumulative Haversine distances
+        cum_dists = [0.0]
+        for i in range(1, n_stops):
+            d = float(haversine_np(lats[i - 1], lons[i - 1], lats[i], lons[i]))
+            cum_dists.append(cum_dists[-1] + d)
 
-        if total_dist == 0:
-            interp_lats = np.full(INTERPOLATION_POINTS, lats[0])
-            interp_lons = np.full(INTERPOLATION_POINTS, lons[0])
-        else:
-            target_dists = np.linspace(0, total_dist, INTERPOLATION_POINTS)
-            interp_lats = np.interp(target_dists, distances, lats)
-            interp_lons = np.interp(target_dists, distances, lons)
+        route_len = cum_dists[-1]
+        if route_len == 0:
+            continue
 
-        for i in range(INTERPOLATION_POINTS):
-            lat = interp_lats[i]
-            lon = interp_lons[i]
-            h3_idx = get_h3_index(lat, lon)
-            segment_dist = (
-                (i / (INTERPOLATION_POINTS - 1)) * total_dist if total_dist > 0 else 0
-            )
+        if n_stops > max_stops:
+            max_stops = n_stops
 
-            stop_sequence = 1
-            distance_to_next_stop = 0
-            if len(stop_distances) > 0:
-                passed_stops = stop_distances <= segment_dist
-                if np.any(passed_stops):
-                    last_passed_idx = np.where(passed_stops)[0][-1]
-                    stop_sequence = int(stop_sequences[last_passed_idx])
-
-                future_stops = stop_distances > segment_dist
-                if np.any(future_stops):
-                    next_stop_idx = np.where(future_stops)[0][0]
-                    distance_to_next_stop = stop_distances[next_stop_idx] - segment_dist
+        for i in range(n_stops):
+            dist_to_next = cum_dists[i + 1] - cum_dists[i] if i < n_stops - 1 else 0.0
+            h3_idx = get_h3_index(lats[i], lons[i])
 
             results.append(
                 {
-                    "shape_id": shape_id,
-                    "segment_idx": i,
+                    "route_id": route_id,
+                    "direction_id": int(direction_id),
+                    "stop_idx": i,
+                    "stop_id": str(stop_ids[i]),
+                    "stop_sequence": int(stop_seqs[i]),
                     "h3_index": h3_idx,
-                    "canonical_len_m": total_dist,
-                    "can_shape_dist_travelled": segment_dist,
-                    "stop_sequence": stop_sequence,
-                    "can_distance_to_next_stop": distance_to_next_stop,
+                    "stop_lat": lats[i],
+                    "stop_lon": lons[i],
+                    "shape_dist_at_stop": cum_dists[i],
+                    "distance_to_next_stop": dist_to_next,
+                    "num_stops": n_stops,
+                    "route_len_m": route_len,
                 }
             )
 
-    # Convert results to DataFrame
-    results_df = pd.DataFrame(results)
+    if not results:
+        print("Error: No valid routes produced. Check GTFS data.")
+        return
 
-    # Join with canonical_shapes to map shape_id back to route_id, direction_id
-    final_df = pd.merge(
-        canonical_shapes[["route_id", "direction_id", "shape_id"]],
-        results_df,
-        on="shape_id",
-        how="inner",
-    )
+    final_df = pd.DataFrame(results)
 
-    final_df = final_df[
-        [
-            "route_id",
-            "direction_id",
-            "segment_idx",
-            "h3_index",
-            "canonical_len_m",
-            "can_shape_dist_travelled",
-            "stop_sequence",
-            "can_distance_to_next_stop",
-        ]
-    ]
+    n_routes = final_df.groupby(["route_id", "direction_id"]).ngroups
+    print(f"\nBuilt stop map for {n_routes} route+direction pairs.")
+    print(f"MAX_STOPS = {max_stops}")
+    print(f"Stop count distribution:")
+    stop_counts = final_df.drop_duplicates(
+        subset=["route_id", "direction_id"]
+    )["num_stops"]
+    print(f"  Min: {stop_counts.min()}, Median: {stop_counts.median():.0f}, "
+          f"Max: {stop_counts.max()}, Mean: {stop_counts.mean():.1f}")
 
-    # Save to Parquet
-    print(f"Saving {len(final_df)} rows to {output_path}...")
+    # Save parquet
+    print(f"\nSaving {len(final_df)} rows to {output_path}...")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     final_df.to_parquet(output_path, index=False)
+
+    # Save config with MAX_STOPS
+    import json
+    config = {"max_stops": max_stops}
+    with open(config_output_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"Saved stop route config to {config_output_path}")
     print("Done.")
 
 
 def main():
-    print("Starting Canonical Shape Mapping...")
+    print("Starting Stop-Based Route Mapping...")
 
     # 1. Setup & Fetch Data
     try:
-        # To ensure we don't use stale data, we remove the local zip if it exists
-        # to force StaticDataFetcher to download the latest version.
         zip_path = "rome_static_gtfs.zip"
         if os.path.exists(zip_path):
             print(f"Removing stale {zip_path}...")
@@ -378,25 +302,19 @@ def main():
         print("Checking if files exist locally...")
 
     trips_file = "trips.txt"
-    shapes_file = "shapes.txt"
     stop_times_file = "stop_times.txt"
     stops_file = "stops.txt"
 
-    if (
-        not os.path.exists(trips_file)
-        or not os.path.exists(shapes_file)
-        or not os.path.exists(stop_times_file)
-        or not os.path.exists(stops_file)
-    ):
-        print(
-            "Error: trips.txt, shapes.txt, stop_times.txt, or stops.txt not found. Please ensure GTFS data is available."
-        )
-        sys.exit(1)
+    for f in [trips_file, stop_times_file, stops_file]:
+        if not os.path.exists(f):
+            print(f"Error: {f} not found. Please ensure GTFS data is available.")
+            sys.exit(1)
 
-    output_file = os.path.join(PROJECT_ROOT, "parquets", "canonical_route_map.parquet")
+    output_file = os.path.join(PROJECT_ROOT, "parquets", "stop_route_map.parquet")
+    config_file = os.path.join(PROJECT_ROOT, "parquets", "stop_route_config.json")
 
-    process_canonical_shapes(
-        trips_file, shapes_file, stop_times_file, stops_file, output_file
+    process_stop_route_map(
+        trips_file, stop_times_file, stops_file, output_file, config_file
     )
 
     print("\n--- Computing Traffic Averages ---")

@@ -1,9 +1,14 @@
 import torch
 import torch.nn as nn
-from torchdiffeq import odeint_adjoint as odeint 
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from torchdiffeq import odeint_adjoint as odeint
 
 class OccupancyLSTM(nn.Module):
-    
+    """Predicts occupancy/crowd level (7-class classification) using LSTM.
+
+    Supports variable-length sequences via pack_padded_sequence.
+    """
+
     def __init__(self,
                  n_x1_dense_features: int,
                  n_x2_dense_features: int,
@@ -13,7 +18,7 @@ class OccupancyLSTM(nn.Module):
                  lstm_hidden_size: int = 128,
                  num_lstm_layers: int = 2,
                  num_occupancy_classes: int = 7
-        ): 
+        ):
         super(OccupancyLSTM, self).__init__()
 
         self.num_lstm_layers = num_lstm_layers
@@ -23,8 +28,6 @@ class OccupancyLSTM(nn.Module):
         # 1. ENCODER
         # ================================
 
-        # A - Embeddings
-
         self.x1_embeddings = nn.ModuleList()
         x1_total_emb_dim = 0
 
@@ -32,8 +35,6 @@ class OccupancyLSTM(nn.Module):
             emb_dim = min(50, (num_categories+1)//2)
             self.x1_embeddings.append(nn.Embedding(num_categories, emb_dim))
             x1_total_emb_dim += emb_dim
-
-        # B. FCNN Network
 
         encoder_input_size = n_x1_dense_features + x1_total_emb_dim
         self.encoder_fcnn = nn.Sequential(
@@ -48,16 +49,12 @@ class OccupancyLSTM(nn.Module):
         # 2. DECODER
         # ================================
 
-        # A. Embeddings for Decoder
-
         self.x2_embeddings = nn.ModuleList()
         x2_total_emb_dim = 0
         for num_categories in x2_cat_cardinalities:
             emb_dim = min(50, (num_categories + 1) // 2)
             self.x2_embeddings.append(nn.Embedding(num_categories, emb_dim))
             x2_total_emb_dim += emb_dim
-
-        # B. LSTM
 
         decoder_input_size = n_x2_dense_features + x2_total_emb_dim + encoder_hidden_size
         self.decoder_lstm = nn.LSTM(
@@ -72,65 +69,61 @@ class OccupancyLSTM(nn.Module):
         # 3. OUTPUTS
         # ================================
 
-        # Head - Occupancy
         self.head_crowd = nn.Sequential(
             nn.Linear(lstm_hidden_size, 32),
             nn.ReLU(),
             nn.Linear(32, num_occupancy_classes)
         )
 
-        print(f"Model initialized.")
+        print(f"OccupancyLSTM initialized.")
         print(f"Input Encoder: {encoder_input_size} | Input Decoder: {decoder_input_size}")
-        
-    def forward(self, x1_cat, x1_dense, x2_cat, x2_dense):
+
+    def forward(self, x1_cat, x1_dense, x2_cat, x2_dense, lengths=None):
         batch_size = x1_cat.size(0)
+        seq_length = x2_dense.size(1)
 
         # ================================
         # 1. ENCODER
-        # ===============================
-
-        # A. Categorical X1
-
+        # ================================
 
         x1_emb_list = []
         for i, emb_layer in enumerate(self.x1_embeddings):
             x1_emb_list.append(emb_layer(x1_cat[:, i]))
-        x1_emb_concat = torch.cat(x1_emb_list, dim=1) if x1_emb_list else torch.empty(x1_cat.size(0), 0).to(x1_cat.device)
+        x1_emb_concat = torch.cat(x1_emb_list, dim=1) if x1_emb_list else torch.empty(batch_size, 0, device=x1_cat.device)
 
-        # B. Combining Dense & Embedding
-        
         encoder_input = torch.cat([x1_dense, x1_emb_concat], dim=1)
         context = self.encoder_fcnn(encoder_input)
 
-        # ===============================
+        # ================================
         # 2. DECODER
-        # ===============================
-
-        # A. Categorical X2
+        # ================================
 
         x2_emb_list = []
         for i, emb_layer in enumerate(self.x2_embeddings):
             x2_emb_list.append(emb_layer(x2_cat[:, :, i]))
+        x2_emb_concat = torch.cat(x2_emb_list, dim=2) if x2_emb_list else torch.empty(batch_size, seq_length, 0, device=x2_cat.device)
 
-        x2_emb_concat = torch.cat(x2_emb_list, dim=2) if x2_emb_list else torch.empty(batch_size, x2_cat.size(1), 0).to(x2_cat.device)
-
-        # B. Decoder Input
-
-        seq_length = x2_dense.size(1)
         context_repeated = context.unsqueeze(1).repeat(1, seq_length, 1)
         decoder_input = torch.cat([x2_dense, x2_emb_concat, context_repeated], dim=2)
 
-        # C. Injecting into LSTM
-        lstm_out, _ = self.decoder_lstm(decoder_input)
+        # Use pack_padded_sequence for variable-length efficiency
+        if lengths is not None:
+            lengths_cpu = lengths.cpu().clamp(min=1)
+            packed = pack_padded_sequence(decoder_input, lengths_cpu, batch_first=True, enforce_sorted=False)
+            packed_out, _ = self.decoder_lstm(packed)
+            lstm_out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=seq_length)
+        else:
+            lstm_out, _ = self.decoder_lstm(decoder_input)
 
-        # ===============================
+        # ================================
         # 3. OUTPUTS
-        # ===============================
+        # ================================
 
         pred_crowd = self.head_crowd(lstm_out)
 
         return pred_crowd
-        
+
+
 class ODEFunc(nn.Module):
     def __init__(self, hidden_dim):
         super(ODEFunc, self).__init__()
@@ -143,7 +136,15 @@ class ODEFunc(nn.Module):
     def forward(self, t, h):
         return self.net(h)
 
+
 class BusLSTM(nn.Module):
+    """Predicts delay using Neural ODE + LSTMCell.
+
+    Supports variable-length sequences via lengths and t_grid parameters.
+    The ODE evolves the hidden state between stops proportionally to
+    physical distance, and the LSTMCell injects per-stop features.
+    """
+
     def __init__(self, n_x1_dense_features: int, n_x2_dense_features: int, x1_cat_cardinalities: list, x2_cat_cardinalities: list, encoder_hidden_size: int = 128, lstm_hidden_size: int = 128):
 
         super(BusLSTM, self).__init__()
@@ -153,8 +154,6 @@ class BusLSTM(nn.Module):
         # 1. ENCODER
         # ================================
 
-        # A - Embeddings 
-        
         self.x1_embeddings = nn.ModuleList()
         x1_total_emb_dim = 0
 
@@ -162,8 +161,6 @@ class BusLSTM(nn.Module):
             emb_dim = min(50, (num_categories+1)//2)
             self.x1_embeddings.append(nn.Embedding(num_categories, emb_dim))
             x1_total_emb_dim += emb_dim
-
-        # B. FCNN Network
 
         encoder_input_size = n_x1_dense_features + x1_total_emb_dim
         self.encoder_fcnn = nn.Sequential(
@@ -177,7 +174,7 @@ class BusLSTM(nn.Module):
         # =========================
         # 2. DECODER ODE - LSTM
         # =========================
-        
+
         self.x2_embeddings = nn.ModuleList()
         x2_total_emb_dim = 0
         for num_categories in x2_cat_cardinalities:
@@ -200,87 +197,78 @@ class BusLSTM(nn.Module):
             nn.Linear(64, 1)
         )
 
-    def forward(self, x1_cat, x1_dense, x2_cat, x2_dense):
+        print(f"BusLSTM (ODE) initialized.")
+        print(f"Input Encoder: {encoder_input_size} | Input Decoder: {decoder_input_size}")
+
+    def forward(self, x1_cat, x1_dense, x2_cat, x2_dense, lengths=None, t_grid=None):
         batch_size = x1_cat.size(0)
+        seq_length = x2_dense.size(1)
+
+        # Determine effective sequence length (skip padding)
+        if lengths is not None:
+            max_len = int(lengths.max().item())
+        else:
+            max_len = seq_length
 
         # ================================
         # 1. ENCODER
-        # ===============================
-
-        # A. Categorical X1
-
+        # ================================
 
         x1_emb_list = []
         for i, emb_layer in enumerate(self.x1_embeddings):
             x1_emb_list.append(emb_layer(x1_cat[:, i]))
-        x1_emb_concat = torch.cat(x1_emb_list, dim=1) if x1_emb_list else torch.empty(x1_cat.size(0), 0).to(x1_cat.device)
+        x1_emb_concat = torch.cat(x1_emb_list, dim=1) if x1_emb_list else torch.empty(batch_size, 0, device=x1_cat.device)
 
-        # B. Combining Dense & Embedding
-        
         encoder_input = torch.cat([x1_dense, x1_emb_concat], dim=1)
         context = self.encoder_fcnn(encoder_input)
 
-        # ===============================
-        # 2. DECODER
-        # ===============================
-
-        # A. Categorical X2
-
-        seq_length = x2_dense.size(1)
+        # ================================
+        # 2. DECODER (ODE + LSTMCell)
+        # ================================
 
         x2_emb_list = []
         for i, emb_layer in enumerate(self.x2_embeddings):
             x2_emb_list.append(emb_layer(x2_cat[:, :, i]))
-        x2_emb_concat = torch.cat(x2_emb_list, dim=2) if x2_emb_list else torch.empty(batch_size, x2_cat.size(1), 0).to(x2_cat.device)
+        x2_emb_concat = torch.cat(x2_emb_list, dim=2) if x2_emb_list else torch.empty(batch_size, seq_length, 0, device=x2_cat.device)
 
-        t_grid = torch.linspace(0, 1, seq_length).to(x1_dense.device)
-        
-        h_t = torch.zeros(
-            batch_size,
-            self.lstm_hidden_size,
-            device = x1_dense.device
-        )
+        # Build ODE time grid from per-sample stop distances or uniform fallback
+        if t_grid is None:
+            t_grid = torch.linspace(0, 1, seq_length, device=x1_dense.device).unsqueeze(0).expand(batch_size, -1)
 
-        c_t = torch.zeros(
-            batch_size,
-            self.lstm_hidden_size,
-            device = x1_dense.device
-        )
-
-        # C. Injecting into LSTM
-        # lstm_out, _ = self.decoder_lstm(decoder_input)
+        h_t = torch.zeros(batch_size, self.lstm_hidden_size, device=x1_dense.device)
+        c_t = torch.zeros(batch_size, self.lstm_hidden_size, device=x1_dense.device)
 
         outputs = []
 
-        for t_step in range(seq_length):
-            
-            # ==========================================
-            # 1. EVOLUZIONE CONTINUA (Fisica del bus)
-            # ==========================================
+        for t_step in range(max_len):
+            # 1. ODE: Continuous evolution between stops
             if t_step > 0:
-                t_span = torch.tensor([t_grid[t_step-1], t_grid[t_step]], device=x1_dense.device)
-                
-                # ---> QUESTA RIGA DEVE ESSERE DENTRO L'IF <---
-                h_t = odeint(self.ode_func, h_t, t_span, method='euler')[-1]
+                t_prev = t_grid[:, t_step - 1]
+                t_curr = t_grid[:, t_step]
 
-            # ==========================================
-            # 2. INIEZIONE DEL TRAFFICO E METEO (LSTM)
-            # ==========================================
-            # ---> TORNIAMO INDIETRO DI UN LIVELLO DI INDENTAZIONE <---
-            
+                # Per-sample ODE integration (use mean t_span for batch efficiency)
+                t_span = torch.stack([t_prev.mean(), t_curr.mean()]).to(x1_dense.device)
+
+                # Only integrate if there's actual distance between stops
+                if t_span[1] > t_span[0]:
+                    h_t = odeint(self.ode_func, h_t, t_span, method='euler')[-1]
+
+            # 2. LSTMCell: Inject per-stop features
             current_x2_dense = x2_dense[:, t_step, :]
-            current_x2_emb = x2_emb_concat[:, t_step, :] if x2_emb_concat.size(2) > 0 else torch.empty(batch_size, 0).to(x1_dense.device)
-            
-            # Uniamo: Dati dinamici del segmento + Contesto statico del viaggio
+            current_x2_emb = x2_emb_concat[:, t_step, :] if x2_emb_concat.size(2) > 0 else torch.empty(batch_size, 0, device=x1_dense.device)
+
             current_input = torch.cat([current_x2_dense, current_x2_emb, context], dim=1)
-
-            # La cella LSTM fonde l'evoluzione continua (h_t) con l'impatto reale
             h_t, c_t = self.lstm_cell(current_input, (h_t, c_t))
-            
-            outputs.append(h_t) 
 
-        outputs = torch.stack(outputs, dim=1)
+            outputs.append(h_t)
+
+        outputs = torch.stack(outputs, dim=1)  # [batch, max_len, hidden]
+
+        # Pad back to full seq_length if max_len < seq_length
+        if max_len < seq_length:
+            pad = torch.zeros(batch_size, seq_length - max_len, self.lstm_hidden_size, device=outputs.device)
+            outputs = torch.cat([outputs, pad], dim=1)
 
         pred_time = self.head_time(outputs)
 
-        return pred_time            
+        return pred_time

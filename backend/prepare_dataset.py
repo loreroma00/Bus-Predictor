@@ -26,7 +26,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 PARQUET_DIR = PROJECT_ROOT / "parquets"
-CANONICAL_MAP_PATH = PARQUET_DIR / "canonical_route_map.parquet"
+CANONICAL_MAP_PATH = PARQUET_DIR / "stop_route_map.parquet"
 GTFS_MD5_PATH = PARQUET_DIR / "gtfs_md5.json"
 
 
