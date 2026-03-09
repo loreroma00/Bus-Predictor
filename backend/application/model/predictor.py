@@ -381,5 +381,92 @@ class Predictor:
         return delays, crowd
 
     def get_batch_forecast(self, trips: List[Dict[str, Any]]) -> List[TripForecast]:
-        # TODO: Implement batch prediction using _build_trip_tensors + _predict_batch_tensors
-        pass
+        """Batch prediction for multiple trips.
+
+        Accepts a list of trip dicts with keys: route_id, direction_id,
+        start_date (DD-MM-YYYY), start_time (HH:MM), weather_code, bus_type.
+        Returns one TripForecast per trip in the same order.
+        Raises ValueError for any trip whose route/direction is absent from
+        the static stop map (caller is responsible for catching per-chunk).
+        """
+        from datetime import datetime
+
+        all_x1_cat, all_x1_dense = [], []
+        all_x2_cat, all_x2_dense = [], []
+        all_t_grid, all_lengths = [], []
+        num_stops_list: List[int] = []
+        trip_stops_list: List[pd.DataFrame] = []
+        meta_list = []  # (route_id, direction_id, start_date, start_time, time_seconds)
+
+        for trip in trips:
+            route_id     = trip["route_id"]
+            direction_id = int(trip["direction_id"])
+            start_date   = trip["start_date"]
+            start_time   = trip["start_time"]
+            weather_code = int(trip["weather_code"])
+            bus_type     = int(trip["bus_type"])
+
+            trip_stops = self.static_map[
+                (self.static_map["route_id_norm"] == str(route_id)) &
+                (self.static_map["direction_id_norm"] == str(direction_id))
+            ]
+            if trip_stops.empty:
+                raise ValueError(f"Route {route_id}/{direction_id} not in stop map")
+
+            trip_date    = datetime.strptime(start_date, "%d-%m-%Y").date()
+            time_parts   = start_time.split(":")
+            time_seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60
+            day_type     = self._get_day_type(trip_date)
+
+            x1_cat, x1_dense, x2_cat, x2_dense, t_grid, lengths, num_stops = \
+                self._build_trip_tensors(trip_stops, route_id, direction_id,
+                                         time_seconds, day_type, weather_code, bus_type)
+
+            all_x1_cat.append(x1_cat)
+            all_x1_dense.append(x1_dense)
+            all_x2_cat.append(x2_cat)
+            all_x2_dense.append(x2_dense)
+            all_t_grid.append(t_grid)
+            all_lengths.append(lengths[0])
+            num_stops_list.append(num_stops)
+            trip_stops_list.append(trip_stops.sort_values("stop_idx"))
+            meta_list.append((route_id, direction_id, start_date, start_time, time_seconds))
+
+        # Single batched forward pass through both models
+        delays_batch, crowd_batch = self._predict_batch_tensors(
+            np.stack(all_x1_cat),
+            np.stack(all_x1_dense),
+            np.stack(all_x2_cat),
+            np.stack(all_x2_dense),
+            np.stack(all_t_grid),
+            np.array(all_lengths, dtype=np.int64),
+        )
+
+        # Build one TripForecast per trip, trimming padding to real stops only
+        forecasts: List[TripForecast] = []
+        for i, (route_id, direction_id, start_date, start_time, time_seconds) in enumerate(meta_list):
+            n      = num_stops_list[i]
+            delays = delays_batch[i, :n]
+            crowd  = crowd_batch[i,  :n]
+
+            stop_predictions = []
+            for j, (_, row) in enumerate(trip_stops_list[i].iterrows()):
+                delay_at_stop = float(delays[j])
+                stop_predictions.append(StopPrediction(
+                    stop_sequence=int(row["stop_sequence"]),
+                    distance_m=float(row["shape_dist_at_stop"]),
+                    cumulative_delay_sec=delay_at_stop,
+                    delay_formatted=self._format_delay(delay_at_stop),
+                    expected_arrival=self._format_time(time_seconds + delay_at_stop),
+                    crowd_level=int(crowd[j]),
+                ))
+
+            forecasts.append(TripForecast(
+                route_id=route_id,
+                direction_id=direction_id,
+                trip_date=start_date,
+                scheduled_start=start_time + ":00",
+                stops=stop_predictions,
+            ))
+
+        return forecasts
