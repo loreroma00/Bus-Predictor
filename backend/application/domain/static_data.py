@@ -2,7 +2,7 @@ import numpy as np
 import scipy as sp
 from scipy.spatial import KDTree
 from enum import Enum
-from .time_utils import to_unix_time, get_seconds_since_midnight
+from .time_utils import to_unix_time
 
 class FuelType(Enum):
     DIESEL = 0
@@ -119,10 +119,20 @@ class Trip:
         stop_times = []
         distances = []
         for row in self.stop_times:
-            stop_times.append(
-                get_seconds_since_midnight(to_unix_time(row["arrival_time"]))
-            )
+            # Parse time string directly to preserve >24h values for night buses.
+            # Using get_seconds_since_midnight wraps to 0-86399, breaking
+            # interpolation for midnight-crossing trips.
+            h, m, s = map(int, row["arrival_time"].split(":"))
+            seconds = h * 3600 + m * 60 + s
+            stop_times.append(seconds)
             distances.append(float(row["shape_dist_traveled"]))
+
+        # Ensure monotonicity for midnight-crossing trips where times
+        # wrap around (e.g., "23:30:00" → "00:05:00" should become 86700).
+        for i in range(1, len(stop_times)):
+            while stop_times[i] < stop_times[i - 1] - 43200:
+                stop_times[i] += 86400
+
         self.time_law = sp.interpolate.interp1d(stop_times, distances, kind="linear")
         self.spatial_law = sp.interpolate.interp1d(distances, stop_times, kind="linear")
 

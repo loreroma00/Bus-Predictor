@@ -455,6 +455,12 @@ class Observer:
         # 1. Try to get real-time delay directly from feed
         real_time_delay = update.get_delay()
         if real_time_delay is not None:
+            # Correct for day-boundary errors in GTFS-RT feed (night buses).
+            # ATAC's feed can report delays off by ±86400s for trips crossing midnight.
+            while real_time_delay > 43200:
+                real_time_delay -= 86400
+            while real_time_delay < -43200:
+                real_time_delay += 86400
             schedule_adherence = float(real_time_delay)
             delay_genuine = 1
         else:
@@ -480,15 +486,14 @@ class Observer:
                     )
 
                     # --- Midnight Wrap-around Correction ---
-                    # Check for massive jumps indicating day boundary crossing
+                    # The spatial law may return unrolled times (>86400) for
+                    # night buses, while actual_time is always 0-86399.
+                    if expected_time_seconds > 86400 and actual_time_seconds < 43200:
+                        actual_time_seconds += 86400
+
                     diff = actual_time_seconds - expected_time_seconds
-                    
-                    # Case 1: Actual is early morning (e.g. 00:05 = 300), Expected is late night (e.g. 23:55 = 86100)
-                    # Diff would be ~ -85800. We expect diffs within +/- 12 hours.
                     if diff < -43200:
                         actual_time_seconds += 86400
-                    
-                    # Case 2: Actual is late night, Expected is early morning (Rare in GTFS but possible)
                     elif diff > 43200:
                         expected_time_seconds += 86400
 
