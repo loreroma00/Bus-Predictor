@@ -469,7 +469,11 @@ class LiveValidationSession:
                 continue
 
             actual_delay = row["schedule_adherence"]
-            if actual_delay is not None:
+            # Filter out invalid/poisoned values from DB:
+            # -1000.0 = sentinel (no data), |delay| > 7200 = likely corrupted
+            if (actual_delay is not None
+                    and float(actual_delay) != -1000.0
+                    and abs(float(actual_delay)) <= 7200):
                 err = float(predicted_stop.cumulative_delay_sec) - float(actual_delay)
                 delay_squared_errors.append(err * err)
 
@@ -753,7 +757,12 @@ class LiveValidationSession:
             predicted_delay = matched_stop.cumulative_delay_sec
             actual_delay = measurement.schedule_adherence
 
-            if actual_delay is not None:
+            # Filter out invalid measurements:
+            # -1000.0 = default sentinel (no delay data available)
+            # |delay| > 7200 = likely poisoned/corrupted value
+            if (actual_delay is not None
+                    and actual_delay != -1000.0
+                    and abs(actual_delay) <= 7200):
                 delay_errors.append((predicted_delay - actual_delay) ** 2)
 
             predicted_crowd = matched_stop.crowd_level

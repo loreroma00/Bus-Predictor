@@ -455,12 +455,16 @@ class Observer:
         # 1. Try to get real-time delay directly from feed
         real_time_delay = update.get_delay()
         if real_time_delay is not None:
+            raw_delay = real_time_delay  # Save for diagnostic logging
             # Correct for day-boundary errors in GTFS-RT feed (night buses).
             # ATAC's feed can report delays off by ±86400s for trips crossing midnight.
             while real_time_delay > 43200:
                 real_time_delay -= 86400
             while real_time_delay < -43200:
                 real_time_delay += 86400
+            if abs(raw_delay) > 3600:
+                print(f"⚠️ DELAY CORRECTION: raw={raw_delay} → corrected={real_time_delay} "
+                      f"(vehicle={bus.label}, trip={bus.trip.id})")
             schedule_adherence = float(real_time_delay)
             delay_genuine = 1
         else:
@@ -498,6 +502,10 @@ class Observer:
                         expected_time_seconds += 86400
 
                     schedule_adherence = actual_time_seconds - expected_time_seconds
+                    if abs(schedule_adherence) > 3600:
+                        print(f"⚠️ SPATIAL LAW ADHERENCE: {schedule_adherence:.0f}s "
+                              f"(expected={expected_time_seconds:.0f}, actual={actual_time_seconds:.0f}, "
+                              f"vehicle={bus.label}, trip={bus.trip.id})")
             except Exception as e:
                 # If projection fails or trip data missing, default to -1000.0
                 # print(f"Adherence calc failed: {e}")
