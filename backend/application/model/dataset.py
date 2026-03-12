@@ -1,7 +1,8 @@
+"""Instatiates and prepares the dataset to feed the model."""
+
 import json
 import os
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 import pandas as pd
 import numpy as np
@@ -13,7 +14,10 @@ STOP_ROUTE_CONFIG = os.path.join(PROJECT_ROOT, "parquets", "stop_route_config.js
 
 
 class BusDataset(Dataset):
+    """Dataset to be fed to the Bus LSTM."""
+
     def __init__(self, file_path):
+        """Initialize the Dataset."""
         # 1. READING DATA
         print(f"Reading dataset from {file_path}...")
         trips_df = pd.read_parquet(file_path)
@@ -100,9 +104,7 @@ class BusDataset(Dataset):
         self.y_crowd = torch.tensor(self.y_crowd.reshape(self.num_trips, ms))
 
         # Per-trip lengths: take first row of each trip
-        self.lengths = torch.tensor(
-            self.lengths_raw[::ms], dtype=torch.int64
-        )
+        self.lengths = torch.tensor(self.lengths_raw[::ms], dtype=torch.int64)
         self.t_grid = torch.tensor(
             self.t_grid_raw.reshape(self.num_trips, ms), dtype=torch.float32
         )
@@ -114,18 +116,22 @@ class BusDataset(Dataset):
             int(trips_df[c].max() + 1) for c in self.x1_cat_cols
         ]
         self.x2_cat_cardinalities = [
-            int(trips_df.loc[trips_df["stop_sequence"] >= 0, c].max() + 1)
-            if c == "stop_sequence"
-            else int(trips_df.loc[trips_df["h3_index_encoded"] >= 0, c].max() + 1)
+            (
+                int(trips_df.loc[trips_df["stop_sequence"] >= 0, c].max() + 1)
+                if c == "stop_sequence"
+                else int(trips_df.loc[trips_df["h3_index_encoded"] >= 0, c].max() + 1)
+            )
             for c in self.x2_cat_cols
         ]
 
         self.n_x1_dense_features = len(self.x1_dense_cols)
         self.n_x2_dense_features = len(self.x2_dense_cols)
 
-        print(f"Lengths distribution: min={self.lengths.min().item()}, "
-              f"max={self.lengths.max().item()}, "
-              f"mean={self.lengths.float().mean().item():.1f}")
+        print(
+            f"Lengths distribution: min={self.lengths.min().item()}, "
+            f"max={self.lengths.max().item()}, "
+            f"mean={self.lengths.float().mean().item():.1f}"
+        )
         print("Dataset initialized successfully.")
 
     def __len__(self):
@@ -157,7 +163,10 @@ def load_dataset(path: str, train_size: float):
     train_loader = DataLoader(
         train_ds, batch_size=64, shuffle=True, num_workers=2, drop_last=True
     )
-
+    counts = torch.zeros(8)
+    for data, labels in train_loader:
+        batch_count = torch.bincount(labels, minlength=8)
+        counts += batch_count
     val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=2)
 
-    return train_loader, val_loader, full_dataset
+    return train_loader, val_loader, full_dataset, counts
