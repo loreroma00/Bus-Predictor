@@ -22,7 +22,7 @@ except ImportError:
 from application.domain.internal_events import domain_events, DIARY_FINISHED
 from application.domain.observers import Diary
 
-MIN_MEASUREMENTS = 7     # discard trips with fewer measurements than this
+MIN_MEASUREMENTS = 7  # discard trips with fewer measurements than this
 
 
 @dataclass
@@ -36,6 +36,7 @@ class TripValidationResult:
     n_measurements: int
     delay_errors: List[float] = field(default_factory=list)
     occupancy_matches: List[Tuple[int, int]] = field(default_factory=list)
+    telemetry: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -376,7 +377,8 @@ class LiveValidationSession:
 
         self.logger.info(
             "Past trips from memory: %d validated, %d missing",
-            resolved_memory, len(still_missing),
+            resolved_memory,
+            len(still_missing),
         )
 
         # 1b. DB fallback (one-shot) for trips not in memory
@@ -385,7 +387,8 @@ class LiveValidationSession:
             discarded = len(still_missing) - resolved_db
             self.logger.info(
                 "Past trips from DB: %d validated, %d discarded",
-                resolved_db, discarded,
+                resolved_db,
+                discarded,
             )
             # 1c. Discard anything still unresolved
             for trip_id in still_missing:
@@ -403,6 +406,7 @@ class LiveValidationSession:
 
         try:
             from config import Prediction
+
             vector_table = Prediction.VECTOR_TABLE
             label_table = Prediction.LABEL_TABLE
             conn_str = Prediction.VECTOR_DB_CONNECTION
@@ -471,9 +475,11 @@ class LiveValidationSession:
             actual_delay = row["schedule_adherence"]
             # Filter out invalid/poisoned values from DB:
             # -1000.0 = sentinel (no data), |delay| > 7200 = likely corrupted
-            if (actual_delay is not None
-                    and float(actual_delay) != -1000.0
-                    and abs(float(actual_delay)) <= 7200):
+            if (
+                actual_delay is not None
+                and float(actual_delay) != -1000.0
+                and abs(float(actual_delay)) <= 7200
+            ):
                 err = float(predicted_stop.cumulative_delay_sec) - float(actual_delay)
                 delay_squared_errors.append(err * err)
 
@@ -502,6 +508,80 @@ class LiveValidationSession:
             n_measurements=len(delay_squared_errors),
             delay_errors=[e**0.5 for e in delay_squared_errors],
             occupancy_matches=occupancy_matches,
+        )
+
+    def _compute_validation_result_from_db_rows(self, trip_id: str, forecast, db_rows):
+        """Compute validation result from database rows."""
+        pred_by_stop_seq = {int(stop.stop_sequence): stop for stop in forecast.stops}
+
+        delay_squared_errors = []
+        occupancy_matches = []
+
+        # 1. Inizializzazione della telemetria per i fotoromanzi
+        trip_telemetry = {
+            "trip_id": trip_id,
+            "route_id": forecast.route_id,
+            "predicted_curve": [
+                float(stop.cumulative_delay_sec) for stop in forecast.stops
+            ],
+            "actual_measurements": [],
+        }
+
+        for row in db_rows:
+            stop_seq = row["stop_sequence"]
+            if stop_seq is None:
+                continue
+
+            predicted_stop = pred_by_stop_seq.get(int(stop_seq))
+            if predicted_stop is None:
+                continue
+
+            actual_delay = row["schedule_adherence"]
+            # Filter out invalid/poisoned values from DB:
+            # -1000.0 = sentinel (no data), |delay| > 7200 = likely corrupted
+            if (
+                actual_delay is not None
+                and float(actual_delay) != -1000.0
+                and abs(float(actual_delay)) <= 7200
+            ):
+                err = float(predicted_stop.cumulative_delay_sec) - float(actual_delay)
+                delay_squared_errors.append(err * err)
+
+                # 2. Salvataggio del punto reale (Ancoraggio spaziale dai dati DB)
+                trip_telemetry["actual_measurements"].append(
+                    {"segment_idx": int(stop_seq), "actual_delay": float(actual_delay)}
+                )
+
+            actual_occupancy = row["occupancy_status"]
+            if actual_occupancy is not None:
+                actual_occupancy = int(actual_occupancy)
+                if 0 <= actual_occupancy <= 6:
+                    occupancy_matches.append(
+                        (int(predicted_stop.crowd_level), actual_occupancy)
+                    )
+
+        if delay_squared_errors:
+            mse = sum(delay_squared_errors) / len(delay_squared_errors)
+            rmse = mse**0.5
+        else:
+            mse = 0.0
+            rmse = 0.0
+
+        # 3. Finalizzazione dei dati telemetrici
+        trip_telemetry["rmse"] = rmse
+        trip_telemetry["num_measurements"] = len(delay_squared_errors)
+
+        return TripValidationResult(
+            trip_id=trip_id,
+            route_id=forecast.route_id,
+            direction_id=forecast.direction_id,
+            scheduled_start=forecast.scheduled_start,
+            mse=mse,
+            rmse=rmse,
+            n_measurements=len(delay_squared_errors),
+            delay_errors=[e**0.5 for e in delay_squared_errors],
+            occupancy_matches=occupancy_matches,
+            telemetry=trip_telemetry,
         )
 
     def _get_any_hexagon_weather(self):
@@ -746,6 +826,16 @@ class LiveValidationSession:
         delay_errors = []
         occupancy_matches = []
 
+        # Inizializzazione della telemetria per i fotoromanzi
+        trip_telemetry = {
+            "trip_id": trip_id,
+            "route_id": forecast.route_id,
+            "predicted_curve": [
+                float(stop.cumulative_delay_sec) for stop in forecast.stops
+            ],
+            "actual_measurements": [],
+        }
+
         for measurement in diary.measurements:
             matched_stop = self._match_measurement_to_stop(
                 measurement, forecast.stops, stops_map
@@ -760,10 +850,20 @@ class LiveValidationSession:
             # Filter out invalid measurements:
             # -1000.0 = default sentinel (no delay data available)
             # |delay| > 7200 = likely poisoned/corrupted value
-            if (actual_delay is not None
-                    and actual_delay != -1000.0
-                    and abs(actual_delay) <= 7200):
+            if (
+                actual_delay is not None
+                and actual_delay != -1000.0
+                and abs(actual_delay) <= 7200
+            ):
                 delay_errors.append((predicted_delay - actual_delay) ** 2)
+
+                # Salvataggio del punto reale per il plot
+                trip_telemetry["actual_measurements"].append(
+                    {
+                        "segment_idx": matched_stop.stop_sequence,
+                        "actual_delay": float(actual_delay),
+                    }
+                )
 
             predicted_crowd = matched_stop.crowd_level
             actual_occupancy = measurement.occupancy_status
@@ -778,6 +878,10 @@ class LiveValidationSession:
             mse = 0.0
             rmse = 0.0
 
+        # Finalizzazione dei dati telemetrici
+        trip_telemetry["rmse"] = rmse
+        trip_telemetry["num_measurements"] = len(delay_errors)
+
         return TripValidationResult(
             trip_id=trip_id,
             route_id=forecast.route_id,
@@ -788,6 +892,7 @@ class LiveValidationSession:
             n_measurements=len(delay_errors),
             delay_errors=[e**0.5 for e in delay_errors],
             occupancy_matches=occupancy_matches,
+            telemetry=trip_telemetry,
         )
 
     def _build_stops_map(self, route_id: str, direction_id: int, ledger: Dict) -> Dict:
@@ -805,9 +910,9 @@ class LiveValidationSession:
                         stops_map[seq] = {
                             "stop_id": stop_id or "",
                             "stop_name": stop_info.get("stop_name", ""),
-                            "shape_dist_travelled": float(shape_dist)
-                            if shape_dist
-                            else None,
+                            "shape_dist_travelled": (
+                                float(shape_dist) if shape_dist else None
+                            ),
                         }
                 break
 
@@ -866,6 +971,7 @@ class LiveValidationSession:
     async def _write_output_files(self):
         """Write log and report files."""
         from pathlib import Path
+        import json
 
         project_root = Path(__file__).resolve().parent.parent.parent
         results_dir = project_root / "results"
@@ -876,6 +982,9 @@ class LiveValidationSession:
         )
         log_path = results_dir / f"validation_live_{date_yyyymmdd}.log"
         report_path = results_dir / f"validation_live_{date_yyyymmdd}_report.txt"
+        diagnostics_path = (
+            results_dir / f"validation_live_{date_yyyymmdd}_diagnostics.json"
+        )  # <--- NUOVO FILE
 
         with open(log_path, "w") as f:
             f.write(f"=== Live Validation for {self.target_date} ===\n")
@@ -958,7 +1067,17 @@ class LiveValidationSession:
 
             f.write("\n" + "=" * 60 + "\n")
 
-        self.logger.info(f"Output files written: {log_path}, {report_path}")
+            diagnostics_data = [
+                result.telemetry
+                for result in self.validated_trips
+                if result.telemetry and result.n_measurements > 0
+            ]
+        with open(diagnostics_path, "w") as f:
+            json.dump(diagnostics_data, f, indent=2)
+
+        self.logger.info(
+            f"Output files written: {log_path}, {report_path}, {diagnostics_path}"
+        )
 
     def _build_confusion_matrix(self) -> List[List[int]]:
         """Build confusion matrix for occupancy predictions."""
