@@ -11,6 +11,8 @@ from collections import defaultdict
 from dataset import BusDataset
 from model import BusLSTM, OccupancyLSTM
 
+plt = None
+sns = None
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -25,6 +27,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PARQUET_DIR = PROJECT_ROOT / "parquets"
 TEST_FILE_PATH = PARQUET_DIR / "dataset_lstm_final_TEST.parquet"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+def save_confusion_matrix_image(cm, num_classes, nome):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+    ax.set_xlabel("Predetto")
+    ax.set_ylabel("Reale")
+    ax.set_title(f"Matrice di Confusione - {nome}")
+    path = CURRENT_DIR / f"confusion_matrix_DUAL_{nome}.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[*] Confusion matrix salvata: {path}")
+
+
+def plot_campana_errori(errors_np, output_path):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(errors_np, bins=60, density=True, alpha=0.7, color="steelblue", edgecolor="white")
+    ax.set_xlabel("Errore (secondi)")
+    ax.set_ylabel("Densità")
+    ax.set_title("Distribuzione degli Errori di Previsione")
+    ax.axvline(0, color="red", linestyle="--", linewidth=1)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[*] Distribuzione errori salvata: {output_path}")
+
 
 def evaluate_model(config_path: Path):
     print(f"\n--- AVVIO BANCO DI PROVA DUAL SU {DEVICE} ---")
