@@ -35,7 +35,7 @@ class PredictionPipeline(Pipeline):
     def __init__(
         self,
         diary: "Diary",
-        ledger: dict,
+        topology=None,
         served_ratio: float = 1.0,
         config: dict = None,
     ):
@@ -44,12 +44,12 @@ class PredictionPipeline(Pipeline):
 
         Args:
             diary: The Diary object containing measurements
-            ledger: Dict with 'routes', 'trips', 'shapes' keys
+            topology: TopologyLedger with routes, trips, shapes
             served_ratio: Ratio from scan_trip_adherence
             config: Configuration dictionary
         """
         self.diary = diary
-        self.ledger = ledger or {}
+        self.topology = topology
         self.served_ratio = served_ratio
 
         # Load cleaning parameters from config or defaults
@@ -126,12 +126,12 @@ class PredictionPipeline(Pipeline):
             return []
 
         # Step 3: Check for valid runs
-        cleaned = _check_for_runs(cleaned, self.ledger, self.min_measurements)
+        cleaned = _check_for_runs(cleaned, self.topology, self.min_measurements)
         if not cleaned:
             return []
 
         # Step 4: Vectorize with served_ratio
-        vectors = _vectorize(cleaned, self.ledger, self.served_ratio)
+        vectors = _vectorize(cleaned, self.topology, self.served_ratio)
 
         # Step 5: Check Projection Consistency
         if _has_projection_errors(vectors):
@@ -149,12 +149,12 @@ class LenientPipeline(Pipeline):
     def __init__(
         self,
         diary: "Diary",
-        ledger: dict,
+        topology=None,
         served_ratio: float = 1.0,
         config: dict = None,
     ):
         self.diary = diary
-        self.ledger = ledger
+        self.topology = topology
         self.served_ratio = served_ratio
         # Config is unused but kept for interface consistency
 
@@ -167,7 +167,7 @@ class LenientPipeline(Pipeline):
             return []
 
         # Vectorize everything first
-        vectors = _vectorize(self.diary, self.ledger, self.served_ratio)
+        vectors = _vectorize(self.diary, self.topology, self.served_ratio)
 
         # Apply lenient filtering rules
         for vec, label, timestamp in vectors:
@@ -242,12 +242,12 @@ class VehiclePipeline(Pipeline):
     def __init__(
         self,
         diary: "Diary",
-        ledger: dict,
+        topology=None,
         config: dict = None,
         vehicle_type_name: str = "Unknown",
     ):
         self.diary = diary
-        self.ledger = ledger or {}
+        self.topology = topology
         self.vehicle_type_name = vehicle_type_name
 
         # Load cleaning parameters
@@ -283,17 +283,17 @@ class VehiclePipeline(Pipeline):
         cleaned = _remove_outliers(cleaned, self.max_bus_speed, self.max_time_gap)
 
         # Step 3: Check for valid runs
-        cleaned = _check_for_runs(cleaned, self.ledger, self.min_measurements)
+        cleaned = _check_for_runs(cleaned, self.topology, self.min_measurements)
 
         # Step 4: Vectorize (First measurement only)
-        vectors = _vectorize_vehicle(cleaned, self.ledger, self.vehicle_type_name)
+        vectors = _vectorize_vehicle(cleaned, self.topology, self.vehicle_type_name)
 
         return vectors
 
 
 def _vectorize_vehicle(
     data: Union["Diary", dict[str, list["Measurement"]]],
-    ledger: dict,
+    topology=None,
     vehicle_type_name: str = "Unknown",
 ) -> list[tuple[vectorization.VehicleVector, vectorization.VehicleLabel, float]]:
     """
@@ -312,8 +312,8 @@ def _vectorize_vehicle(
     results: list[
         tuple[vectorization.VehicleVector, vectorization.VehicleLabel, float]
     ] = []
-    
-    trips = ledger.get("trips", {})
+
+    trips = topology.trips if topology and hasattr(topology, "trips") else {}
 
     for trip_id, trip_measurements in filtered_measurements.items():
         if not trip_measurements:
@@ -321,7 +321,7 @@ def _vectorize_vehicle(
             
         trip = trips.get(trip_id)
         if not trip:
-            logger.warning(f"⚠️ Trip {trip_id} skipped: Not found in ledger 'trips'")
+            logger.warning(f"⚠️ Trip {trip_id} skipped: Not found in topology")
             continue
 
         # Use the first measurement
@@ -801,19 +801,19 @@ def _remove_outliers(
 
 @overload
 def _check_for_runs(
-    data: "Diary", ledger: dict = None, min_measurements_per_run: int = 7
+    data: "Diary", topology=None, min_measurements_per_run: int = 7
 ) -> "Diary": ...
 @overload
 def _check_for_runs(
     data: dict[str, list["Measurement"]],
-    ledger: dict = None,
+    topology=None,
     min_measurements_per_run: int = 7,
 ) -> dict[str, list["Measurement"]]: ...
 
 
 def _check_for_runs(
     data: Union["Diary", dict[str, list["Measurement"]]],
-    ledger: dict = None,
+    topology=None,
     min_measurements_per_run: int = 7,
 ) -> Union["Diary", dict[str, list["Measurement"]]]:
     """
@@ -825,8 +825,8 @@ def _check_for_runs(
             logger.info(f"🚌 Trip {trip_id} dropped: < min measurements")
             return False
 
-        if ledger and "trips" in ledger:
-            trip = ledger["trips"].get(trip_id)
+        if topology and hasattr(topology, "trips"):
+            trip = topology.trips.get(trip_id)
             if trip and hasattr(trip, "stop_times") and trip.stop_times:
                 first_stop_id = str(trip.stop_times[0].get("stop_id"))
                 last_stop_id = str(trip.stop_times[-1].get("stop_id"))
@@ -871,13 +871,13 @@ def _check_for_runs(
 
 @overload
 def _vectorize(
-    data: "Diary", ledger: dict = None, served_ratio: float = 1.0
+    data: "Diary", topology=None, served_ratio: float = 1.0
 ) -> list[
     tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
 ]: ...
 @overload
 def _vectorize(
-    data: dict[str, list["Measurement"]], ledger: dict = None, served_ratio: float = 1.0
+    data: dict[str, list["Measurement"]], topology=None, served_ratio: float = 1.0
 ) -> list[
     tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
 ]: ...
@@ -885,7 +885,7 @@ def _vectorize(
 
 def _vectorize(
     data: Union["Diary", dict[str, list["Measurement"]]],
-    ledger: dict = None,
+    topology=None,
     served_ratio: float = 1.0,
 ) -> list[tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]]:
     """
@@ -902,20 +902,20 @@ def _vectorize(
         tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
     ] = []
 
-    if not ledger:
-        logger.warning("⚠️ No ledger provided, cannot vectorize")
+    if not topology:
+        logger.warning("⚠️ No topology provided, cannot vectorize")
         return results
 
-    trips = ledger.get("trips", {})
-    routes = ledger.get("routes", {})
+    trips = topology.trips
+    routes = topology.routes
 
     for trip_id, trip_measurements in filtered_measurements.items():
         trip = trips.get(trip_id)
         if not trip:
-            logger.warning(f"⚠️ Trip {trip_id} skipped: Not found in ledger 'trips'")
+            logger.warning(f"⚠️ Trip {trip_id} skipped: Not found in topology")
             continue
 
-        route = trip.route if hasattr(trip, "route") else routes.get(trip.route_id)
+        route = trip.route if hasattr(trip, "route") else None
         if not route:
             logger.warning(f"⚠️ Trip {trip_id} skipped: Route {trip.route_id} not found")
             continue

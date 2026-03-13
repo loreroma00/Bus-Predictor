@@ -137,12 +137,11 @@ def vehicle_worker_loop(work_queue: queue.Queue, stop_event: threading.Event):
             if diary and observatory:
                 try:
                     # Instantiate pipeline directly using event data
-                    # Ensure ledger is loaded
-                    ledger = observatory.get_ledger()
-                    
+                    topology = observatory.get_topology()
+
                     pipeline = VehiclePipeline(
                         diary=diary,
-                        ledger=ledger,
+                        topology=topology,
                         config=observatory.config,
                         vehicle_type_name=vehicle_type_name
                     )
@@ -478,15 +477,42 @@ def stop_services():
 # ============================================================
 
 def _on_diary_finished(data: dict):
-    """Handler: Pushes completed diary to prediction and traffic queues."""
+    """Handler: Pushes completed diary to prediction, traffic, and vehicle queues.
+    Also projects diary to stops and records in Historical Ledger.
+    """
     if PREDICTION_QUEUE is not None:
         PREDICTION_QUEUE.put(data)
-    
+
     if TRAFFIC_ANALYSIS_QUEUE is not None:
         TRAFFIC_ANALYSIS_QUEUE.put(data)
 
     if VEHICLE_ANALYSIS_QUEUE is not None:
         VEHICLE_ANALYSIS_QUEUE.put(data)
+
+    # Record in Historical Ledger
+    _record_historical(data)
+
+
+def _record_historical(event_data: dict):
+    """Project diary measurements to stops and record in the Historical Ledger."""
+    from application.domain.ledgers import project_diary_to_stops
+
+    diary = event_data.get("diary")
+    observatory = event_data.get("observatory")
+    if not diary or not observatory:
+        return
+
+    trip = observatory.search_trip(diary.trip_id)
+    if not trip:
+        return
+
+    try:
+        arrivals = project_diary_to_stops(diary, trip)
+        observatory.historical.record_arrivals(arrivals)
+        if arrivals:
+            logging.info(f"📖 Recorded {len(arrivals)} historical arrivals for trip {diary.trip_id}")
+    except Exception as e:
+        logging.error(f"Failed to record historical arrivals: {e}")
 
 
 def _on_services_start(event_data):

@@ -11,7 +11,8 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Optional
 
-CACHE_FILE = "ledger_cache.pkl"
+TOPOLOGY_CACHE_FILE = "topology_cache.pkl"
+SCHEDULE_CACHE_FILE = "schedule_cache.pkl"
 CITY_CACHE_FILE = "city_cache.pkl"
 
 
@@ -31,13 +32,23 @@ class BaseCacheStrategy(ABC):
         pass
 
     @abstractmethod
-    def load(self, expected_md5: Optional[str] = None) -> dict | None:
-        """Load ledger from cache. Returns None if not available."""
+    def load_topology(self, expected_md5: Optional[str] = None):
+        """Load TopologyLedger from cache. Returns None if not available."""
         pass
 
     @abstractmethod
-    def save(self, ledger: dict, source_md5: Optional[str] = None):
-        """Save ledger to cache."""
+    def save_topology(self, topology, source_md5: Optional[str] = None):
+        """Save TopologyLedger to cache."""
+        pass
+
+    @abstractmethod
+    def load_schedule(self, expected_md5: Optional[str] = None):
+        """Load ScheduleLedger from cache. Returns None if not available."""
+        pass
+
+    @abstractmethod
+    def save_schedule(self, schedule_ledger, source_md5: Optional[str] = None):
+        """Save ScheduleLedger to cache."""
         pass
 
 
@@ -46,44 +57,67 @@ class FileCacheStrategy(BaseCacheStrategy):
 
     strategy_name = "file"
 
-    def __init__(self, cache_path=CACHE_FILE):
-        self.cache_path = cache_path
+    def __init__(self, cache_dir: str = "."):
+        self._cache_dir = cache_dir
+        self._topology_path = os.path.join(cache_dir, TOPOLOGY_CACHE_FILE)
+        self._schedule_path = os.path.join(cache_dir, SCHEDULE_CACHE_FILE)
 
-    def load(self, expected_md5: Optional[str] = None) -> dict | None:
-        """Load ledger from pickle cache."""
-        if not os.path.exists(self.cache_path):
+    # ---------- Topology ----------
+
+    def load_topology(self, expected_md5: Optional[str] = None):
+        """Load TopologyLedger from pickle cache."""
+        return self._load(self._topology_path, expected_md5, "topology")
+
+    def save_topology(self, topology, source_md5: Optional[str] = None):
+        """Save TopologyLedger to pickle cache."""
+        if source_md5:
+            topology.source_md5 = source_md5
+        self._save(self._topology_path, topology, "topology")
+
+    # ---------- Schedule ----------
+
+    def load_schedule(self, expected_md5: Optional[str] = None):
+        """Load ScheduleLedger from pickle cache."""
+        return self._load(self._schedule_path, expected_md5, "schedule")
+
+    def save_schedule(self, schedule_ledger, source_md5: Optional[str] = None):
+        """Save ScheduleLedger to pickle cache."""
+        if source_md5:
+            schedule_ledger.source_md5 = source_md5
+        self._save(self._schedule_path, schedule_ledger, "schedule")
+
+    # ---------- Internal ----------
+
+    def _load(self, path: str, expected_md5: Optional[str], label: str):
+        if not os.path.exists(path):
             return None
-
         try:
-            logging.info(f"Loading ledger from cache ({self.cache_path})...")
-            with open(self.cache_path, "rb") as f:
-                cache = pickle.load(f)
+            logging.info(f"Loading {label} from cache ({path})...")
+            with open(path, "rb") as f:
+                obj = pickle.load(f)
 
-            # MD5 Verification Logic
-            if expected_md5:
-                cached_md5 = cache.get("__metadata__", {}).get("md5")
-                if cached_md5 != expected_md5:
+            if expected_md5 and hasattr(obj, "source_md5"):
+                if obj.source_md5 != expected_md5:
                     logging.info(
-                        f"Cache Outdated (Expected {expected_md5}, Found {cached_md5}). Invalidating..."
+                        f"Cache Outdated ({label}: expected {expected_md5}, "
+                        f"found {obj.source_md5}). Invalidating..."
                     )
-                    os.remove(self.cache_path)
+                    os.remove(path)
                     return None
 
-            return cache
+            return obj
         except Exception as e:
-            logging.error(f"Failed to load cache: {e}. Rebuilding...")
+            logging.error(f"Failed to load {label} cache: {e}. Rebuilding...")
             return None
 
-    def save(self, ledger: dict, source_md5: Optional[str] = None):
-        """Save ledger to pickle cache."""
+    def _save(self, path: str, obj, label: str):
         try:
-            if source_md5:
-                ledger["__metadata__"] = {"md5": source_md5}
-
-            with open(self.cache_path, "wb") as f:
-                pickle.dump(ledger, f)
+            with open(path, "wb") as f:
+                pickle.dump(obj, f)
         except Exception as e:
-            logging.error(f"Could not save cache: {e}")
+            logging.error(f"Could not save {label} cache: {e}")
+
+    # ---------- City Cache (unchanged) ----------
 
     def save_city_cache(self, city, cache_path=None):
         """
@@ -91,7 +125,7 @@ class FileCacheStrategy(BaseCacheStrategy):
         Only saves the streets dict for each hexagon to minimize size.
         """
         if cache_path is None:
-            cache_path = CITY_CACHE_FILE
+            cache_path = os.path.join(self._cache_dir, CITY_CACHE_FILE)
         try:
             data = {
                 hex_id: dict(hexagon.streets)
@@ -111,7 +145,7 @@ class FileCacheStrategy(BaseCacheStrategy):
         Creates hexagons if they don't exist yet.
         """
         if cache_path is None:
-            cache_path = CITY_CACHE_FILE
+            cache_path = os.path.join(self._cache_dir, CITY_CACHE_FILE)
         if not os.path.exists(cache_path):
             logging.info(f"No city cache found at {cache_path}")
             return 0
@@ -160,12 +194,16 @@ class NoCacheStrategy(BaseCacheStrategy):
 
     strategy_name = "none"
 
-    def load(self, expected_md5: Optional[str] = None) -> dict | None:
-        """Always returns None - no cache."""
+    def load_topology(self, expected_md5: Optional[str] = None):
         return None
 
-    def save(self, ledger: dict, source_md5: Optional[str] = None):
-        """Does nothing - no persistence."""
+    def save_topology(self, topology, source_md5: Optional[str] = None):
+        pass
+
+    def load_schedule(self, expected_md5: Optional[str] = None):
+        return None
+
+    def save_schedule(self, schedule_ledger, source_md5: Optional[str] = None):
         pass
 
 

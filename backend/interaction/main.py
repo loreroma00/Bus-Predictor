@@ -19,8 +19,8 @@ from . import console
 from persistence import (
     get_cache_strategy,
     get_available_strategies,
-    FileCacheStrategy,
     save_diaries_incremental,
+    load_pickle,
 )
 
 
@@ -70,14 +70,9 @@ def initialize_collection(config=None, lenient_pipeline: bool = False):
     get_db_connection(config)
 
     # Static bus lane map
-    static_bus_lanes = {}
-    try:
-        loader = FileCacheStrategy(cache_path="static_bus_lanes_roma.pkl")
-        static_bus_lanes = loader.load() or {}
-        if static_bus_lanes:
-            logging.info(f"Loaded static bus lanes map ({len(static_bus_lanes)} hexes)")
-    except Exception as e:
-        logging.warning(f"Could not load static bus lanes: {e}")
+    static_bus_lanes = load_pickle("static_bus_lanes_roma.pkl", default={})
+    if static_bus_lanes:
+        logging.info(f"Loaded static bus lanes map ({len(static_bus_lanes)} hexes)")
 
     observatory.add_city("Rome", static_bus_lanes=static_bus_lanes)
     city = observatory.get_city("Rome")

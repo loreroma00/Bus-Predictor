@@ -220,12 +220,13 @@ class TestDataCleaning:
 
         diary.measurements = [m1, m2]
 
-        # Mock ledger with proper route structure
+        # Mock topology with proper route structure
         mock_route = SimpleNamespace(id="route_A")
         mock_trip = SimpleNamespace(
             id="trip_1", route=mock_route, direction_id=0, direction_name="Outbound"
         )
-        ledger = {"trips": {"trip_1": mock_trip}}
+        from application.domain.ledgers import TopologyLedger
+        topology = TopologyLedger(trips={"trip_1": mock_trip})
 
         with patch(
             "application.post_processing.data_cleaning._load_uptime_data",
@@ -233,7 +234,7 @@ class TestDataCleaning:
         ):
             pipeline = VehiclePipeline(
                 diary=diary,
-                ledger=ledger,
+                topology=topology,
                 config={"data_cleaning": {"min_measurements_per_run": 1}},
                 vehicle_type_name="DieselBus",
             )

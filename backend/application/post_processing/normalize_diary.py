@@ -143,11 +143,11 @@ def main():
         print("No diaries found. Exiting.")
         return
 
-    # 2. Load Ledger
-    print("Loading Ledger...")
+    # 2. Load Topology
+    print("Loading Topology...")
     obs = domain.Observatory()
-    ledger = obs.get_ledger()
-    trips_map = ledger["trips"]
+    topology = obs.get_topology()
+    trips_map = topology.trips
 
     # 3. Identify Dates from Diaries
     print("Identifying Dates from Diaries...")

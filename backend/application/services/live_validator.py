@@ -301,10 +301,10 @@ class LiveValidationSession:
                 return None
             return hh * 60 + mm
 
-        ledger = self.observatory.get_ledger()
+        topology = self.observatory.get_topology()
         scheduled = []
 
-        for trip_id, trip in ledger["trips"].items():
+        for trip_id, trip in topology.trips.items():
             if date_yyyymmdd in trip.dates:
                 stop_times = trip.get_stop_times() or []
                 if stop_times:
@@ -817,10 +817,10 @@ class LiveValidationSession:
         self, trip_id: str, forecast, diary: Diary
     ) -> TripValidationResult:
         """Compute validation metrics for a trip."""
-        ledger = self.observatory.get_ledger()
+        topology = self.observatory.get_topology()
 
-        stops_map = self._build_stops_map(
-            forecast.route_id, forecast.direction_id, ledger
+        stops_map = topology.build_stops_map(
+            forecast.route_id, forecast.direction_id
         )
 
         delay_errors = []
@@ -895,28 +895,7 @@ class LiveValidationSession:
             telemetry=trip_telemetry,
         )
 
-    def _build_stops_map(self, route_id: str, direction_id: int, ledger: Dict) -> Dict:
-        """Build a mapping of stop_sequence to stop info."""
-        stops_map = {}
-
-        for trip_id, trip in ledger["trips"].items():
-            if trip.route.id == route_id and trip.direction_id == direction_id:
-                for st in trip.get_stop_times() or []:
-                    seq = int(st.get("stop_sequence", 0) or 0)
-                    if seq not in stops_map:
-                        stop_id = st.get("stop_id")
-                        stop_info = ledger["stops"].get(stop_id, {})
-                        shape_dist = st.get("shape_dist_travelled")
-                        stops_map[seq] = {
-                            "stop_id": stop_id or "",
-                            "stop_name": stop_info.get("stop_name", ""),
-                            "shape_dist_travelled": (
-                                float(shape_dist) if shape_dist else None
-                            ),
-                        }
-                break
-
-        return stops_map
+    # _build_stops_map removed — now uses TopologyLedger.build_stops_map()
 
     def _match_measurement_to_stop(
         self, measurement, predicted_stops, stops_map

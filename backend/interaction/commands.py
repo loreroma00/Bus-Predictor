@@ -146,10 +146,9 @@ class print_diary(Command):
         # Create resolver functions
         def resolve_stop_name(stop_id):
             try:
-                ledger: dict[str, dict] = self._obs.get_ledger()
-                if ledger and "stops" in ledger:
-                    stop = ledger["stops"].get(stop_id)
-                    # Stops are dicts with 'stop_name' key, not objects with .name
+                topology = self._obs.get_topology()
+                if topology:
+                    stop = topology.get_stop(stop_id)
                 return stop.get("stop_name") if stop else None
                 return None
             except Exception as e:
@@ -368,8 +367,8 @@ class normalize_diaries(Command):
             return
 
         obs = self._get_observatory()
-        ledger = obs.get_ledger()
-        if ledger is None:
+        topology = obs.get_topology()
+        if topology is None:
             return
 
         logging.info(f"Loaded {len(diaries)} raw measurements.")
@@ -379,7 +378,7 @@ class normalize_diaries(Command):
 
         logging.info(f"Processing {len(grouped)} trips...")
         for trip_id, group_df in grouped:
-            trip = ledger["trips"].get(trip_id)
+            trip = topology.get_trip(trip_id)
             if trip:
                 norm_df = nd.normalize_trip_stops(group_df, trip)
                 normalized_dfs.append(norm_df)

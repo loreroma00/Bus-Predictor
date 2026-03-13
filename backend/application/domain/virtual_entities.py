@@ -11,6 +11,7 @@ from .interfaces import CacheStrategy, GeocodingStrategy
 from .static_data import VehicleType
 from .static_data_fetcher import StaticDataFetcher
 from .ledger_builder import LedgerBuilder
+from .ledgers import TopologyLedger, ScheduleLedger, HistoricalLedger, PredictedLedger
 from .observer_manager import ObserverManager
 from .cities import City
 from .live_data import Autobus
@@ -57,13 +58,18 @@ class Observatory:
         self._builder = LedgerBuilder()
         self._observer_manager = ObserverManager()
 
-        # State
-        self.ledger: dict[str, dict] = None
+        # ---- Ledgers ----
+        self.topology: TopologyLedger = None
+        self.schedule_ledger: ScheduleLedger = None
+        self.historical: HistoricalLedger = HistoricalLedger()
+        self.predicted: PredictedLedger = PredictedLedger()
+
+        # Cache metadata
         self.current_md5: str = None
         self.last_update_check: float = 0
-        self.observed_cities: dict[str, City] = {}
 
-        # Load Fleet
+        # Cities & Fleet
+        self.observed_cities: dict[str, City] = {}
         self.fleet = load_fleet("vehicles.csv")
 
     def add_city(self, city_name: str, static_bus_lanes: dict = None):
@@ -202,43 +208,53 @@ class Observatory:
 
     # ==================== LEDGER OPERATIONS ====================
 
-    def get_ledger(self) -> dict[str, dict]:
-        """Public method to access the ledger, building it if necessary."""
-        if self.ledger is None:
-            self._build_ledger()
-        return self.ledger
+    def get_topology(self) -> TopologyLedger:
+        """Public accessor for the topology ledger, building if necessary."""
+        if self.topology is None:
+            self._build_ledgers()
+        return self.topology
 
-    def _build_ledger(self):
-        """Orchestrates ledger building using internal components."""
+    def get_schedule_ledger(self) -> ScheduleLedger:
+        """Public accessor for the schedule ledger, building if necessary."""
+        if self.schedule_ledger is None:
+            self._build_ledgers()
+        return self.schedule_ledger
+
+    def _build_ledgers(self):
+        """Orchestrates building both topology and schedule ledgers."""
         # 1. Fetch static data (download if needed)
         latest_md5 = self._fetcher.fetch()
 
         # 2. Try loading from cache (if cache strategy was injected)
         if self._cache:
-            self.ledger = self._cache.load(expected_md5=latest_md5)
+            topology = self._cache.load_topology(expected_md5=latest_md5)
+            schedule = self._cache.load_schedule(expected_md5=latest_md5)
 
-            if self.ledger is not None:
+            if topology is not None and schedule is not None:
+                self.topology = topology
+                self.schedule_ledger = schedule
                 self.current_md5 = latest_md5
-                return self.ledger
+                return
 
         # 3. Build from CSVs
         self._builder.read_csvs()
-        self.ledger = self._builder.build()
+        self.topology = self._builder.build_topology()
+        self.schedule_ledger = self._builder.build_schedule(self.topology)
 
         # 4. Save to cache (if cache strategy was injected)
         if self._cache:
-            self._cache.save(self.ledger, source_md5=latest_md5)
+            self._cache.save_topology(self.topology, source_md5=latest_md5)
+            self._cache.save_schedule(self.schedule_ledger, source_md5=latest_md5)
 
         self.current_md5 = latest_md5
-        return self.ledger
 
     def _ensure_static_data_loaded(self):
-        """Ensures ledger is available."""
-        if self.ledger is None:
-            self._build_ledger()
+        """Ensures topology + schedule are available."""
+        if self.topology is None:
+            self._build_ledgers()
 
     def check_and_reload_ledger(self) -> bool:
-        """Hot-swap ledger if a new version is available."""
+        """Hot-swap ledgers if a new version is available."""
         COOLDOWN = 300  # 5 minutes
 
         if time.time() - self.last_update_check < COOLDOWN:
@@ -252,8 +268,9 @@ class Observatory:
 
             if latest_md5 != self.current_md5:
                 logging.info("Update Found! Hot swapping...")
-                self.ledger = None
-                self.get_ledger()
+                self.topology = None
+                self.schedule_ledger = None
+                self.get_topology()
                 logging.info("Hot swap complete.")
                 return True
             else:
@@ -266,8 +283,8 @@ class Observatory:
 
     def search_trip(self, trip_id: str):
         """Search for a trip by ID."""
-        if self.ledger:
-            return self.ledger["trips"].get(trip_id)
+        if self.topology:
+            return self.topology.get_trip(trip_id)
         return None
 
     # ==================== OBSERVER OPERATIONS (delegated) ====================
@@ -419,7 +436,7 @@ class Observatory:
         from datetime import datetime
 
         expected = set()
-        trips = self.ledger.get("trips", {})
+        trips = self.topology.trips if self.topology else {}
 
         # Convert window to date string for efficient filtering
         local_tz = datetime.now().astimezone().tzinfo
@@ -492,7 +509,7 @@ class Observatory:
             if observer.current_diary:
                 trip_id = observer.current_diary.trip_id
                 if trip_id in expected_trip_ids:
-                    shape = self._get_shape_for_trip(trip_id)
+                    shape = self.topology.get_shape_for_trip(trip_id) if self.topology else None
                     if verification_strategy.is_trip_valid(
                         observer.current_diary, shape
                     ):
@@ -502,18 +519,11 @@ class Observatory:
             for diary in observer.diary_history:
                 trip_id = diary.trip_id
                 if trip_id in expected_trip_ids:
-                    shape = self._get_shape_for_trip(trip_id)
+                    shape = self.topology.get_shape_for_trip(trip_id) if self.topology else None
                     if verification_strategy.is_trip_valid(diary, shape):
                         served.add(trip_id)
 
         return served
-
-    def _get_shape_for_trip(self, trip_id: str):
-        """Helper to get shape for a trip from ledger."""
-        trip = self.ledger.get("trips", {}).get(trip_id)
-        if trip:
-            return trip.get_shape()
-        return None
 
     # ==================== VECTORIZATION LOOP ====================
 
@@ -559,7 +569,7 @@ class Observatory:
         )
         pipeline = PipelineClass(
             diary=diary,
-            ledger=self.ledger,
+            topology=self.topology,
             served_ratio=served_ratio,
             config=self.config,
         )

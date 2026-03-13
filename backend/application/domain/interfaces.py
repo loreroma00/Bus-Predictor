@@ -60,19 +60,25 @@ class CacheStrategy(Protocol):
     """
     Interface for ledger cache operations.
 
-    Implementations should provide load() and save() methods.
+    Implementations should provide load/save methods for
+    TopologyLedger and ScheduleLedger.
     No inheritance required — just implement the methods.
     """
 
-    def load(self, expected_md5: str = None) -> dict:
-        """
-        Load ledger from cache.
-        Returns None if cache is invalid or missing.
-        """
+    def load_topology(self, expected_md5: str = None):
+        """Load TopologyLedger from cache. Returns None if unavailable."""
         ...
 
-    def save(self, ledger: dict, source_md5: str = None) -> None:
-        """Save ledger to cache with optional MD5 metadata."""
+    def save_topology(self, topology, source_md5: str = None) -> None:
+        """Save TopologyLedger to cache."""
+        ...
+
+    def load_schedule(self, expected_md5: str = None):
+        """Load ScheduleLedger from cache. Returns None if unavailable."""
+        ...
+
+    def save_schedule(self, schedule_ledger, source_md5: str = None) -> None:
+        """Save ScheduleLedger to cache."""
         ...
 
 

@@ -2,7 +2,8 @@
 # Re-exports from new modular structure
 
 from .strategy import (
-    CACHE_FILE,
+    TOPOLOGY_CACHE_FILE,
+    SCHEDULE_CACHE_FILE,
     CITY_CACHE_FILE,
     BaseCacheStrategy,
     FileCacheStrategy,
@@ -28,7 +29,7 @@ from .diaries import (
     saving_loop,
 )
 
-from .cache import log_uptime
+from .cache import log_uptime, save_pickle, load_pickle
 
 from .database import (
     TimescaleDBConnection,
@@ -40,7 +41,8 @@ from .database import (
 
 __all__ = [
     # Strategy module
-    "CACHE_FILE",
+    "TOPOLOGY_CACHE_FILE",
+    "SCHEDULE_CACHE_FILE",
     "CITY_CACHE_FILE",
     "BaseCacheStrategy",
     "FileCacheStrategy",
@@ -64,6 +66,8 @@ __all__ = [
     "saving_loop",
     # Cache module
     "log_uptime",
+    "save_pickle",
+    "load_pickle",
     # Database module
     "TimescaleDBConnection",
     "get_db_connection",

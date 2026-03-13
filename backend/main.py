@@ -522,6 +522,36 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
     current_live_session = None
     bus_type_predictor = None
 
+    def _record_predictions(forecast: TripForecast, stops_map: dict):
+        """Record a forecast into the PredictedLedger (fire-and-forget)."""
+        if observatory is None:
+            return
+        try:
+            import time as _time
+            from application.domain.ledgers import StopPredictionRecord
+
+            now = _time.time()
+            records = []
+            for sp in forecast.stops:
+                stop_info = stops_map.get(sp.stop_sequence, {})
+                records.append(
+                    StopPredictionRecord(
+                        route_id=forecast.route_id,
+                        direction_id=forecast.direction_id,
+                        trip_date=forecast.trip_date,
+                        scheduled_start=forecast.scheduled_start,
+                        stop_id=stop_info.get("stop_id", ""),
+                        stop_sequence=sp.stop_sequence,
+                        predicted_arrival=sp.expected_arrival,
+                        predicted_delay_sec=sp.cumulative_delay_sec,
+                        predicted_crowd_level=sp.crowd_level,
+                        prediction_timestamp=now,
+                    )
+                )
+            observatory.predicted.record_predictions(records)
+        except Exception as e:
+            logging.warning(f"Failed to record predictions: {e}")
+
     def load_config_api() -> dict:
         config = configparser.ConfigParser()
         if CONFIG_PATH.exists():
@@ -767,16 +797,16 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
     @app.get("/routes", response_model=RoutesResponse)
     async def list_routes():
         """List all available routes."""
-        ledger = observatory.get_ledger()
-        routes = [{"route_id": rid} for rid in ledger["routes"].keys()]
+        topology = observatory.get_topology()
+        routes = [{"route_id": rid} for rid in topology.routes.keys()]
         return RoutesResponse(routes=routes)
 
     @app.get("/routes/{route_id}/directions", response_model=DirectionsResponse)
     async def get_directions(route_id: str):
         """List all directions for a route."""
-        ledger = observatory.get_ledger()
+        topology = observatory.get_topology()
         directions = {}
-        for trip_id, trip in ledger["trips"].items():
+        for trip_id, trip in topology.trips.items():
             if trip.route.id == route_id:
                 dir_id = trip.direction_id
                 if dir_id not in directions:
@@ -799,13 +829,13 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
     )
     async def get_route_info(route_id: str, direction_id: int):
         """Get full info for route+direction: shape, stops, schedule."""
-        ledger = observatory.get_ledger()
+        topology = observatory.get_topology()
 
         shape_counts = {}
         canonical_trip = None
         all_trips = []
 
-        for trip_id, trip in ledger["trips"].items():
+        for trip_id, trip in topology.trips.items():
             if trip.route.id == route_id and trip.direction_id == direction_id:
                 all_trips.append(trip)
                 if trip.shape:
@@ -842,7 +872,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         stop_times = canonical_trip.get_stop_times() or []
         for st in stop_times:
             stop_id = st.get("stop_id")
-            stop_info = ledger["stops"].get(stop_id, {})
+            stop_info = topology.stops.get(stop_id, {})
             stops.append(
                 StopInfo(
                     stop_id=stop_id or "",
@@ -881,12 +911,12 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         if predictor is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
 
-        ledger = observatory.get_ledger()
+        topology = observatory.get_topology()
         valid_trips_data = []
         failed = []
 
         valid_route_directions = set()
-        for trip in ledger["trips"].values():
+        for trip in topology.trips.values():
             valid_route_directions.add((trip.route.id, trip.direction_id))
 
         for idx, trip in enumerate(request.trips):
@@ -958,7 +988,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                     cache_key = (forecast.route_id, forecast.direction_id)
                     if cache_key not in stops_cache:
                         stops_map = {}
-                        for ledger_trip in ledger["trips"].values():
+                        for ledger_trip in topology.trips.values():
                             if (
                                 ledger_trip.route.id == forecast.route_id
                                 and ledger_trip.direction_id == forecast.direction_id
@@ -967,7 +997,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                                     seq = int(st.get("stop_sequence", 0) or 0)
                                     if seq not in stops_map:
                                         stop_id = st.get("stop_id")
-                                        stop_info = ledger["stops"].get(stop_id, {})
+                                        stop_info = topology.stops.get(stop_id, {})
                                         stops_map[seq] = {
                                             "stop_id": stop_id or "",
                                             "stop_name": stop_info.get("stop_name", ""),
@@ -996,6 +1026,8 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                             delay_seconds=pred.cumulative_delay_sec,
                             confidence_rating=None,
                         )
+
+                    _record_predictions(forecast, stops_map)
 
                     successful.append(
                         PredictedTrip(
@@ -1036,7 +1068,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         if predictor is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
 
-        ledger = observatory.get_ledger()
+        topology = observatory.get_topology()
 
         try:
             forecast: TripForecast = predictor.get_trip_forecast(
@@ -1049,7 +1081,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
             )
 
             stops_map = {}
-            for trip_id, trip in ledger["trips"].items():
+            for trip_id, trip in topology.trips.items():
                 if (
                     trip.route.id == request.route_id
                     and trip.direction_id == request.direction_id
@@ -1058,7 +1090,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                         seq = int(st.get("stop_sequence", 0) or 0)
                         if seq not in stops_map:
                             stop_id = st.get("stop_id")
-                            stop_info = ledger["stops"].get(stop_id, {})
+                            stop_info = topology.stops.get(stop_id, {})
                             stops_map[seq] = {
                                 "stop_id": stop_id or "",
                                 "stop_name": stop_info.get("stop_name", ""),
@@ -1082,6 +1114,8 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                     delay_seconds=pred.cumulative_delay_sec,
                     confidence_rating=None,
                 )
+
+            _record_predictions(forecast, stops_map)
 
             return PredictedTrip(
                 route_id=forecast.route_id,

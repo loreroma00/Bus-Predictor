@@ -7,10 +7,11 @@ import pandas as pd
 
 from .static_data import Route, Trip, Shape
 from .live_data import Schedule
+from .ledgers import TopologyLedger, ScheduleLedger
 
 
 class LedgerBuilder:
-    """Builds the ledger dictionary from GTFS DataFrames."""
+    """Builds TopologyLedger and ScheduleLedger from GTFS DataFrames."""
 
     def __init__(self):
         # Raw DataFrames
@@ -41,33 +42,46 @@ class LedgerBuilder:
 
         return self.trips is not None
 
-    def build(self) -> dict:
-        """Build the complete ledger from loaded DataFrames."""
-        print("Building Ledger...")
+    def build_topology(self) -> TopologyLedger:
+        """Build the topology ledger from loaded DataFrames."""
+        print("Building Topology Ledger...")
 
-        ledger: dict[str, dict] = {}
-
-        # Build in order (some depend on others)
-        ledger["routes"]: dict[int, Route] = self._build_routes()
-        ledger["stops"]: dict[int, dict] = (
+        routes = self._build_routes()
+        stops = (
             self.stops.set_index("stop_id").to_dict("index")
             if self.stops is not None
             else {}
         )
-        ledger["shapes"]: dict[int, Shape] = self._build_shapes()
-        ledger["trip_schedules"] = self._build_trip_schedules()
-        ledger["trips"]: dict[int, Trip] = self._build_trips(ledger)
+        shapes = self._build_shapes()
+        trip_schedules = self._build_trip_schedules()
 
-        # Build schedule index
+        # _build_trips needs routes, shapes, trip_schedules via an internal dict
+        _internal = {
+            "routes": routes,
+            "shapes": shapes,
+            "trip_schedules": trip_schedules,
+        }
+        trips = self._build_trips(_internal)
+
+        return TopologyLedger(
+            routes=routes,
+            stops=stops,
+            shapes=shapes,
+            trips=trips,
+        )
+
+    def build_schedule(self, topology: TopologyLedger) -> ScheduleLedger:
+        """Build the schedule ledger from the topology."""
+        print("Building Schedule Ledger...")
         schedule = Schedule()
-        schedule.load(ledger["trips"])
-        ledger["schedule"] = schedule
+        schedule.load(topology.trips)
+        return ScheduleLedger(schedule=schedule)
 
-        return ledger
+    # ------ private helpers (unchanged) ------
 
-    def _build_routes(self) -> dict[int, Route]:
+    def _build_routes(self) -> dict[str, Route]:
         """Build route map from routes DataFrame."""
-        route_map: dict[int, Route] = {}
+        route_map: dict[str, Route] = {}
         if self.routes is not None:
             for _, row in self.routes.iterrows():
                 route_map[row["route_id"]] = Route(id=row["route_id"])
@@ -79,7 +93,7 @@ class LedgerBuilder:
         if self.shapes is None:
             return {}
 
-        shape_map: dict[int, Shape] = {}
+        shape_map: dict[str, Shape] = {}
         grouped = self.shapes.sort_values(["shape_id", "shape_pt_sequence"]).groupby(
             "shape_id"
         )
@@ -113,7 +127,7 @@ class LedgerBuilder:
         merged = pd.merge(self.stop_times, self.stops, on="stop_id", how="left")
         return merged.groupby("trip_id")
 
-    def _build_trips(self, ledger: dict[int, dict]) -> dict[int, Trip]:
+    def _build_trips(self, ledger: dict) -> dict[str, Trip]:
         """Build trip map from trips DataFrame."""
         if self.trips is None:
             return {}

@@ -96,9 +96,9 @@ class Validator:
         target_date = datetime.strptime(date_str, "%d-%m-%Y")
         date_yyyymmdd = target_date.strftime("%Y%m%d")
 
-        ledger = self.observatory.get_ledger()
+        topology = self.observatory.get_topology()
 
-        scheduled_trips = self._get_scheduled_trips(ledger, date_yyyymmdd)
+        scheduled_trips = self._get_scheduled_trips(topology, date_yyyymmdd)
         self.logger.info(
             f"Found {len(scheduled_trips)} scheduled trips for {date_yyyymmdd}"
         )
@@ -116,7 +116,7 @@ class Validator:
         prediction_results = self._run_predictions(trips_with_gt, weather_code)
 
         validation_results = self._validate_predictions(
-            prediction_results, ground_truth, ledger
+            prediction_results, ground_truth, topology
         )
 
         report = self._build_report(
@@ -132,11 +132,11 @@ class Validator:
 
         return report
 
-    def _get_scheduled_trips(self, ledger: Dict, date_yyyymmdd: str) -> List[Dict]:
+    def _get_scheduled_trips(self, topology, date_yyyymmdd: str) -> List[Dict]:
         """Extract all trips scheduled for the given date."""
         scheduled = []
 
-        for trip_id, trip in ledger["trips"].items():
+        for trip_id, trip in topology.trips.items():
             if date_yyyymmdd in trip.dates:
                 stop_times = trip.get_stop_times() or []
                 if stop_times:
@@ -276,7 +276,7 @@ class Validator:
         self,
         prediction_results: Dict[str, Any],
         ground_truth: pd.DataFrame,
-        ledger: Dict,
+        topology,
     ) -> List[TripValidationResult]:
         """Validate predictions against ground truth."""
         results = []
@@ -302,8 +302,8 @@ class Validator:
                 )
                 continue
 
-            stops_map = self._build_stops_map(
-                forecast.route_id, forecast.direction_id, ledger
+            stops_map = topology.build_stops_map(
+                forecast.route_id, forecast.direction_id
             )
 
             delay_errors = []
@@ -366,30 +366,7 @@ class Validator:
 
         return results
 
-    def _build_stops_map(
-        self, route_id: str, direction_id: int, ledger: Dict
-    ) -> Dict[int, Dict]:
-        """Build a mapping of stop_sequence to stop info."""
-        stops_map = {}
-
-        for trip_id, trip in ledger["trips"].items():
-            if trip.route.id == route_id and trip.direction_id == direction_id:
-                for st in trip.get_stop_times() or []:
-                    seq = int(st.get("stop_sequence", 0) or 0)
-                    if seq not in stops_map:
-                        stop_id = st.get("stop_id")
-                        stop_info = ledger["stops"].get(stop_id, {})
-                        shape_dist = st.get("shape_dist_travelled")
-                        stops_map[seq] = {
-                            "stop_id": stop_id or "",
-                            "stop_name": stop_info.get("stop_name", ""),
-                            "shape_dist_travelled": float(shape_dist)
-                            if shape_dist
-                            else None,
-                        }
-                break
-
-        return stops_map
+    # _build_stops_map removed — now uses TopologyLedger.build_stops_map()
 
     def _match_measurement_to_stop(
         self, gt_row: pd.Series, predicted_stops: List, stops_map: Dict[int, Dict]

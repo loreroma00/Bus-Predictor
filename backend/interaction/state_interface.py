@@ -406,16 +406,16 @@ class StateInterface:
         }
 
     def get_ledger_stats(self) -> dict:
-        """Get statistics about the loaded ledger."""
-        ledger = self._observatory.ledger
-        if not ledger:
+        """Get statistics about the loaded ledgers."""
+        topology = self._observatory.topology
+        if not topology:
             return {"loaded": False}
 
         return {
             "loaded": True,
-            "trips_count": len(ledger.get("trips", {})),
-            "routes_count": len(ledger.get("routes", {})),
-            "stops_count": len(ledger.get("stops", {})),
-            "shapes_count": len(ledger.get("shapes", {})),
+            "trips_count": len(topology.trips),
+            "routes_count": len(topology.routes),
+            "stops_count": len(topology.stops),
+            "shapes_count": len(topology.shapes),
             "current_md5": self._observatory.current_md5,
         }

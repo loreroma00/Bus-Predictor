@@ -69,8 +69,8 @@ def get_realtime_updates():
     Manages buses and observers for each active vehicle.
     """
     global OBSERVATORY
-    # Ensure ledger is available
-    ledger = OBSERVATORY.get_ledger()
+    # Ensure topology is available
+    topology = OBSERVATORY.get_topology()
 
     # Fetch live data
     live_data = _feed_fetcher.fetch()
@@ -98,14 +98,14 @@ def get_realtime_updates():
 
             t_id = row.get("tripId")
 
-            # Get trip from ledger
-            trip = ledger["trips"].get(t_id)
+            # Get trip from topology
+            trip = topology.get_trip(t_id)
 
             if not trip:
                 # Hot swap check
                 if OBSERVATORY.check_and_reload_ledger():
-                    ledger = OBSERVATORY.get_ledger()
-                    trip = ledger["trips"].get(t_id)
+                    topology = OBSERVATORY.get_topology()
+                    trip = topology.get_trip(t_id)
 
             if not trip:
                 logging.warning(f"Warning: Trip {t_id} not found. Skipping.")

@@ -11,7 +11,7 @@ import geopandas as gpd  # noqa: E402
 from shapely.geometry import LineString, MultiLineString  # noqa: E402
 from application.domain.spatial_utils import derive_bearing  # noqa: E402
 from application.domain.h3_utils import get_h3_index  # noqa: E402
-from persistence import FileCacheStrategy  # noqa: E402
+from persistence import save_pickle  # noqa: E402
 
 OUTPUT_FILE = "static_bus_lanes_roma.pkl"
 INPUT_FILE = "corsie_preferenziali.geojson"
@@ -82,12 +82,9 @@ def generate_static_map():
 
     print(f"Generated map with {len(static_map)} H3 indices.")
 
-    # Save to pickle using FileCacheStrategy
+    # Save to pickle
     print(f"Saving to {OUTPUT_FILE}...")
-    cache_strategy = FileCacheStrategy(
-        cache_path=os.path.join(project_root, OUTPUT_FILE)
-    )
-    cache_strategy.save(static_map)
+    save_pickle(static_map, os.path.join(project_root, OUTPUT_FILE))
     print("Done.")
 
 

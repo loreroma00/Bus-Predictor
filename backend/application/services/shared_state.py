@@ -35,10 +35,10 @@ def get_observatory(config: dict = None):
 
     logging.info("Initializing Observatory singleton...")
     cache_strategy = FileCacheStrategy(
-        cache_path=str(PROJECT_ROOT / "ledger_cache.pkl")
+        cache_dir=str(PROJECT_ROOT)
     )
     _observatory = Observatory(cache_strategy=cache_strategy, config=config)
-    _observatory.get_ledger()
+    _observatory.get_topology()
     logging.info("Observatory initialized.")
 
     return _observatory
