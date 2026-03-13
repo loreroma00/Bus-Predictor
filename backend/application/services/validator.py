@@ -136,7 +136,7 @@ class Validator:
         """Extract all trips scheduled for the given date."""
         scheduled = []
 
-        for trip_id, trip in topology.trips.items():
+        for trip_id, trip in list(topology.trips.items()):
             if date_yyyymmdd in trip.dates:
                 stop_times = trip.get_stop_times() or []
                 if stop_times:

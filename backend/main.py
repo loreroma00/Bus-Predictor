@@ -806,7 +806,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         """List all directions for a route."""
         topology = observatory.get_topology()
         directions = {}
-        for trip_id, trip in topology.trips.items():
+        for trip_id, trip in list(topology.trips.items()):
             if trip.route.id == route_id:
                 dir_id = trip.direction_id
                 if dir_id not in directions:
@@ -835,7 +835,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         canonical_trip = None
         all_trips = []
 
-        for trip_id, trip in topology.trips.items():
+        for trip_id, trip in list(topology.trips.items()):
             if trip.route.id == route_id and trip.direction_id == direction_id:
                 all_trips.append(trip)
                 if trip.shape:
@@ -916,7 +916,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         failed = []
 
         valid_route_directions = set()
-        for trip in topology.trips.values():
+        for trip in list(topology.trips.values()):
             valid_route_directions.add((trip.route.id, trip.direction_id))
 
         for idx, trip in enumerate(request.trips):
@@ -988,7 +988,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                     cache_key = (forecast.route_id, forecast.direction_id)
                     if cache_key not in stops_cache:
                         stops_map = {}
-                        for ledger_trip in topology.trips.values():
+                        for ledger_trip in list(topology.trips.values()):
                             if (
                                 ledger_trip.route.id == forecast.route_id
                                 and ledger_trip.direction_id == forecast.direction_id
@@ -1081,7 +1081,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
             )
 
             stops_map = {}
-            for trip_id, trip in topology.trips.items():
+            for trip_id, trip in list(topology.trips.items()):
                 if (
                     trip.route.id == request.route_id
                     and trip.direction_id == request.direction_id

@@ -1,15 +1,18 @@
 """
-Ledger Types — Split the monolithic ledger into four purpose-specific ledgers.
+Ledger Types — Split the monolithic ledger into purpose-specific ledgers.
 
 TopologyLedger:  Static physical network (routes, stops, shapes, trips).
 ScheduleLedger:  Timetable index (route → direction → date → start times).
-HistoricalLedger: Observed stop arrivals, backed by parquet (append-only).
-PredictedLedger:  Model predictions, backed by parquet (append-only).
+HistoricalLedger: Observed stop arrivals, backed by database (append-only).
+PredictedLedger:  Model predictions, backed by database (append-only).
+VehicleLedger:   Per-vehicle trip performance, backed by database (append-only).
 """
 
 import logging
-import os
+import statistics
+import time as _time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, Optional, TYPE_CHECKING
 
 import pandas as pd
@@ -64,7 +67,7 @@ class TopologyLedger:
         Used by validator, live_validator, and API endpoints.
         """
         stops_map: dict[int, dict] = {}
-        for trip in self.trips.values():
+        for trip in list(self.trips.values()):
             if trip.route.id == route_id and trip.direction_id == direction_id:
                 for st in trip.get_stop_times() or []:
                     seq = int(st.get("stop_sequence", 0) or 0)
@@ -122,20 +125,22 @@ class StopArrival:
     actual_arrival_time: float   # Unix timestamp
     schedule_adherence: float    # delay in seconds
     occupancy_status: int
+    vehicle_id: str = ""         # fleet number (default for backward compat)
 
 
 class HistoricalLedger:
-    """Append-only record of observed stop arrivals, backed by parquet."""
+    """Append-only record of observed stop arrivals, backed by database."""
 
-    def __init__(self, storage_dir: str = "ledgers/historical"):
-        self.storage_dir = storage_dir
-        os.makedirs(storage_dir, exist_ok=True)
-        self._file_path = os.path.join(storage_dir, "historical_arrivals.parquet")
+    def __init__(self, connection_string: str = None, table_name: str = None):
+        from config import Ledger
+        self._conn_str = connection_string or Ledger.DB_CONNECTION
+        self._table = table_name or Ledger.HISTORICAL_TABLE
 
     def record_arrivals(self, arrivals: list[StopArrival]):
-        """Append a batch of stop arrivals to the parquet store."""
+        """Append a batch of stop arrivals to the database."""
         if not arrivals:
             return
+        from persistence.ledger_db import write_historical
         records = [
             {
                 "trip_id": a.trip_id,
@@ -144,19 +149,11 @@ class HistoricalLedger:
                 "actual_arrival_time": a.actual_arrival_time,
                 "schedule_adherence": a.schedule_adherence,
                 "occupancy_status": a.occupancy_status,
+                "vehicle_id": a.vehicle_id,
             }
             for a in arrivals
         ]
-        df = pd.DataFrame(records)
-        if os.path.exists(self._file_path) and os.path.getsize(self._file_path) > 0:
-            existing = pd.read_parquet(self._file_path)
-            combined = pd.concat([existing, df], ignore_index=True)
-            combined = combined.drop_duplicates(
-                subset=["trip_id", "stop_id", "actual_arrival_time"], keep="last"
-            )
-            combined.to_parquet(self._file_path, engine="pyarrow")
-        else:
-            df.to_parquet(self._file_path, engine="pyarrow")
+        write_historical(self._conn_str, self._table, records)
 
     def query(
         self,
@@ -165,16 +162,11 @@ class HistoricalLedger:
         date_end: float = None,
     ) -> pd.DataFrame:
         """Query historical arrivals.  Returns empty DataFrame if no data."""
-        if not os.path.exists(self._file_path):
-            return pd.DataFrame()
-        df = pd.read_parquet(self._file_path)
-        if trip_id:
-            df = df[df["trip_id"] == trip_id]
-        if date_start is not None:
-            df = df[df["actual_arrival_time"] >= date_start]
-        if date_end is not None:
-            df = df[df["actual_arrival_time"] < date_end]
-        return df
+        from persistence.ledger_db import read_historical
+        return read_historical(
+            self._conn_str, self._table,
+            trip_id=trip_id, date_start=date_start, date_end=date_end,
+        )
 
 
 # ============================================================
@@ -198,17 +190,18 @@ class StopPredictionRecord:
 
 
 class PredictedLedger:
-    """Append-only record of model predictions, backed by parquet."""
+    """Append-only record of model predictions, backed by database."""
 
-    def __init__(self, storage_dir: str = "ledgers/predicted"):
-        self.storage_dir = storage_dir
-        os.makedirs(storage_dir, exist_ok=True)
-        self._file_path = os.path.join(storage_dir, "predicted_arrivals.parquet")
+    def __init__(self, connection_string: str = None, table_name: str = None):
+        from config import Ledger
+        self._conn_str = connection_string or Ledger.DB_CONNECTION
+        self._table = table_name or Ledger.PREDICTED_TABLE
 
     def record_predictions(self, predictions: list[StopPredictionRecord]):
-        """Append prediction records to the parquet store."""
+        """Append prediction records to the database."""
         if not predictions:
             return
+        from persistence.ledger_db import write_predicted
         records = [
             {
                 "route_id": p.route_id,
@@ -224,13 +217,7 @@ class PredictedLedger:
             }
             for p in predictions
         ]
-        df = pd.DataFrame(records)
-        if os.path.exists(self._file_path) and os.path.getsize(self._file_path) > 0:
-            existing = pd.read_parquet(self._file_path)
-            combined = pd.concat([existing, df], ignore_index=True)
-            combined.to_parquet(self._file_path, engine="pyarrow")
-        else:
-            df.to_parquet(self._file_path, engine="pyarrow")
+        write_predicted(self._conn_str, self._table, records)
 
     def query(
         self,
@@ -238,14 +225,11 @@ class PredictedLedger:
         trip_date: str = None,
     ) -> pd.DataFrame:
         """Query predicted arrivals."""
-        if not os.path.exists(self._file_path):
-            return pd.DataFrame()
-        df = pd.read_parquet(self._file_path)
-        if route_id:
-            df = df[df["route_id"] == route_id]
-        if trip_date:
-            df = df[df["trip_date"] == trip_date]
-        return df
+        from persistence.ledger_db import read_predicted
+        return read_predicted(
+            self._conn_str, self._table,
+            route_id=route_id, trip_date=trip_date,
+        )
 
 
 # ============================================================
@@ -270,6 +254,13 @@ def project_diary_to_stops(diary: "Diary", trip: Trip) -> list[StopArrival]:
         return []
 
     shape = trip.shape
+
+    # Extract vehicle ID from observer
+    vehicle_id = ""
+    if hasattr(diary, "observer") and diary.observer:
+        vehicle = getattr(diary.observer, "assignedVehicle", None)
+        if vehicle:
+            vehicle_id = str(getattr(vehicle, "label", "") or "")
 
     # Pre-project all measurements onto the shape
     projected = []
@@ -303,7 +294,198 @@ def project_diary_to_stops(diary: "Diary", trip: Trip) -> list[StopArrival]:
                     occupancy_status=best_m.occupancy_status
                     if best_m.occupancy_status is not None
                     else 0,
+                    vehicle_id=vehicle_id,
                 )
             )
 
     return arrivals
+
+
+# ============================================================
+#  Vehicle Ledger  (parquet-backed, append-only)
+# ============================================================
+
+@dataclass
+class VehicleTripRecord:
+    """One completed trip as observed from a specific vehicle."""
+
+    # Identity
+    vehicle_id: str
+    trip_id: str
+    route_id: str
+    direction_id: int
+
+    # Vehicle characteristics (denormalized for analytics)
+    vehicle_type_name: str
+    fuel_type: int          # FuelType enum value (0=Diesel, 1=Electric, …)
+    euro_class: int         # EuroType enum value
+    capacity_total: int
+
+    # Timing
+    trip_date: str          # YYYY-MM-DD
+    scheduled_start: str    # HH:MM:SS
+    actual_start_time: float  # Unix timestamp
+    trip_end_time: float      # Unix timestamp
+    trip_duration_sec: float
+
+    # Delay summary (computed from valid measurements only)
+    mean_delay_sec: float
+    median_delay_sec: float
+    max_delay_sec: float
+    min_delay_sec: float
+    std_delay_sec: float
+
+    # Occupancy summary
+    mean_occupancy: float
+    max_occupancy: int
+
+    # Trip quality
+    measurement_count: int
+    preferential_ratio: float  # fraction in bus lanes (0.0–1.0)
+
+    # Metadata
+    recorded_at: float      # Unix timestamp
+
+
+class VehicleLedger:
+    """Append-only record of per-vehicle trip performance, backed by database."""
+
+    _FIELDS = [
+        "vehicle_id", "trip_id", "route_id", "direction_id",
+        "vehicle_type_name", "fuel_type", "euro_class", "capacity_total",
+        "trip_date", "scheduled_start", "actual_start_time",
+        "trip_end_time", "trip_duration_sec",
+        "mean_delay_sec", "median_delay_sec", "max_delay_sec",
+        "min_delay_sec", "std_delay_sec",
+        "mean_occupancy", "max_occupancy",
+        "measurement_count", "preferential_ratio", "recorded_at",
+    ]
+
+    def __init__(self, connection_string: str = None, table_name: str = None):
+        from config import Ledger
+        self._conn_str = connection_string or Ledger.DB_CONNECTION
+        self._table = table_name or Ledger.VEHICLE_TABLE
+
+    def record_trip(self, record: VehicleTripRecord):
+        """Append a single vehicle trip record."""
+        self.record_trips([record])
+
+    def record_trips(self, records: list[VehicleTripRecord]):
+        """Append vehicle trip records to the database."""
+        if not records:
+            return
+        from persistence.ledger_db import write_vehicle_trips
+        rows = [{f: getattr(r, f) for f in self._FIELDS} for r in records]
+        write_vehicle_trips(self._conn_str, self._table, rows)
+
+    def query(
+        self,
+        vehicle_id: str = None,
+        route_id: str = None,
+        fuel_type: int = None,
+        date_start: str = None,
+        date_end: str = None,
+    ) -> pd.DataFrame:
+        """Query vehicle trip records with optional filters."""
+        from persistence.ledger_db import read_vehicle_trips
+        return read_vehicle_trips(
+            self._conn_str, self._table,
+            vehicle_id=vehicle_id, route_id=route_id,
+            fuel_type=fuel_type, date_start=date_start, date_end=date_end,
+        )
+
+
+# ============================================================
+#  Projection Utility  (diary → vehicle ledger)
+# ============================================================
+
+def summarize_diary_for_vehicle(
+    diary: "Diary",
+    route_id: str,
+    direction_id: int,
+    vehicle_type_name: str = "Unknown",
+) -> Optional[VehicleTripRecord]:
+    """Summarize a completed diary into a vehicle trip performance record.
+
+    Returns None if the diary has no measurements.
+    """
+    if not diary.measurements:
+        return None
+
+    # ---- Vehicle identity ----
+    vehicle = getattr(diary.observer, "assignedVehicle", None) if diary.observer else None
+    vehicle_id = str(getattr(vehicle, "label", "?") or "?")
+
+    vt = getattr(vehicle, "vehicle_type", None) if vehicle else None
+    fuel_type = 0
+    euro_class = 0
+    capacity_total = 0
+    if vt:
+        engine = getattr(vt, "engine", None)
+        if engine:
+            fuel_type = getattr(getattr(engine, "fuel", None), "value", 0) or 0
+            euro_class = getattr(getattr(engine, "euro", None), "value", 0) or 0
+        capacity_total = getattr(vt, "capacity_total", 0) or 0
+
+    # ---- Timing ----
+    first_m = diary.measurements[0]
+    last_m = diary.measurements[-1]
+    actual_start = diary.actual_start_time if diary.actual_start_time else first_m.measurement_time
+    trip_end = last_m.measurement_time
+    trip_duration = trip_end - actual_start if actual_start else 0.0
+    trip_date = datetime.fromtimestamp(actual_start).strftime("%Y-%m-%d") if actual_start else ""
+    scheduled_start = diary.scheduled_start_time or ""
+
+    # ---- Delay statistics (filter invalid) ----
+    valid_delays = [
+        m.schedule_adherence for m in diary.measurements
+        if m.schedule_adherence is not None
+        and m.schedule_adherence != -1000.0
+        and abs(m.schedule_adherence) <= 7200
+    ]
+    if valid_delays:
+        mean_delay = statistics.mean(valid_delays)
+        median_delay = statistics.median(valid_delays)
+        max_delay = max(valid_delays)
+        min_delay = min(valid_delays)
+        std_delay = statistics.stdev(valid_delays) if len(valid_delays) > 1 else 0.0
+    else:
+        mean_delay = median_delay = max_delay = min_delay = std_delay = 0.0
+
+    # ---- Occupancy ----
+    occ_values = [
+        m.occupancy_status for m in diary.measurements
+        if m.occupancy_status is not None
+    ]
+    mean_occupancy = statistics.mean(occ_values) if occ_values else 0.0
+    max_occupancy = max(occ_values) if occ_values else 0
+
+    # ---- Preferential ratio ----
+    pref_count = sum(1 for m in diary.measurements if getattr(m, "is_in_preferential", False))
+    preferential_ratio = pref_count / len(diary.measurements)
+
+    return VehicleTripRecord(
+        vehicle_id=vehicle_id,
+        trip_id=diary.trip_id,
+        route_id=route_id,
+        direction_id=direction_id,
+        vehicle_type_name=vehicle_type_name,
+        fuel_type=fuel_type,
+        euro_class=euro_class,
+        capacity_total=capacity_total,
+        trip_date=trip_date,
+        scheduled_start=scheduled_start,
+        actual_start_time=actual_start or 0.0,
+        trip_end_time=trip_end,
+        trip_duration_sec=trip_duration,
+        mean_delay_sec=mean_delay,
+        median_delay_sec=median_delay,
+        max_delay_sec=max_delay,
+        min_delay_sec=min_delay,
+        std_delay_sec=std_delay,
+        mean_occupancy=mean_occupancy,
+        max_occupancy=max_occupancy,
+        measurement_count=len(diary.measurements),
+        preferential_ratio=preferential_ratio,
+        recorded_at=_time.time(),
+    )

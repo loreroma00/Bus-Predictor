@@ -18,9 +18,12 @@ from .ledgers import (
     ScheduleLedger,
     HistoricalLedger,
     PredictedLedger,
+    VehicleLedger,
     StopArrival,
     StopPredictionRecord,
+    VehicleTripRecord,
     project_diary_to_stops,
+    summarize_diary_for_vehicle,
 )
 
 __all__ = [
@@ -55,9 +58,12 @@ __all__ = [
     "ScheduleLedger",
     "HistoricalLedger",
     "PredictedLedger",
+    "VehicleLedger",
     "StopArrival",
     "StopPredictionRecord",
+    "VehicleTripRecord",
     "project_diary_to_stops",
+    "summarize_diary_for_vehicle",
     # Events
     "domain_events",
     "DIARY_FINISHED",

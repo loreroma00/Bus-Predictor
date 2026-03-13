@@ -11,7 +11,7 @@ from .interfaces import CacheStrategy, GeocodingStrategy
 from .static_data import VehicleType
 from .static_data_fetcher import StaticDataFetcher
 from .ledger_builder import LedgerBuilder
-from .ledgers import TopologyLedger, ScheduleLedger, HistoricalLedger, PredictedLedger
+from .ledgers import TopologyLedger, ScheduleLedger, HistoricalLedger, PredictedLedger, VehicleLedger
 from .observer_manager import ObserverManager
 from .cities import City
 from .live_data import Autobus
@@ -63,6 +63,7 @@ class Observatory:
         self.schedule_ledger: ScheduleLedger = None
         self.historical: HistoricalLedger = HistoricalLedger()
         self.predicted: PredictedLedger = PredictedLedger()
+        self.vehicle_ledger: VehicleLedger = VehicleLedger()
 
         # Cache metadata
         self.current_md5: str = None

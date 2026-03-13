@@ -31,6 +31,16 @@ from .diaries import (
 
 from .cache import log_uptime, save_pickle, load_pickle
 
+from .ledger_db import (
+    write_historical,
+    write_predicted,
+    write_vehicle_trips,
+    read_historical,
+    read_predicted,
+    read_vehicle_trips,
+    close_ledger_writers,
+)
+
 from .database import (
     TimescaleDBConnection,
     get_db_connection,
@@ -68,6 +78,14 @@ __all__ = [
     "log_uptime",
     "save_pickle",
     "load_pickle",
+    # Ledger DB module
+    "write_historical",
+    "write_predicted",
+    "write_vehicle_trips",
+    "read_historical",
+    "read_predicted",
+    "read_vehicle_trips",
+    "close_ledger_writers",
     # Database module
     "TimescaleDBConnection",
     "get_db_connection",

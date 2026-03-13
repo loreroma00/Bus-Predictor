@@ -5,8 +5,9 @@ import random
 import pandas as pd
 from datetime import datetime
 
-from config import Prediction
+from config import Prediction, Ledger
 from persistence.database import get_sync_engine_for_pipeline
+from persistence.ledger_db import read_historical, read_vehicle_trips
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -254,6 +255,62 @@ def main(start_date: str = None):
         print(f"Saved {output_path}")
 
     print("Pipeline completed successfully.")
+
+
+def extract_historical(start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """
+    Extract stop-level historical arrival data from the ledger database.
+
+    This provides the ground truth for schedule adherence analysis and
+    model validation, complementing the raw vector pipeline used for ML
+    training.
+
+    Args:
+        start_date: Optional start date (YYYY-MM-DD). Converted to Unix timestamp.
+        end_date:   Optional end date (YYYY-MM-DD). Converted to Unix timestamp.
+
+    Returns:
+        DataFrame with columns: trip_id, stop_id, stop_sequence,
+        actual_arrival_time, schedule_adherence, occupancy_status, vehicle_id
+    """
+    date_start = None
+    date_end = None
+    if start_date:
+        date_start = datetime.strptime(start_date, "%Y-%m-%d").timestamp()
+    if end_date:
+        date_end = datetime.strptime(end_date, "%Y-%m-%d").timestamp()
+
+    df = read_historical(
+        Ledger.DB_CONNECTION, Ledger.HISTORICAL_TABLE,
+        date_start=date_start, date_end=date_end,
+    )
+    print(f"Loaded {len(df)} historical arrival records from ledger.")
+    return df
+
+
+def extract_vehicle_trips(
+    start_date: str = None, end_date: str = None, route_id: str = None
+) -> pd.DataFrame:
+    """
+    Extract vehicle-level trip performance data from the ledger database.
+
+    Provides per-trip delay/occupancy summaries with vehicle characteristics
+    (fuel type, euro class, capacity) for fleet analytics.
+
+    Args:
+        start_date: Optional start date (YYYY-MM-DD).
+        end_date:   Optional end date (YYYY-MM-DD).
+        route_id:   Optional route filter.
+
+    Returns:
+        DataFrame with all VehicleTripRecord fields.
+    """
+    df = read_vehicle_trips(
+        Ledger.DB_CONNECTION, Ledger.VEHICLE_TABLE,
+        route_id=route_id, date_start=start_date, date_end=end_date,
+    )
+    print(f"Loaded {len(df)} vehicle trip records from ledger.")
+    return df
 
 
 if __name__ == "__main__":

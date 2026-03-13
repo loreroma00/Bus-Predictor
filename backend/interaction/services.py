@@ -492,6 +492,9 @@ def _on_diary_finished(data: dict):
     # Record in Historical Ledger
     _record_historical(data)
 
+    # Record in Vehicle Ledger
+    _record_vehicle_trip(data)
+
 
 def _record_historical(event_data: dict):
     """Project diary measurements to stops and record in the Historical Ledger."""
@@ -510,9 +513,33 @@ def _record_historical(event_data: dict):
         arrivals = project_diary_to_stops(diary, trip)
         observatory.historical.record_arrivals(arrivals)
         if arrivals:
-            logging.info(f"📖 Recorded {len(arrivals)} historical arrivals for trip {diary.trip_id}")
+            logging.info(f"Recorded {len(arrivals)} historical arrivals for trip {diary.trip_id}")
     except Exception as e:
         logging.error(f"Failed to record historical arrivals: {e}")
+
+
+def _record_vehicle_trip(event_data: dict):
+    """Summarize diary into a vehicle trip record and store in VehicleLedger."""
+    from application.domain.ledgers import summarize_diary_for_vehicle
+
+    diary = event_data.get("diary")
+    route_id = event_data.get("route_id")
+    observatory = event_data.get("observatory")
+    vehicle_type_name = event_data.get("vehicle_type_name", "Unknown")
+    if not diary or not observatory or not route_id:
+        return
+
+    trip = observatory.search_trip(diary.trip_id)
+    direction_id = trip.direction_id if trip else 0
+
+    try:
+        record = summarize_diary_for_vehicle(
+            diary, route_id, direction_id, vehicle_type_name
+        )
+        if record:
+            observatory.vehicle_ledger.record_trip(record)
+    except Exception as e:
+        logging.error(f"Failed to record vehicle trip: {e}")
 
 
 def _on_services_start(event_data):
