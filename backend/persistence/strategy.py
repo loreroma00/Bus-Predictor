@@ -7,6 +7,7 @@ import logging
 import asyncio
 import os
 import pickle
+import threading
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -192,6 +193,56 @@ def get_available_strategies() -> list:
 
 
 # ============================================================
+# Shared DB Event Loop (for async DB operations from threads)
+# ============================================================
+_db_loop: asyncio.AbstractEventLoop | None = None
+_db_loop_thread: threading.Thread | None = None
+_db_loop_lock = threading.Lock()
+
+
+def _run_db_loop(loop: asyncio.AbstractEventLoop):
+    """Target for the DB event loop thread."""
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
+
+
+def _get_db_loop() -> asyncio.AbstractEventLoop:
+    """Get or create the shared event loop for all DB operations."""
+    global _db_loop, _db_loop_thread
+    if _db_loop is not None and _db_loop.is_running():
+        return _db_loop
+    with _db_loop_lock:
+        # Double-check after acquiring lock
+        if _db_loop is not None and _db_loop.is_running():
+            return _db_loop
+        _db_loop = asyncio.new_event_loop()
+        _db_loop_thread = threading.Thread(
+            target=_run_db_loop,
+            args=(_db_loop,),
+            daemon=True,
+            name="db-event-loop",
+        )
+        _db_loop_thread.start()
+        return _db_loop
+
+
+def shutdown_db_loop():
+    """Shutdown the shared DB event loop. Call during application exit."""
+    global _db_loop, _db_loop_thread
+    if _db_loop is None:
+        return
+    if _db_loop.is_running():
+        _db_loop.call_soon_threadsafe(_db_loop.stop)
+    if _db_loop_thread is not None:
+        _db_loop_thread.join(timeout=5)
+    _db_loop = None
+    _db_loop_thread = None
+
+
+# ============================================================
 # Saving Strategy Pattern (Diaries)
 # ============================================================
 class saving_strategy(ABC):
@@ -247,39 +298,25 @@ class saving_database(saving_strategy):
         """
         Execute database insert for vectors.
 
+        Submits the async insert to a shared persistent event loop,
+        avoiding the creation of throwaway event loops that leak
+        connection pools.
+
         Args:
             vectors_list: List of (Vector, Label, measurement_time) tuples
             filename: Ignored for database strategy
         """
-
         if not vectors_list:
             return
 
-        # Use nest_asyncio to allow running from within existing event loops
+        loop = _get_db_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_execute(vectors_list), loop
+        )
         try:
-            import nest_asyncio
-
-            nest_asyncio.apply()
-        except ImportError:
-            pass  # Not installed, may fail if called from async context
-
-        # Run async insert in sync context
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Already in async context, create task
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run, self._async_execute(vectors_list)
-                    )
-                    future.result()  # Wait for completion
-            else:
-                loop.run_until_complete(self._async_execute(vectors_list))
-        except RuntimeError:
-            # No event loop exists, create one
-            asyncio.run(self._async_execute(vectors_list))
+            future.result(timeout=60)
+        except Exception as e:
+            logging.error(f"Database save failed: {e}")
 
     async def _async_execute(self, vectors_list):
         """Async execution of database insert."""
@@ -334,8 +371,10 @@ class saving_database(saving_strategy):
 
             db = get_db_connection(connection_string=conn_str, table_name=table)
 
-            # Ensure connected
-            if not db.pool:
-                await db.connect()
+            # Ensure connected via get_valid_pool (handles loop checks)
+            pool = await db.get_valid_pool()
+            if not pool:
+                logging.error(f"Failed to connect to {table}")
+                continue
 
             await db.insert_items(items)

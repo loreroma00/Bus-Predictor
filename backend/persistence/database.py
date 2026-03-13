@@ -72,7 +72,7 @@ class TimescaleDBConnection:
         try:
             self.pool = await asyncpg.create_pool(
                 self.connection_string,
-                min_size=2,
+                min_size=1,
                 max_size=10,
                 command_timeout=60,
             )
@@ -89,9 +89,18 @@ class TimescaleDBConnection:
             try:
                 current_loop = asyncio.get_running_loop()
                 if getattr(self.pool, "_loop", None) != current_loop:
-                    # Loop changed — discard shared pool reference too
+                    # Loop changed — discard shared pool reference and
+                    # terminate the old pool to prevent connection leaks.
+                    old_pool = self.pool
                     _shared_pools.pop(self.connection_string, None)
                     self.pool = None
+                    try:
+                        old_pool.terminate()
+                        logger.warning(
+                            f"Terminated stale pool for {self.table_name} (loop mismatch)"
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 self.pool = None
 
@@ -475,6 +484,23 @@ async def close_database():
         await conn.close()
     _db_instances.clear()
     _shared_pools.clear()
+
+
+def shutdown_database():
+    """
+    Synchronous helper: close all DB pools on the shared event loop,
+    then shut down the loop. Safe to call from any thread.
+    """
+    from .strategy import _get_db_loop, shutdown_db_loop
+
+    try:
+        loop = _get_db_loop()
+        future = asyncio.run_coroutine_threadsafe(close_database(), loop)
+        future.result(timeout=10)
+    except Exception as e:
+        logger.error(f"Error closing database pools: {e}")
+    finally:
+        shutdown_db_loop()
 
 
 def get_sync_engine(connection_string: str = None):

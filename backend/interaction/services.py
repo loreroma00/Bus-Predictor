@@ -456,6 +456,11 @@ def stop_services():
     # Stop validators
     stop_live_validation()
 
+    # Wait for worker threads to finish in-flight DB writes
+    for thread in [PREDICTION_THREAD, TRAFFIC_ANALYSIS_THREAD, VEHICLE_ANALYSIS_THREAD]:
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+
     # Unsubscribe
     domain_events.unsubscribe(DIARY_FINISHED, _on_diary_finished)
 

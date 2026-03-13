@@ -12,6 +12,7 @@ from .strategy import (
     saving_strategy,
     saving_parquet,
     saving_database,
+    shutdown_db_loop,
 )
 
 from .diaries import (
@@ -34,6 +35,7 @@ from .database import (
     get_db_connection,
     init_database,
     close_database,
+    shutdown_database,
 )
 
 __all__ = [
@@ -48,6 +50,7 @@ __all__ = [
     "saving_strategy",
     "saving_parquet",
     "saving_database",
+    "shutdown_db_loop",
     # Diaries module
     "DIARIES_PATH",
     "DIARIES_FILE",
@@ -66,4 +69,5 @@ __all__ = [
     "get_db_connection",
     "init_database",
     "close_database",
+    "shutdown_database",
 ]

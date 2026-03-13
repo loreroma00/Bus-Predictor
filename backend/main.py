@@ -1298,10 +1298,14 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         from interaction import services as ingestor_services
         from interaction.main import last_save
         from application.live import data as live_data
+        from persistence.database import shutdown_database
 
         ingestor_services.stop_services()
         if live_data.OBSERVATORY:
             last_save(live_data.OBSERVATORY)
+
+        # Close database pools and shared DB event loop
+        shutdown_database()
 
     import uvicorn
 

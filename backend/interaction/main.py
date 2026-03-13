@@ -182,6 +182,11 @@ def main(debug_mode: bool = False, lenient_pipeline: bool = False):
         logging.error("Attempting failsafe save...")
         if data.OBSERVATORY:
             last_save(data.OBSERVATORY)
+    finally:
+        # Always close database pools and shut down the shared DB event loop
+        from persistence.database import shutdown_database
+        logging.info("Closing database connections...")
+        shutdown_database()
 
 
 def last_save(observatory):
