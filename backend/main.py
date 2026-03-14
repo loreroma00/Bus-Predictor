@@ -737,9 +737,11 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                 print(f"[WARN] Skipping {time_filename}: missing {', '.join(missing)}")
         return models
 
+    _loaded_model_name = None  # Track which model is loaded for GUI display
+
     def load_model_pair(time_name_arg: str, crowd_name_arg: str) -> bool:
         """Load a TIME + CROWD model pair into the predictor."""
-        nonlocal predictor
+        nonlocal predictor, _loaded_model_name
         time_path = MODEL_DIR / time_name_arg
         crowd_path = MODEL_DIR / crowd_name_arg
         if not time_path.exists():
@@ -762,6 +764,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
             time_weights_path=str(time_path),
             crowd_weights_path=str(crowd_path),
         )
+        _loaded_model_name = exp_id
         return True
 
     def load_model_by_exp_id(exp_id: str) -> bool:
@@ -881,10 +884,8 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         print("\n[5/7] Starting data collection services...")
         from interaction.state_interface import StateInterface
         state_interface = StateInterface(observatory)
-        if predictor is not None:
-            state_interface.set_predictor_info(
-                getattr(predictor, "_model_name", time_model_name or "loaded")
-            )
+        if predictor is not None and _loaded_model_name:
+            state_interface.set_predictor_info(_loaded_model_name)
         ingestor_services.set_state_interface(state_interface)
         ingestor_services.start_services(observatory, collection_config)
 
@@ -904,6 +905,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
             predictor=predictor,
             bus_type_predictor=bus_type_predictor,
         )
+        state_interface.set_command_registry(console._command_registry)
         threading.Thread(
             target=console.run_console_loop,
             daemon=True,

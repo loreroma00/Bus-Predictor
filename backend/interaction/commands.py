@@ -579,6 +579,73 @@ class print_all_diaries_vehicle(Command):
         )
 
 
+class fotoromanzo(Command):
+    command_name = "fotoromanzo"
+
+    def __init__(self, observatory: "Observatory"):
+        self._obs = observatory
+
+    def execute(self, args):
+        trip_id = args.strip()
+        if not trip_id:
+            logging.warning("Usage: fotoromanzo <trip_id>")
+            return
+
+        # 1. Query actual measurements from HistoricalLedger
+        actual_df = self._obs.historical.query(trip_id=trip_id)
+        if actual_df.empty:
+            logging.warning(f"No historical measurements found for trip {trip_id}")
+            return
+
+        # 2. Extract trip metadata from the first row
+        row = actual_df.iloc[0]
+        route_id = str(row['route_id'])
+        direction_id = int(row['direction_id'])
+        scheduled_start = str(row['scheduled_start_time'])[:5]  # HH:MM
+
+        from datetime import datetime
+        trip_date_dt = datetime.fromtimestamp(float(row['measurement_time']))
+        trip_date = trip_date_dt.strftime("%d-%m-%Y")
+
+        # 3. Query predicted delays from PredictedLedger
+        predicted_df = self._obs.predicted.query_trip(
+            route_id=route_id,
+            direction_id=direction_id,
+            trip_date=trip_date,
+            scheduled_start=scheduled_start,
+        )
+        if predicted_df.empty:
+            logging.info(f"No predictions found for route {route_id} dir {direction_id} "
+                         f"date {trip_date} start {scheduled_start} — plotting actual only")
+
+        # 4. Get stop names from TopologyLedger
+        topology = self._obs.get_topology()
+        stops_map = topology.build_stops_map(route_id, direction_id) if topology else {}
+
+        # 5. Generate chart
+        from pathlib import Path
+        from . import graphics
+
+        results_dir = Path(__file__).resolve().parent.parent / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        safe_id = trip_id.replace("/", "_").replace("\\", "_")[:50]
+        output_path = str(results_dir / f"fotoromanzo_{safe_id}.png")
+
+        graphics.generate_fotoromanzo(
+            predicted_df=predicted_df if not predicted_df.empty else None,
+            actual_df=actual_df,
+            stops_map=stops_map,
+            route_id=route_id,
+            trip_id=trip_id,
+            output_path=output_path,
+        )
+        logging.info(f"Fotoromanzo saved to: {output_path}")
+
+    @staticmethod
+    def help():
+        logging.info("fotoromanzo <trip_id>: Generate predicted vs actual delay chart for a trip")
+
+
 class weather_strategy_cmd(Command):
     command_name = "weather strategy"
 

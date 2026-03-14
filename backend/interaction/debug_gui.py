@@ -13,7 +13,7 @@ import threading
 from typing import TYPE_CHECKING
 
 import dash
-from dash import html, dcc, dash_table, Input, Output
+from dash import html, dcc, dash_table, Input, Output, State, no_update
 import dash_leaflet as dl
 import dash_bootstrap_components as dbc
 
@@ -114,8 +114,10 @@ def _build_map_component():
                 url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
                 attribution='&copy; <a href="https://carto.com/">CARTO</a>',
             ),
+            # Hexagons in default pane (z-index 400)
             dl.LayerGroup(id="hex-layer"),
-            dl.LayerGroup(id="bus-layer"),
+            # Buses in a higher pane so they intercept mouse events first
+            dl.Pane(dl.LayerGroup(id="bus-layer"), name="buses", style={"zIndex": 650}),
         ], id="main-map", center=[41.9028, 12.4964], zoom=12,
            style={
                "height": "72vh", "borderRadius": "8px",
@@ -132,6 +134,7 @@ def _build_right_panel():
             dbc.Tab(label="Ledgers", tab_id="tab-ledgers"),
             dbc.Tab(label="Model", tab_id="tab-model"),
             dbc.Tab(label="Vehicles", tab_id="tab-vehicles"),
+            dbc.Tab(label="Commands", tab_id="tab-commands"),
         ], id="right-tabs", active_tab="tab-overview",
            style={"marginBottom": "8px"}),
         html.Div(id="tab-content", style={
@@ -187,8 +190,8 @@ def _register_callbacks(app):
                 dl.Polygon(
                     positions=positions,
                     pathOptions={
-                        "color": color, "weight": 1, "opacity": 0.6,
-                        "fillColor": color, "fillOpacity": 0.25,
+                        "color": color, "weight": 1, "opacity": 0.35,
+                        "fillColor": color, "fillOpacity": 0.15,
                     },
                     children=dl.Tooltip(
                         f"Hex: {h['hex_id'][:12]}...\n"
@@ -199,7 +202,8 @@ def _register_callbacks(app):
                 )
             )
 
-        # Bus markers
+        # Bus markers — rendered in the "buses" pane (z-index 650)
+        # so they capture hover/click before underlying hex polygons
         bus_children = []
         bus_positions = _state.get_bus_positions("Rome")
         for b in bus_positions:
@@ -207,9 +211,11 @@ def _register_callbacks(app):
             bus_children.append(
                 dl.CircleMarker(
                     center=[b["lat"], b["lon"]],
-                    radius=5, pathOptions={
-                        "color": marker_color, "fillColor": marker_color,
-                        "fillOpacity": 0.9, "weight": 1,
+                    radius=7,
+                    bubblingMouseEvents=False,
+                    pathOptions={
+                        "color": "#ffffff", "fillColor": marker_color,
+                        "fillOpacity": 0.95, "weight": 2,
                     },
                     children=dl.Tooltip(
                         f"Route {b['route_id']} | {b['label']}\n"
@@ -249,6 +255,15 @@ def _register_callbacks(app):
         if not _state:
             return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
 
+        # Commands tab: only render on tab switch, not on interval ticks
+        # (interval ticks would wipe the command output)
+        if active_tab == "tab-commands":
+            ctx = dash.callback_context
+            trigger = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+            if "refresh-interval" in trigger:
+                return no_update
+            return _render_commands_tab()
+
         if active_tab == "tab-overview":
             return _render_overview_tab()
         elif active_tab == "tab-ledgers":
@@ -258,6 +273,46 @@ def _register_callbacks(app):
         elif active_tab == "tab-vehicles":
             return _render_vehicles_tab()
         return html.Div()
+
+    @app.callback(
+        Output("cmd-output", "children"),
+        Input({"type": "cmd-btn", "name": dash.ALL}, "n_clicks"),
+        State({"type": "cmd-args", "name": dash.ALL}, "value"),
+        prevent_initial_call=True,
+    )
+    def execute_command(n_clicks_list, args_list):
+        if not _state:
+            return no_update
+
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            return no_update
+
+        # Find which button was clicked
+        trigger = ctx.triggered[0]
+        if trigger["value"] is None:
+            return no_update
+
+        import json
+        prop_id = json.loads(trigger["prop_id"].rsplit(".", 1)[0])
+        cmd_name = prop_id["name"]
+
+        # Find matching args input
+        args = ""
+        for state_entry in (ctx.states_list[0] if ctx.states_list else []):
+            if state_entry.get("id", {}).get("name") == cmd_name:
+                args = state_entry.get("value") or ""
+                break
+
+        output = _state.execute_command(cmd_name, args)
+        return html.Pre(
+            output,
+            style={
+                "color": _TEXT, "fontSize": "0.75rem",
+                "whiteSpace": "pre-wrap", "margin": "0",
+                "fontFamily": "monospace",
+            },
+        )
 
 
 def _render_overview_tab():
@@ -335,53 +390,139 @@ def _render_overview_tab():
 
 
 def _render_ledgers_tab():
-    """Render ledger information."""
+    """Render ledger information with contents."""
     ledger_info = _state.get_all_ledger_info()
     items = []
 
     # Topology
     topo = ledger_info["topology"]
-    items.append(_ledger_card(
-        "Topology Ledger",
-        [
-            ("Status", "Loaded" if topo["loaded"] else "Not loaded"),
+    topo_rows = [("Status", "Loaded" if topo["loaded"] else "Not loaded")]
+    if topo["loaded"]:
+        topo_rows.extend([
             ("Routes", str(topo.get("routes", "-"))),
             ("Trips", str(topo.get("trips", "-"))),
             ("Stops", str(topo.get("stops", "-"))),
             ("Shapes", str(topo.get("shapes", "-"))),
             ("MD5", str(topo.get("md5", "-"))[:16]),
-        ] if topo["loaded"] else [("Status", "Not loaded")],
+        ])
+        sample_routes = topo.get("sample_routes", [])
+        if sample_routes:
+            topo_rows.append(("Sample routes", ", ".join(sample_routes[:10])))
+
+    items.append(_ledger_card(
+        "Topology Ledger", topo_rows,
         color=_GREEN if topo["loaded"] else _RED,
     ))
 
     # Schedule
     sched = ledger_info["schedule"]
+    sched_rows = [("Status", "Loaded" if sched["loaded"] else "Not loaded")]
+    if sched["loaded"]:
+        sched_rows.append(("Routes indexed", str(sched.get("routes_indexed", "-"))))
+        for entry in sched.get("sample_entries", [])[:5]:
+            sched_rows.append((
+                f"  Route {entry['route_id']}",
+                f"{entry['directions']} directions",
+            ))
+
     items.append(_ledger_card(
-        "Schedule Ledger",
-        [
-            ("Status", "Loaded" if sched["loaded"] else "Not loaded"),
-            ("Routes indexed", str(sched.get("routes_indexed", "-"))),
-        ] if sched["loaded"] else [("Status", "Not loaded")],
+        "Schedule Ledger", sched_rows,
         color=_GREEN if sched["loaded"] else _RED,
     ))
 
-    # Database-backed ledgers
-    for name, key in [
-        ("Historical Ledger", "historical"),
-        ("Predicted Ledger", "predicted"),
-        ("Vehicle Ledger", "vehicle"),
-    ]:
-        info = ledger_info[key]
-        items.append(_ledger_card(
-            name,
-            [
-                ("Type", info["type"]),
-                ("Table", info["table"]),
-            ],
-            color=_ACCENT_BLUE,
-        ))
+    # Historical Ledger
+    hist = ledger_info["historical"]
+    items.append(_ledger_card(
+        "Historical Ledger",
+        [("Type", hist["type"]), ("Table", hist["table"])],
+        color=_ACCENT_BLUE,
+    ))
+
+    # Predicted Ledger — show today's predictions
+    pred = ledger_info["predicted"]
+    pred_rows = [("Type", pred["type"]), ("Table", pred["table"])]
+    predictions = _state.get_recent_predictions(limit=20)
+    if predictions:
+        pred_rows.append(("Today's predictions", str(len(predictions)) + " trips"))
+    items.append(_ledger_card(
+        "Predicted Ledger", pred_rows, color=_ACCENT_BLUE,
+    ))
+
+    if predictions:
+        items.append(_predictions_table(predictions))
+
+    # Vehicle Ledger — show recent vehicle trips
+    veh = ledger_info["vehicle"]
+    veh_rows = [("Type", veh["type"]), ("Table", veh["table"])]
+    vehicle_trips = _state.get_recent_vehicle_trips(limit=15)
+    if vehicle_trips:
+        veh_rows.append(("Today's trips", str(len(vehicle_trips)) + " recorded"))
+    items.append(_ledger_card(
+        "Vehicle Ledger", veh_rows, color=_ACCENT_BLUE,
+    ))
+
+    if vehicle_trips:
+        items.append(_vehicle_trips_table(vehicle_trips))
 
     return html.Div(items)
+
+
+def _predictions_table(predictions):
+    """Render a compact table of recent predictions."""
+    return dash_table.DataTable(
+        columns=[
+            {"name": "Route", "id": "route_id"},
+            {"name": "Dir", "id": "direction_id"},
+            {"name": "Start", "id": "scheduled_start"},
+            {"name": "Stops", "id": "stops"},
+            {"name": "Avg Delay", "id": "avg_delay"},
+            {"name": "Max Delay", "id": "max_delay"},
+        ],
+        data=predictions,
+        page_size=10,
+        sort_action="native",
+        style_table={"overflowX": "auto", "marginTop": "8px"},
+        style_header={
+            "backgroundColor": _BG_CARD_LIGHT,
+            "color": _ACCENT, "fontWeight": "bold",
+            "fontSize": "0.75rem", "border": "none",
+        },
+        style_cell={
+            "backgroundColor": _BG_CARD,
+            "color": _TEXT, "border": f"1px solid {_BG_CARD_LIGHT}",
+            "fontSize": "0.75rem", "padding": "4px 8px",
+            "textAlign": "left",
+        },
+    )
+
+
+def _vehicle_trips_table(vehicle_trips):
+    """Render a compact table of recent vehicle trips."""
+    return dash_table.DataTable(
+        columns=[
+            {"name": "Vehicle", "id": "vehicle_id"},
+            {"name": "Route", "id": "route_id"},
+            {"name": "Start", "id": "scheduled_start"},
+            {"name": "Mean Delay", "id": "mean_delay"},
+            {"name": "Samples", "id": "measurements"},
+            {"name": "Type", "id": "vehicle_type"},
+        ],
+        data=vehicle_trips,
+        page_size=10,
+        sort_action="native",
+        style_table={"overflowX": "auto", "marginTop": "8px"},
+        style_header={
+            "backgroundColor": _BG_CARD_LIGHT,
+            "color": _ACCENT, "fontWeight": "bold",
+            "fontSize": "0.75rem", "border": "none",
+        },
+        style_cell={
+            "backgroundColor": _BG_CARD,
+            "color": _TEXT, "border": f"1px solid {_BG_CARD_LIGHT}",
+            "fontSize": "0.75rem", "padding": "4px 8px",
+            "textAlign": "left",
+        },
+    )
 
 
 def _ledger_card(title, rows, color=_ACCENT):
@@ -513,6 +654,84 @@ def _render_vehicles_tab():
     )
 
 
+def _render_commands_tab():
+    """Render command buttons with optional argument inputs."""
+    if not _state:
+        return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
+
+    commands = _state.get_available_commands()
+    if not commands:
+        return html.Div("No commands registered", style={"color": _TEXT_DIM})
+
+    # Exclude 'quit' and 'help' — not useful from GUI
+    skip = {"quit", "help"}
+    items = []
+
+    for cmd in commands:
+        if cmd["name"] in skip:
+            continue
+
+        row_children = [
+            dbc.Button(
+                cmd["name"],
+                id={"type": "cmd-btn", "name": cmd["name"]},
+                size="sm", color="info", outline=True,
+                style={"marginRight": "8px", "minWidth": "140px", "textAlign": "left"},
+            ),
+        ]
+
+        if cmd["needs_args"]:
+            row_children.append(
+                dbc.Input(
+                    id={"type": "cmd-args", "name": cmd["name"]},
+                    placeholder="args...",
+                    size="sm",
+                    style={
+                        "backgroundColor": _BG_DARK, "color": _TEXT,
+                        "border": f"1px solid {_BG_CARD_LIGHT}",
+                        "maxWidth": "160px",
+                    },
+                ),
+            )
+        else:
+            # Hidden input to keep pattern-matching callbacks consistent
+            row_children.append(
+                dcc.Input(
+                    id={"type": "cmd-args", "name": cmd["name"]},
+                    type="hidden", value="",
+                ),
+            )
+
+        items.append(html.Div(
+            row_children,
+            style={
+                "display": "flex", "alignItems": "center",
+                "marginBottom": "6px",
+            },
+        ))
+
+    return html.Div([
+        html.H6("Console Commands", style={
+            "color": _ACCENT, "marginBottom": "10px", "fontWeight": "bold",
+        }),
+        html.Div(items),
+        html.Hr(style={"borderColor": _BG_CARD_LIGHT, "margin": "12px 0"}),
+        html.H6("Output", style={
+            "color": _ACCENT, "marginBottom": "6px", "fontWeight": "bold",
+        }),
+        html.Div(
+            id="cmd-output",
+            style={
+                "backgroundColor": _BG_DARK, "borderRadius": "6px",
+                "padding": "10px", "maxHeight": "200px", "overflowY": "auto",
+                "border": f"1px solid {_BG_CARD_LIGHT}",
+                "fontSize": "0.75rem", "color": _TEXT_DIM,
+            },
+            children="Click a command to see output here.",
+        ),
+    ])
+
+
 # ============================================================
 # App Factory & Runner
 # ============================================================
@@ -527,6 +746,7 @@ def create_app(state: "StateInterface") -> dash.Dash:
         __name__,
         external_stylesheets=[dbc.themes.DARKLY],
         title="ATAC Backend Dashboard",
+        suppress_callback_exceptions=True,
     )
     app.layout = _build_layout()
     _register_callbacks(app)

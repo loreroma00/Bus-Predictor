@@ -103,5 +103,104 @@ def main():
     except ValueError:
         print("[!] Input non valido. Inserisci un numero.")
 
+def generate_fotoromanzo(predicted_df, actual_df, stops_map, route_id, trip_id, output_path):
+    """Generate a comparison chart: predicted delay vs actual delay vs scheduled baseline.
+
+    Args:
+        predicted_df: DataFrame with stop_sequence, predicted_delay_sec (may be None/empty)
+        actual_df: DataFrame with stop_sequence, schedule_adherence (may be None/empty)
+        stops_map: dict stop_sequence → {stop_name, ...} from TopologyLedger
+        route_id: route identifier string
+        trip_id: trip identifier string
+        output_path: where to save the PNG
+    """
+    import numpy as np
+
+    has_predicted = predicted_df is not None and not predicted_df.empty
+    has_actual = actual_df is not None and not actual_df.empty
+
+    if not has_predicted and not has_actual:
+        print(f"[!] No data to plot for trip {trip_id}")
+        return False
+
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=200)
+
+    # Scheduled baseline (on-time = 0 delay)
+    all_seqs = set()
+    if has_predicted:
+        all_seqs.update(predicted_df['stop_sequence'].values)
+    if has_actual:
+        all_seqs.update(actual_df['stop_sequence'].values)
+    seq_range = sorted(all_seqs)
+    ax.axhline(y=0, color='#7f8c8d', linestyle='--', linewidth=1.5, alpha=0.8, label='Scheduled (on-time)')
+
+    # Predicted curve
+    if has_predicted:
+        pred_sorted = predicted_df.sort_values('stop_sequence')
+        ax.plot(
+            pred_sorted['stop_sequence'], pred_sorted['predicted_delay_sec'],
+            label='Predicted delay', color='#2c3e50', linewidth=2.5, alpha=0.85,
+        )
+
+    # Actual measurements (median per stop_sequence since there can be multiple pings)
+    rmse = None
+    if has_actual:
+        actual_grouped = actual_df.groupby('stop_sequence')['schedule_adherence'].median().reset_index()
+        actual_grouped = actual_grouped.sort_values('stop_sequence')
+        ax.scatter(
+            actual_grouped['stop_sequence'], actual_grouped['schedule_adherence'],
+            label='Actual delay', color='#e74c3c', s=40, zorder=5, alpha=0.9,
+        )
+
+        # Compute RMSE if both are available
+        if has_predicted:
+            merged = actual_grouped.merge(
+                predicted_df[['stop_sequence', 'predicted_delay_sec']],
+                on='stop_sequence', how='inner',
+            )
+            if not merged.empty:
+                errors = (merged['predicted_delay_sec'] - merged['schedule_adherence']) ** 2
+                rmse = float(np.sqrt(errors.mean()))
+
+    # X-axis: stop names
+    if stops_map and seq_range:
+        tick_seqs = seq_range[::max(1, len(seq_range) // 15)]  # ~15 ticks max
+        tick_labels = [
+            stops_map.get(s, {}).get('stop_name', str(s))[:18]
+            for s in tick_seqs
+        ]
+        ax.set_xticks(tick_seqs)
+        ax.set_xticklabels(tick_labels, rotation=45, ha='right', fontsize=8)
+
+    # Y-axis: format as mm:ss
+    def fmt_delay(x, _):
+        sign = '-' if x < 0 else '+'
+        mins, secs = divmod(abs(int(x)), 60)
+        return f"{sign}{mins}:{secs:02d}"
+
+    from matplotlib.ticker import FuncFormatter
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_delay))
+
+    # Title
+    short_trip = trip_id[:30] + '...' if len(trip_id) > 30 else trip_id
+    rmse_str = f" | RMSE: {rmse:.1f}s" if rmse is not None else ""
+    ax.set_title(
+        f"Fotoromanzo - Route {route_id} | {short_trip}{rmse_str}",
+        fontsize=13, weight='bold', pad=15,
+    )
+    ax.set_xlabel('Stop Sequence', fontsize=11, weight='bold', labelpad=8)
+    ax.set_ylabel('Delay (mm:ss)', fontsize=11, weight='bold', labelpad=8)
+    ax.grid(True, linestyle=':', alpha=0.7)
+    ax.legend(loc='best', frameon=True, fontsize=10, shadow=True)
+
+    plt.tight_layout()
+    plt.savefig(output_path, format='png', bbox_inches='tight')
+    plt.close()
+
+    print(f"[+] Fotoromanzo saved: {output_path}")
+    return True
+
+
 if __name__ == "__main__":
     main()

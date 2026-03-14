@@ -5,6 +5,8 @@ This module provides a clean abstraction layer between the GUI and application i
 The GUI only depends on this interface, ensuring low coupling and respecting top-down imports.
 """
 
+import io
+import logging
 import time
 from typing import Optional
 from application.domain import h3_utils
@@ -27,6 +29,8 @@ class StateInterface:
         """
         self._observatory = observatory
         self._last_feed_timestamp: float = 0.0
+        self._command_registry: dict = {}
+        self._last_command_output: str = ""
 
     # ============================================================
     # City & Hexagon Access
@@ -368,8 +372,23 @@ class StateInterface:
         self._last_feed_timestamp = timestamp
 
     def get_feed_timestamp(self) -> float:
-        """Get the last feed timestamp."""
-        return self._last_feed_timestamp
+        """Get the last feed timestamp.
+
+        Derives from the most recent GPS timestamp across all active buses,
+        falling back to the manually-set value.
+        """
+        latest = self._last_feed_timestamp
+        for city in self._observatory.observed_cities.values():
+            for bus_id, hex_id in city.bus_index.items():
+                hexagon = city.hexagons.get(hex_id)
+                if not hexagon:
+                    continue
+                bus = hexagon.get_bus(bus_id)
+                if bus and bus.GPSData and bus.GPSData.timestamp:
+                    ts = float(bus.GPSData.timestamp)
+                    if ts > latest:
+                        latest = ts
+        return latest
 
     def get_system_stats(self) -> dict:
         """Get overall system statistics."""
@@ -495,11 +514,12 @@ class StateInterface:
     # ============================================================
 
     def get_all_ledger_info(self) -> dict:
-        """Get combined info from all ledger types."""
+        """Get combined info from all ledger types, including recent content samples."""
         obs = self._observatory
 
-        topology_info = {"loaded": False}
+        topology_info = {"loaded": False, "sample_routes": [], "sample_trips": []}
         if obs.topology:
+            route_ids = sorted(obs.topology.routes.keys())
             topology_info = {
                 "loaded": True,
                 "trips": len(obs.topology.trips),
@@ -507,11 +527,20 @@ class StateInterface:
                 "stops": len(obs.topology.stops),
                 "shapes": len(obs.topology.shapes),
                 "md5": obs.current_md5 or "N/A",
+                "sample_routes": route_ids[:20],
             }
 
-        schedule_info = {"loaded": obs.schedule_ledger is not None}
+        schedule_info = {"loaded": obs.schedule_ledger is not None, "sample_entries": []}
         if obs.schedule_ledger and obs.schedule_ledger.schedule:
-            schedule_info["routes_indexed"] = len(obs.schedule_ledger.schedule.index)
+            index = obs.schedule_ledger.schedule.index
+            schedule_info["routes_indexed"] = len(index)
+            # Sample: first 10 routes with their direction count
+            for route_id in sorted(index.keys())[:10]:
+                directions = list(index[route_id].keys())
+                schedule_info["sample_entries"].append({
+                    "route_id": route_id,
+                    "directions": len(directions),
+                })
 
         historical_info = {
             "type": "database-backed",
@@ -536,6 +565,83 @@ class StateInterface:
             "vehicle": vehicle_info,
         }
 
+    def get_recent_predictions(self, limit: int = 30) -> list[dict]:
+        """Fetch recent predictions from the PredictedLedger database.
+
+        Returns a list of dicts with prediction info, most recent first.
+        """
+        obs = self._observatory
+        if not obs.predicted:
+            return []
+
+        from datetime import datetime
+        today = datetime.now().strftime("%d-%m-%Y")
+
+        try:
+            df = obs.predicted.query(trip_date=today)
+            if df.empty:
+                return []
+
+            # Deduplicate by (route_id, direction_id, scheduled_start) — keep latest
+            if "prediction_timestamp" in df.columns:
+                df = df.sort_values("prediction_timestamp", ascending=False)
+                df = df.drop_duplicates(
+                    subset=["route_id", "direction_id", "scheduled_start", "stop_sequence"],
+                    keep="first",
+                )
+
+            # Group by trip and return summaries
+            groups = df.groupby(["route_id", "direction_id", "scheduled_start"])
+            rows = []
+            for (route_id, direction_id, scheduled_start), group in groups:
+                avg_delay = group["predicted_delay_sec"].mean()
+                max_delay = group["predicted_delay_sec"].max()
+                stop_count = len(group)
+                rows.append({
+                    "route_id": str(route_id),
+                    "direction_id": int(direction_id),
+                    "scheduled_start": str(scheduled_start)[:5],
+                    "stops": stop_count,
+                    "avg_delay": f"{avg_delay:+.0f}s",
+                    "max_delay": f"{max_delay:+.0f}s",
+                })
+                if len(rows) >= limit:
+                    break
+
+            rows.sort(key=lambda r: r["route_id"])
+            return rows
+        except Exception:
+            return []
+
+    def get_recent_vehicle_trips(self, limit: int = 20) -> list[dict]:
+        """Fetch recent vehicle trip records from the VehicleLedger database."""
+        obs = self._observatory
+        if not obs.vehicle_ledger:
+            return []
+
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        try:
+            df = obs.vehicle_ledger.query(date_start=today)
+            if df.empty:
+                return []
+
+            df = df.sort_values("recorded_at", ascending=False).head(limit)
+            rows = []
+            for _, row in df.iterrows():
+                rows.append({
+                    "vehicle_id": str(row.get("vehicle_id", "")),
+                    "route_id": str(row.get("route_id", "")),
+                    "scheduled_start": str(row.get("scheduled_start", ""))[:5],
+                    "mean_delay": f"{row.get('mean_delay_sec', 0):+.0f}s",
+                    "measurements": int(row.get("measurement_count", 0)),
+                    "vehicle_type": str(row.get("vehicle_type_name", "?")),
+                })
+            return rows
+        except Exception:
+            return []
+
     # ============================================================
     # Model Info (for Dashboard GUI)
     # ============================================================
@@ -555,6 +661,68 @@ class StateInterface:
     # ============================================================
     # Service Thread Status (for Dashboard GUI)
     # ============================================================
+
+    # ============================================================
+    # Command Execution (for Dashboard GUI)
+    # ============================================================
+
+    def set_command_registry(self, registry: dict):
+        """Store reference to the console command registry."""
+        self._command_registry = registry
+
+    def get_available_commands(self) -> list[dict]:
+        """Get list of available commands with their help text."""
+        commands = []
+        for cmd_name, cmd_instance in self._command_registry.items():
+            # Determine if command needs arguments from help text
+            help_buf = io.StringIO()
+            handler = logging.StreamHandler(help_buf)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger = logging.getLogger()
+            logger.addHandler(handler)
+            try:
+                cmd_instance.help()
+            except Exception:
+                pass
+            logger.removeHandler(handler)
+            help_text = help_buf.getvalue().strip()
+
+            # Infer whether args needed from help text pattern "<...>"
+            needs_args = "<" in help_text and ">" in help_text
+
+            commands.append({
+                "name": cmd_name,
+                "help": help_text,
+                "needs_args": needs_args,
+            })
+        return commands
+
+    def execute_command(self, cmd_name: str, args: str = "") -> str:
+        """Execute a registered command and capture its log output."""
+        cmd = self._command_registry.get(cmd_name)
+        if not cmd:
+            return f"Unknown command: {cmd_name}"
+
+        # Capture log output during execution
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger = logging.getLogger()
+        logger.addHandler(handler)
+        try:
+            cmd.execute(args)
+        except Exception as e:
+            buf.write(f"Error: {e}\n")
+        finally:
+            logger.removeHandler(handler)
+
+        output = buf.getvalue().strip()
+        self._last_command_output = output
+        return output or "(command produced no output)"
+
+    def get_last_command_output(self) -> str:
+        """Get the output from the last executed command."""
+        return self._last_command_output
 
     def get_service_thread_status(self) -> dict:
         """Get status of all background service threads."""

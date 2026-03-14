@@ -148,6 +148,7 @@ def main(debug_mode: bool = False, lenient_pipeline: bool = False):
         from .state_interface import StateInterface
 
         state_interface = StateInterface(observatory)
+        state_interface.set_command_registry(console._command_registry)
         services.set_state_interface(state_interface)
 
         # Start Services (including Debug GUI)
