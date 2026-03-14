@@ -252,7 +252,7 @@ class Ledger:
         "db_connection",
         Prediction.VECTOR_DB_CONNECTION,
     )
-    HISTORICAL_TABLE = _get("ledger", "historical_table", "historical_arrivals")
+    HISTORICAL_TABLE = _get("ledger", "historical_table", "historical_measurements")
     PREDICTED_TABLE = _get("ledger", "predicted_table", "predicted_arrivals")
     VEHICLE_TABLE = _get("ledger", "vehicle_table", "vehicle_trips")
 

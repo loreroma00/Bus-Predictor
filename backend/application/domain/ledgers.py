@@ -3,17 +3,18 @@ Ledger Types — Split the monolithic ledger into purpose-specific ledgers.
 
 TopologyLedger:  Static physical network (routes, stops, shapes, trips).
 ScheduleLedger:  Timetable index (route → direction → date → start times).
-HistoricalLedger: Observed stop arrivals, backed by database (append-only).
+HistoricalLedger: Per-measurement observations, backed by database (append-only).
 PredictedLedger:  Model predictions, backed by database (append-only).
 VehicleLedger:   Per-vehicle trip performance, backed by database (append-only).
 """
 
+import json
 import logging
 import statistics
 import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 import pandas as pd
 
@@ -21,7 +22,7 @@ from .static_data import Route, Shape, Trip
 
 if TYPE_CHECKING:
     from .live_data import Schedule
-    from .observers import Diary
+    from .observers import Diary, Measurement
 
 logger = logging.getLogger(__name__)
 
@@ -112,60 +113,131 @@ class ScheduleLedger:
 
 
 # ============================================================
-#  Historical Ledger  (parquet-backed, append-only)
+#  Historical Ledger  (measurement-level, database-backed)
 # ============================================================
 
 @dataclass
-class StopArrival:
-    """A single observed arrival at a stop."""
+class MeasurementRecord:
+    """A single observed measurement (one GPS ping).
 
+    Stores raw data from each ping.  Derived features (sin/cos encodings,
+    deposit flags, day_type, rush_hour, far_status) are computed during
+    preprocessing — only raw values are persisted here.
+    """
+
+    # Identity
     trip_id: str
-    stop_id: str
+    route_id: str
+    direction_id: int
+    vehicle_id: str
+
+    # Position
+    latitude: float
+    longitude: float
+    hexagon_id: str
     stop_sequence: int
-    actual_arrival_time: float   # Unix timestamp
-    schedule_adherence: float    # delay in seconds
+    shape_dist_travelled: float     # projected distance along shape (metres)
+    distance_to_next_stop: float
+    is_in_preferential: bool
+
+    # Time
+    measurement_time: float         # Unix timestamp
+    actual_start_time: float        # Unix ts of first non-terminus ping
+
+    # Schedule
+    schedule_adherence: float       # delay in seconds
+    scheduled_start_time: str       # HH:MM:SS
+    delay_genuine: int
+
+    # Speed / Traffic
+    current_speed: float            # GPS speed or derived (km/h)
+    speed_ratio: float              # current / free-flow
+    current_traffic_speed: float    # free-flow speed (km/h)
+
+    # Weather (full)
+    temperature: float              # °C
+    apparent_temperature: float     # °C (feels-like)
+    humidity: float                 # %
+    precipitation: float            # mm/h
+    wind_speed: float               # m/s
+    weather_code: int               # WMO code
+
+    # Vehicle / occupancy
+    bus_type: int
+    door_number: int
     occupancy_status: int
-    vehicle_id: str = ""         # fleet number (default for backward compat)
+    deposits: str                   # JSON list of depot names
+
+
+# Keep backward-compat alias so existing imports don't break
+StopArrival = MeasurementRecord
 
 
 class HistoricalLedger:
-    """Append-only record of observed stop arrivals, backed by database."""
+    """Append-only record of per-measurement observations, backed by database."""
 
     def __init__(self, connection_string: str = None, table_name: str = None):
         from config import Ledger
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.HISTORICAL_TABLE
 
-    def record_arrivals(self, arrivals: list[StopArrival]):
-        """Append a batch of stop arrivals to the database."""
-        if not arrivals:
+    def record_measurements(self, records: list[MeasurementRecord]):
+        """Append a batch of measurement records to the database."""
+        if not records:
             return
         from persistence.ledger_db import write_historical
-        records = [
+        rows = [
             {
-                "trip_id": a.trip_id,
-                "stop_id": a.stop_id,
-                "stop_sequence": a.stop_sequence,
-                "actual_arrival_time": a.actual_arrival_time,
-                "schedule_adherence": a.schedule_adherence,
-                "occupancy_status": a.occupancy_status,
-                "vehicle_id": a.vehicle_id,
+                "trip_id": r.trip_id,
+                "route_id": r.route_id,
+                "direction_id": r.direction_id,
+                "vehicle_id": r.vehicle_id,
+                "latitude": r.latitude,
+                "longitude": r.longitude,
+                "hexagon_id": r.hexagon_id,
+                "stop_sequence": r.stop_sequence,
+                "shape_dist_travelled": r.shape_dist_travelled,
+                "distance_to_next_stop": r.distance_to_next_stop,
+                "is_in_preferential": r.is_in_preferential,
+                "measurement_time": r.measurement_time,
+                "actual_start_time": r.actual_start_time,
+                "schedule_adherence": r.schedule_adherence,
+                "scheduled_start_time": r.scheduled_start_time,
+                "delay_genuine": r.delay_genuine,
+                "current_speed": r.current_speed,
+                "speed_ratio": r.speed_ratio,
+                "current_traffic_speed": r.current_traffic_speed,
+                "temperature": r.temperature,
+                "apparent_temperature": r.apparent_temperature,
+                "humidity": r.humidity,
+                "precipitation": r.precipitation,
+                "wind_speed": r.wind_speed,
+                "weather_code": r.weather_code,
+                "bus_type": r.bus_type,
+                "door_number": r.door_number,
+                "occupancy_status": r.occupancy_status,
+                "deposits": r.deposits,
             }
-            for a in arrivals
+            for r in records
         ]
-        write_historical(self._conn_str, self._table, records)
+        write_historical(self._conn_str, self._table, rows)
+
+    # Keep old method as alias for backward compat
+    record_arrivals = record_measurements
 
     def query(
         self,
         trip_id: str = None,
+        route_id: str = None,
         date_start: float = None,
         date_end: float = None,
     ) -> pd.DataFrame:
-        """Query historical arrivals.  Returns empty DataFrame if no data."""
+        """Query historical measurements.  Returns empty DataFrame if no data."""
         from persistence.ledger_db import read_historical
         return read_historical(
             self._conn_str, self._table,
-            trip_id=trip_id, date_start=date_start, date_end=date_end,
+            trip_id=trip_id, route_id=route_id,
+            date_start=date_start, date_end=date_end,
         )
 
 
@@ -233,72 +305,122 @@ class PredictedLedger:
 
 
 # ============================================================
-#  Projection Utility  (diary → historical ledger)
+#  Extraction Utility  (diary → measurement records)
 # ============================================================
 
-def project_diary_to_stops(diary: "Diary", trip: Trip) -> list[StopArrival]:
-    """Project diary measurements to the nearest stops.
+def extract_measurements_from_diary(
+    diary: "Diary",
+    trip: Trip,
+    route_id: str,
+) -> list[MeasurementRecord]:
+    """Convert diary measurements into MeasurementRecords for the historical ledger.
 
-    For each stop in the trip, finds the measurement whose GPS position
-    projects closest to that stop on the shape, and records its
-    measurement_time as the actual arrival time.
+    Each measurement is projected onto the trip's shape to compute
+    ``shape_dist_travelled``.  All raw fields are preserved so that
+    the preprocessing pipeline can derive the training features later.
 
-    Returns one StopArrival per stop (at most).
+    Returns one MeasurementRecord per ping, or empty list if data is
+    insufficient.
     """
-    if (
-        not diary.measurements
-        or not trip
-        or not trip.stop_times
-        or not trip.shape
-    ):
+    if not diary.measurements or not trip:
         return []
 
     shape = trip.shape
+    direction_id = trip.direction_id or 0
 
-    # Extract vehicle ID from observer
+    # Extract vehicle ID
     vehicle_id = ""
     if hasattr(diary, "observer") and diary.observer:
         vehicle = getattr(diary.observer, "assignedVehicle", None)
         if vehicle:
             vehicle_id = str(getattr(vehicle, "label", "") or "")
 
-    # Pre-project all measurements onto the shape
-    projected = []
-    for m in diary.measurements:
-        dist = shape.project(m.gpsdata.latitude, m.gpsdata.longitude)
-        projected.append((dist, m))
+    scheduled_start = diary.scheduled_start_time or ""
 
-    arrivals: list[StopArrival] = []
-    for st in trip.stop_times:
-        stop_dist = float(st.get("shape_dist_traveled", 0) or 0)
-        stop_id = st.get("stop_id")
-        stop_seq = int(st.get("stop_sequence", 0) or 0)
-
-        # Find measurement with minimum |projected_dist – stop_dist|
-        best_m = None
-        best_delta = float("inf")
-        for dist, m in projected:
-            delta = abs(dist - stop_dist)
-            if delta < best_delta:
-                best_delta = delta
-                best_m = m
-
-        if best_m is not None:
-            arrivals.append(
-                StopArrival(
-                    trip_id=diary.trip_id,
-                    stop_id=stop_id,
-                    stop_sequence=stop_seq,
-                    actual_arrival_time=best_m.measurement_time,
-                    schedule_adherence=best_m.schedule_adherence,
-                    occupancy_status=best_m.occupancy_status
-                    if best_m.occupancy_status is not None
-                    else 0,
-                    vehicle_id=vehicle_id,
-                )
+    # Derive actual_start_time: first measurement NOT at stop_sequence 1
+    # (i.e. the bus has left the terminus).
+    actual_start_time = diary.actual_start_time or 0.0
+    if not actual_start_time:
+        for m in diary.measurements:
+            seq = (
+                m.gpsdata.current_stop_sequence
+                if hasattr(m.gpsdata, "current_stop_sequence")
+                else None
             )
+            if seq is not None and seq > 1:
+                actual_start_time = m.measurement_time
+                break
+        if not actual_start_time and diary.measurements:
+            actual_start_time = diary.measurements[0].measurement_time
 
-    return arrivals
+    records: list[MeasurementRecord] = []
+    for m in diary.measurements:
+        # Project GPS position onto shape (if available)
+        if shape:
+            try:
+                shape_dist = shape.project(m.gpsdata.latitude, m.gpsdata.longitude)
+            except Exception:
+                shape_dist = 0.0
+        else:
+            shape_dist = 0.0
+
+        # Current speed: prefer GPS, fall back to derived
+        gps_speed = m.gpsdata.speed if m.gpsdata else 0.0
+        current_speed = gps_speed if gps_speed else (m.derived_speed or 0.0)
+
+        # Weather
+        w = m.weather
+        temperature = w.temperature if w else 0.0
+        apparent_temperature = w.apparent_temperature if w else 0.0
+        humidity = w.humidity if w else 0.0
+        precipitation = w.precip_intensity if w else 0.0
+        wind_speed = w.wind_speed if w else 0.0
+        weather_code = w.weather_code if w else 0
+
+        records.append(
+            MeasurementRecord(
+                trip_id=diary.trip_id,
+                route_id=route_id,
+                direction_id=direction_id,
+                vehicle_id=vehicle_id,
+                latitude=m.gpsdata.latitude,
+                longitude=m.gpsdata.longitude,
+                hexagon_id=m.hexagon_id or "",
+                stop_sequence=m.gpsdata.current_stop_sequence or 0
+                if hasattr(m.gpsdata, "current_stop_sequence")
+                else 0,
+                shape_dist_travelled=shape_dist,
+                distance_to_next_stop=m.next_stop_distance or 0.0,
+                is_in_preferential=bool(getattr(m, "is_in_preferential", False)),
+                measurement_time=m.measurement_time,
+                actual_start_time=actual_start_time,
+                schedule_adherence=m.schedule_adherence or 0.0,
+                scheduled_start_time=scheduled_start,
+                delay_genuine=getattr(m, "delay_genuine", 0),
+                current_speed=current_speed,
+                speed_ratio=m.speed_ratio or 1.0,
+                current_traffic_speed=m.current_speed or 0.0,
+                temperature=temperature,
+                apparent_temperature=apparent_temperature,
+                humidity=humidity,
+                precipitation=precipitation,
+                wind_speed=wind_speed,
+                weather_code=weather_code,
+                bus_type=getattr(m, "bus_type", 0),
+                door_number=getattr(m, "door_number", 0),
+                occupancy_status=m.occupancy_status or 0,
+                deposits=json.dumps(getattr(m, "deposits", []) or []),
+            )
+        )
+
+    return records
+
+
+# Backward-compat alias
+def project_diary_to_stops(diary: "Diary", trip: Trip) -> list[MeasurementRecord]:
+    """Legacy wrapper — returns measurement records (not stop-projected arrivals)."""
+    route_id = trip.route.id if trip and trip.route else ""
+    return extract_measurements_from_diary(diary, trip, route_id)
 
 
 # ============================================================

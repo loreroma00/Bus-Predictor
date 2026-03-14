@@ -8,25 +8,17 @@ host = 0.0.0.0
 port = 8000
 
 [prediction]
-# Configuration for the Prediction Pipeline
+# Configuration for the Prediction API model
 enabled = true
 vector_db_connection = postgresql://user:password@localhost:1515/transit
-vector_table = prediction_vectors
-label_table = prediction_label
 
-[traffic]
-# Configuration for the Traffic Analysis Pipeline
-enabled = true
-vector_db_connection = postgresql://user:password@localhost:1515/transit
-vector_table = traffic_vectors
-label_table = traffic_label
-
-[vehicle]
-# Configuration for the Vehicle Classification Pipeline
-enabled = true
-vector_db_connection = postgresql://user:password@localhost:1515/transit
-vector_table = vehicle_vectors
-label_table = vehicle_label
+[ledger]
+# Database-backed ledgers (TimescaleDB hypertables)
+# db_connection defaults to prediction.vector_db_connection if omitted
+db_connection = postgresql://user:password@localhost:1515/transit
+historical_table = historical_measurements
+predicted_table = predicted_arrivals
+vehicle_table = vehicle_trips
 
 [urls]
 # GTFS Static Data

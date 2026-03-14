@@ -19,10 +19,12 @@ from .ledgers import (
     HistoricalLedger,
     PredictedLedger,
     VehicleLedger,
-    StopArrival,
+    MeasurementRecord,
+    StopArrival,           # backward-compat alias for MeasurementRecord
     StopPredictionRecord,
     VehicleTripRecord,
-    project_diary_to_stops,
+    extract_measurements_from_diary,
+    project_diary_to_stops,  # backward-compat wrapper
     summarize_diary_for_vehicle,
 )
 
@@ -59,9 +61,11 @@ __all__ = [
     "HistoricalLedger",
     "PredictedLedger",
     "VehicleLedger",
+    "MeasurementRecord",
     "StopArrival",
     "StopPredictionRecord",
     "VehicleTripRecord",
+    "extract_measurements_from_diary",
     "project_diary_to_stops",
     "summarize_diary_for_vehicle",
     # Events

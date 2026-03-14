@@ -9,8 +9,8 @@ Tables:
 
 import asyncio
 import logging
-from datetime import datetime
-from typing import Any, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -69,6 +69,11 @@ class LedgerDBWriter:
             self._pool = None
 
 
+def _ts(unix: float) -> datetime:
+    """Convert a Unix timestamp (float seconds) to an aware UTC datetime."""
+    return datetime.fromtimestamp(float(unix), tz=timezone.utc)
+
+
 # Singleton writers keyed by table name
 _writers: dict[str, LedgerDBWriter] = {}
 
@@ -89,30 +94,64 @@ def _get_loop():
 #  Sync façade — fire-and-forget write from any thread
 # ============================================================
 
-def write_historical(connection_string: str, table_name: str, arrivals: list[dict]):
-    """Write StopArrival records to the database (sync, thread-safe)."""
-    if not arrivals:
+def write_historical(connection_string: str, table_name: str, records: list[dict]):
+    """Write MeasurementRecord rows to the database (sync, thread-safe)."""
+    if not records:
         return
     writer = _get_writer(connection_string, table_name)
     query = f"""
         INSERT INTO {table_name} (
-            trip_id, stop_id, stop_sequence,
-            actual_arrival_time, schedule_adherence, occupancy_status,
-            vehicle_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            trip_id, route_id, direction_id, vehicle_id,
+            latitude, longitude, hexagon_id,
+            stop_sequence, shape_dist_travelled, distance_to_next_stop,
+            is_in_preferential,
+            measurement_time, actual_start_time,
+            schedule_adherence, scheduled_start_time, delay_genuine,
+            current_speed, speed_ratio, current_traffic_speed,
+            temperature, apparent_temperature, humidity,
+            precipitation, wind_speed, weather_code,
+            bus_type, door_number, occupancy_status,
+            deposits
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+            $21,$22,$23,$24,$25,$26,$27,$28,$29
+        )
         ON CONFLICT DO NOTHING
     """
     rows = [
         (
-            a["trip_id"],
-            a["stop_id"],
-            int(a["stop_sequence"]),
-            float(a["actual_arrival_time"]),
-            float(a["schedule_adherence"]),
-            int(a["occupancy_status"]),
-            str(a.get("vehicle_id", "")),
+            r["trip_id"],
+            r["route_id"],
+            int(r["direction_id"]),
+            str(r.get("vehicle_id", "")),
+            float(r["latitude"]),
+            float(r["longitude"]),
+            str(r.get("hexagon_id", "")),
+            int(r["stop_sequence"]),
+            float(r["shape_dist_travelled"]),
+            float(r["distance_to_next_stop"]),
+            bool(r.get("is_in_preferential", False)),
+            _ts(r["measurement_time"]),
+            _ts(r.get("actual_start_time") or r["measurement_time"]),
+            float(r["schedule_adherence"]),
+            str(r.get("scheduled_start_time", "")),
+            int(r.get("delay_genuine", 0)),
+            float(r["current_speed"]),
+            float(r["speed_ratio"]),
+            float(r["current_traffic_speed"]),
+            float(r.get("temperature", 0.0)),
+            float(r.get("apparent_temperature", 0.0)),
+            float(r.get("humidity", 0.0)),
+            float(r["precipitation"]),
+            float(r.get("wind_speed", 0.0)),
+            int(r["weather_code"]),
+            int(r["bus_type"]),
+            int(r["door_number"]),
+            int(r["occupancy_status"]),
+            str(r.get("deposits", "[]")),
         )
-        for a in arrivals
+        for r in records
     ]
     loop = _get_loop()
     asyncio.run_coroutine_threadsafe(writer.insert_rows(query, rows), loop)
@@ -143,7 +182,7 @@ def write_predicted(connection_string: str, table_name: str, predictions: list[d
             p["predicted_arrival"],
             float(p["predicted_delay_sec"]),
             int(p["predicted_crowd_level"]),
-            float(p["prediction_timestamp"]),
+            _ts(p["prediction_timestamp"]),
         )
         for p in predictions
     ]
@@ -179,14 +218,14 @@ def write_vehicle_trips(connection_string: str, table_name: str, records: list[d
             r["vehicle_type_name"], int(r["fuel_type"]), int(r["euro_class"]),
             int(r["capacity_total"]),
             r["trip_date"], r["scheduled_start"],
-            float(r["actual_start_time"]), float(r["trip_end_time"]),
+            _ts(r["actual_start_time"]), _ts(r["trip_end_time"]),
             float(r["trip_duration_sec"]),
             float(r["mean_delay_sec"]), float(r["median_delay_sec"]),
             float(r["max_delay_sec"]), float(r["min_delay_sec"]),
             float(r["std_delay_sec"]),
             float(r["mean_occupancy"]), int(r["max_occupancy"]),
             int(r["measurement_count"]), float(r["preferential_ratio"]),
-            float(r["recorded_at"]),
+            _ts(r["recorded_at"]),
         )
         for r in records
     ]
@@ -202,10 +241,11 @@ def read_historical(
     connection_string: str,
     table_name: str,
     trip_id: str = None,
+    route_id: str = None,
     date_start: float = None,
     date_end: float = None,
 ) -> pd.DataFrame:
-    """Read historical arrivals via SQLAlchemy (sync)."""
+    """Read historical measurements via SQLAlchemy (sync)."""
     engine = _get_sync_engine(connection_string)
     if engine is None:
         return pd.DataFrame()
@@ -213,10 +253,12 @@ def read_historical(
     where = []
     if trip_id:
         where.append(f"trip_id = '{trip_id}'")
+    if route_id:
+        where.append(f"route_id = '{route_id}'")
     if date_start is not None:
-        where.append(f"actual_arrival_time >= {date_start}")
+        where.append(f"measurement_time >= to_timestamp({date_start})")
     if date_end is not None:
-        where.append(f"actual_arrival_time < {date_end}")
+        where.append(f"measurement_time < to_timestamp({date_end})")
 
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     query = f"SELECT * FROM {table_name}{clause}"
