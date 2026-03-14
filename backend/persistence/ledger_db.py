@@ -175,7 +175,7 @@ def write_predicted(connection_string: str, table_name: str, predictions: list[d
         (
             p["route_id"],
             int(p["direction_id"]),
-            p["trip_date"],
+            datetime.strptime(p["trip_date"], "%d-%m-%Y").date() if p.get("trip_date") else None,
             p["scheduled_start"],
             p["stop_id"],
             int(p["stop_sequence"]),
@@ -217,7 +217,8 @@ def write_vehicle_trips(connection_string: str, table_name: str, records: list[d
             r["vehicle_id"], r["trip_id"], r["route_id"], int(r["direction_id"]),
             r["vehicle_type_name"], int(r["fuel_type"]), int(r["euro_class"]),
             int(r["capacity_total"]),
-            r["trip_date"], r["scheduled_start"],
+            datetime.strptime(r["trip_date"], "%Y-%m-%d").date() if r.get("trip_date") else None,
+            r["scheduled_start"],
             _ts(r["actual_start_time"]), _ts(r["trip_end_time"]),
             float(r["trip_duration_sec"]),
             float(r["mean_delay_sec"]), float(r["median_delay_sec"]),
@@ -273,7 +274,9 @@ def read_predicted(
     connection_string: str,
     table_name: str,
     route_id: str = None,
-    trip_date: str = None,
+    direction_id: int = None,
+    trip_date: str = None,       # ISO format YYYY-MM-DD for SQL comparison
+    scheduled_start: str = None, # HH:MM prefix — matched with LIKE 'HH:MM%'
 ) -> pd.DataFrame:
     """Read predicted arrivals via SQLAlchemy (sync)."""
     engine = _get_sync_engine(connection_string)
@@ -283,8 +286,13 @@ def read_predicted(
     where = []
     if route_id:
         where.append(f"route_id = '{route_id}'")
+    if direction_id is not None:
+        where.append(f"direction_id = {int(direction_id)}")
     if trip_date:
         where.append(f"trip_date = '{trip_date}'")
+    if scheduled_start:
+        prefix = scheduled_start[:5]  # take HH:MM regardless of input length
+        where.append(f"scheduled_start LIKE '{prefix}%'")
 
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     query = f"SELECT * FROM {table_name}{clause}"

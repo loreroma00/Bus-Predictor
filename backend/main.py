@@ -552,6 +552,157 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         except Exception as e:
             logging.warning(f"Failed to record predictions: {e}")
 
+    def _get_current_weather_code() -> int:
+        """Best-effort: grab the weather code from any city hexagon."""
+        try:
+            if city is None:
+                return 0
+            for hexagon in city.hexagons.values():
+                w = getattr(hexagon, "weather", None)
+                if w is not None:
+                    return int(w.weather_code)
+        except Exception:
+            pass
+        return 0
+
+    def _reconstruct_from_ledger(
+        df,
+        topology,
+        route_id: str,
+        direction_id: int,
+        weather_code: int,
+        bus_type: int,
+    ) -> "PredictedTrip":
+        """Build a PredictedTrip response from cached ledger rows + topology."""
+        stops_map = topology.build_stops_map(route_id, direction_id)
+        stop_sequence = {}
+        for _, row in df.iterrows():
+            seq = int(row["stop_sequence"])
+            stop_info = stops_map.get(seq, {})
+            stop_sequence[seq] = StopPredictionWithInfo(
+                stop_sequence=seq,
+                stop_id=str(row.get("stop_id") or stop_info.get("stop_id", "")),
+                stop_name=stop_info.get("stop_name", ""),
+                stop_lat=stop_info.get("stop_lat", 0),
+                stop_lon=stop_info.get("stop_lon", 0),
+                predicted_arrival=str(row["predicted_arrival"]),
+                delay_seconds=float(row["predicted_delay_sec"]),
+                confidence_rating=None,
+            )
+        first = df.iloc[0]
+        # trip_date comes back from DB as a date object — reformat to DD-MM-YYYY
+        td = first["trip_date"]
+        if hasattr(td, "strftime"):
+            trip_date_str = td.strftime("%d-%m-%Y")
+        else:
+            trip_date_str = str(td)
+        return PredictedTrip(
+            route_id=str(first["route_id"]),
+            direction_id=int(first["direction_id"]),
+            trip_date=trip_date_str,
+            scheduled_start=str(first["scheduled_start"]),
+            weather_code=weather_code,
+            bus_type=bus_type,
+            stop_sequence=stop_sequence,
+        )
+
+    async def generate_daily_predictions(date_yyyymmdd: str):
+        """Pre-generate and cache predictions for every trip on the given date.
+
+        Runs entirely in the background — failures per trip are silently skipped.
+        date_yyyymmdd: 'YYYYMMDD' (matches the format used in Trip.dates).
+        """
+        if predictor is None or observatory is None:
+            return
+
+        from datetime import datetime as _dt
+        date_obj = _dt.strptime(date_yyyymmdd, "%Y%m%d").date()
+        start_date_fmt = date_obj.strftime("%d-%m-%Y")    # predictor format
+        trip_date_iso  = date_obj.strftime("%Y-%m-%d")    # SQL format
+
+        topology = observatory.get_topology()
+        weather_code = _get_current_weather_code()
+
+        # Lazy-init bus_type predictor
+        nonlocal bus_type_predictor
+        if bus_type_predictor is None:
+            try:
+                from application.services.bus_type_predictor import BusTypePredictor
+                bus_type_predictor = BusTypePredictor()
+            except Exception:
+                pass
+
+        # Pre-fetch already-cached trips so we can skip them
+        try:
+            cached_df = observatory.predicted.query(trip_date=start_date_fmt)
+            already_cached: set[tuple] = set()
+            if not cached_df.empty:
+                for _, row in cached_df.iterrows():
+                    key = (str(row["route_id"]), int(row["direction_id"]),
+                           str(row["scheduled_start"])[:5])
+                    already_cached.add(key)
+        except Exception:
+            already_cached = set()
+
+        # Collect unique (route_id, direction_id, HH:MM) for this date
+        seen: set[tuple] = set()
+        trips_to_run: list[tuple] = []
+        for trip in list(topology.trips.values()):
+            if date_yyyymmdd not in (trip.dates or []):
+                continue
+            if not trip.stop_times:
+                continue
+            arrival = trip.stop_times[0].get("arrival_time", "")
+            if not arrival:
+                continue
+            start_time = arrival[:5]       # "HH:MM"
+            route_id   = trip.route.id
+            direction_id = int(trip.direction_id or 0)
+            key = (route_id, direction_id, start_time)
+            if key in seen or key in already_cached:
+                continue
+            seen.add(key)
+            trips_to_run.append(key)
+
+        logging.info(
+            f"[pre-gen] {date_yyyymmdd}: {len(trips_to_run)} trips to predict "
+            f"({len(already_cached)} already cached)"
+        )
+
+        generated = errors = 0
+        for route_id, direction_id, start_time in trips_to_run:
+            try:
+                bt = 0
+                if bus_type_predictor is not None:
+                    try:
+                        bt = int(bus_type_predictor.predict(
+                            route_id=route_id,
+                            start_time=start_time,
+                            trip_date=date_obj,
+                        ) or 0)
+                    except Exception:
+                        pass
+
+                forecast = await asyncio.to_thread(
+                    predictor.get_trip_forecast,
+                    route_id, direction_id, start_date_fmt, start_time,
+                    weather_code, bt,
+                )
+                stops_map = topology.build_stops_map(route_id, direction_id)
+                _record_predictions(forecast, stops_map)
+                generated += 1
+            except Exception as e:
+                errors += 1
+                logging.debug(
+                    f"[pre-gen] skip {route_id}/{direction_id}/{start_time}: {e}"
+                )
+
+            # Yield every 20 trips so we don't starve the event loop
+            if (generated + errors) % 20 == 0:
+                await asyncio.sleep(0)
+
+        logging.info(f"[pre-gen] done: {generated} generated, {errors} skipped")
+
     def load_config_api() -> dict:
         config = configparser.ConfigParser()
         if CONFIG_PATH.exists():
@@ -657,11 +808,14 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
     async def periodic_ledger_check():
         from application.services.shared_state import check_for_updates
+        from datetime import datetime as _dt
 
         while True:
             await asyncio.sleep(3600)
             if check_for_updates():
                 print("Ledger updated with new GTFS data")
+                today = _dt.now().strftime("%Y%m%d")
+                asyncio.create_task(generate_daily_predictions(today))
 
     api_config = load_config_api()
 
@@ -729,6 +883,10 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
         print("\n[6/7] Starting background tasks...")
         asyncio.create_task(periodic_ledger_check())
+
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y%m%d")
+        asyncio.create_task(generate_daily_predictions(today))
 
         print("\n[7/7] Starting interactive console...")
         from interaction import console
@@ -1064,46 +1222,48 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
     @app.post("/predict", response_model=PredictedTrip)
     async def predict(request: PredictRequest):
-        """Predict bus delays with full stop information."""
+        """Predict bus delays with full stop information.
+
+        Returns a cached prediction from the ledger if one exists for this
+        exact trip, otherwise runs the model and caches the result.
+        """
         if predictor is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
 
         topology = observatory.get_topology()
 
+        # --- Ledger cache check ---
         try:
-            forecast: TripForecast = predictor.get_trip_forecast(
+            cached = observatory.predicted.query_trip(
                 route_id=request.route_id,
                 direction_id=request.direction_id,
-                start_date=request.start_date,
-                start_time=request.start_time,
-                weather_code=request.weather_code,
-                bus_type=request.bus_type,
+                trip_date=request.start_date,
+                scheduled_start=request.start_time,
+            )
+            if not cached.empty:
+                return _reconstruct_from_ledger(
+                    cached, topology,
+                    request.route_id, request.direction_id,
+                    request.weather_code, request.bus_type,
+                )
+        except Exception as e:
+            logging.debug(f"Ledger cache lookup failed (will predict fresh): {e}")
+
+        # --- Fresh prediction ---
+        try:
+            forecast: TripForecast = await asyncio.to_thread(
+                predictor.get_trip_forecast,
+                request.route_id, request.direction_id,
+                request.start_date, request.start_time,
+                request.weather_code, request.bus_type,
             )
 
-            stops_map = {}
-            for trip_id, trip in list(topology.trips.items()):
-                if (
-                    trip.route.id == request.route_id
-                    and trip.direction_id == request.direction_id
-                ):
-                    for st in trip.get_stop_times() or []:
-                        seq = int(st.get("stop_sequence", 0) or 0)
-                        if seq not in stops_map:
-                            stop_id = st.get("stop_id")
-                            stop_info = topology.stops.get(stop_id, {})
-                            stops_map[seq] = {
-                                "stop_id": stop_id or "",
-                                "stop_name": stop_info.get("stop_name", ""),
-                                "stop_lat": float(stop_info.get("stop_lat", 0) or 0),
-                                "stop_lon": float(stop_info.get("stop_lon", 0) or 0),
-                            }
-                    break
+            stops_map = topology.build_stops_map(request.route_id, request.direction_id)
 
             stop_sequence = {}
             for pred in forecast.stops:
                 seq = pred.stop_sequence
                 stop_info = stops_map.get(seq, {})
-
                 stop_sequence[seq] = StopPredictionWithInfo(
                     stop_sequence=seq,
                     stop_id=stop_info.get("stop_id", ""),

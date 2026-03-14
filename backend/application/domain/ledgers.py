@@ -242,8 +242,13 @@ class HistoricalLedger:
 
 
 # ============================================================
-#  Predicted Ledger  (parquet-backed, append-only)
+#  Predicted Ledger  (database-backed, append-only)
 # ============================================================
+
+def _dd_mm_yyyy_to_iso(date_str: str) -> str:
+    """Convert 'DD-MM-YYYY' → 'YYYY-MM-DD' for SQL DATE comparisons."""
+    from datetime import datetime
+    return datetime.strptime(date_str, "%d-%m-%Y").strftime("%Y-%m-%d")
 
 @dataclass
 class StopPredictionRecord:
@@ -294,13 +299,32 @@ class PredictedLedger:
     def query(
         self,
         route_id: str = None,
-        trip_date: str = None,
+        trip_date: str = None,       # "DD-MM-YYYY" — converted to ISO for SQL
     ) -> pd.DataFrame:
-        """Query predicted arrivals."""
+        """Query predicted arrivals for a route/date."""
         from persistence.ledger_db import read_predicted
+        trip_date_iso = _dd_mm_yyyy_to_iso(trip_date) if trip_date else None
         return read_predicted(
             self._conn_str, self._table,
-            route_id=route_id, trip_date=trip_date,
+            route_id=route_id, trip_date=trip_date_iso,
+        )
+
+    def query_trip(
+        self,
+        route_id: str,
+        direction_id: int,
+        trip_date: str,       # "DD-MM-YYYY"
+        scheduled_start: str, # "HH:MM"
+    ) -> pd.DataFrame:
+        """Return all stop predictions for one specific trip, or empty DataFrame."""
+        from persistence.ledger_db import read_predicted
+        trip_date_iso = _dd_mm_yyyy_to_iso(trip_date)
+        return read_predicted(
+            self._conn_str, self._table,
+            route_id=route_id,
+            direction_id=direction_id,
+            trip_date=trip_date_iso,
+            scheduled_start=scheduled_start,
         )
 
 
