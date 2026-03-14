@@ -40,4 +40,7 @@ uvicorn>=0.40.0
 torchdiffeq
 lightgbm
 matplotlib>=3.8.0
+dash>=4.0.0
+dash-leaflet>=1.1.0
+dash-bootstrap-components>=2.0.0
 

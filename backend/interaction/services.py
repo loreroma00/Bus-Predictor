@@ -147,14 +147,14 @@ def start_services(observatory=None, config: dict = None):
     else:
         logging.info(" > Traffic Thread NOT started (no API key).")
 
-    # Start Debug GUI if state interface is available
+    # Start Dashboard GUI if state interface is available
     if _state_interface is not None:
         if GUI_THREAD is None or not GUI_THREAD.is_alive():
             from . import debug_gui
 
             GUI_THREAD = debug_gui.start_gui(_state_interface, port=gui_port)
         else:
-            logging.info(" > Debug GUI already running.")
+            logging.info(" > Dashboard GUI already running.")
 
 
 def set_state_interface(state_interface):
@@ -292,10 +292,9 @@ def stop_services():
     # Unsubscribe
     domain_events.unsubscribe(DIARY_FINISHED, _on_diary_finished)
 
-    # Stop GUI
+    # Stop Dashboard GUI
     try:
         from . import debug_gui
-
         debug_gui.stop_gui()
     except Exception:
         pass

@@ -419,3 +419,169 @@ class StateInterface:
             "shapes_count": len(topology.shapes),
             "current_md5": self._observatory.current_md5,
         }
+
+    # ============================================================
+    # Map Data (for Dashboard GUI)
+    # ============================================================
+
+    def get_bus_positions(self, city_name: str) -> list[dict]:
+        """Get all active bus positions with GPS coordinates for map rendering."""
+        city = self._observatory.get_city(city_name)
+        if not city:
+            return []
+
+        positions = []
+        for bus_id, hex_id in city.bus_index.items():
+            hexagon = city.hexagons.get(hex_id)
+            if not hexagon:
+                continue
+            bus = hexagon.get_bus(bus_id)
+            if not bus or not bus.GPSData:
+                continue
+
+            trip = bus.trip
+            speed = bus.GPSData.speed or bus.derived_speed or 0.0
+
+            positions.append({
+                "id": bus.id,
+                "label": bus.label,
+                "lat": bus.GPSData.latitude,
+                "lon": bus.GPSData.longitude,
+                "route_id": trip.route.id if trip and trip.route else "?",
+                "direction": (trip.direction_name or "")[:25] if trip else "",
+                "speed": round(speed, 1),
+                "status": "ACTIVE",
+            })
+        return positions
+
+    def get_traffic_hexagons(self, city_name: str) -> list[dict]:
+        """Get hexagons with traffic data, including polygon boundaries for map overlay."""
+        import h3
+
+        city = self._observatory.get_city(city_name)
+        if not city:
+            return []
+
+        result = []
+        for hex_id, hexagon in city.hexagons.items():
+            speed_ratio = hexagon.get_speed_ratio()
+            if speed_ratio <= 0:
+                continue
+
+            boundary = h3.cell_to_boundary(hex_id)
+            boundary_coords = [[lat, lon] for lat, lon in boundary]
+
+            result.append({
+                "hex_id": hex_id,
+                "boundary": boundary_coords,
+                "speed_ratio": round(speed_ratio, 3),
+                "bus_count": len(hexagon.mobile_agents["buses"]),
+                "current_speed": round(hexagon.get_current_speed(), 1),
+            })
+        return result
+
+    def get_city_center(self, city_name: str) -> tuple[float, float]:
+        """Get the center coordinates for a city. Defaults to Rome."""
+        city = self._observatory.get_city(city_name)
+        if city:
+            bbox = city.get_bounding_box()
+            if bbox:
+                min_lat, min_lon, max_lat, max_lon = bbox
+                return ((min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
+        return (41.9028, 12.4964)
+
+    # ============================================================
+    # Ledger Info (for Dashboard GUI)
+    # ============================================================
+
+    def get_all_ledger_info(self) -> dict:
+        """Get combined info from all ledger types."""
+        obs = self._observatory
+
+        topology_info = {"loaded": False}
+        if obs.topology:
+            topology_info = {
+                "loaded": True,
+                "trips": len(obs.topology.trips),
+                "routes": len(obs.topology.routes),
+                "stops": len(obs.topology.stops),
+                "shapes": len(obs.topology.shapes),
+                "md5": obs.current_md5 or "N/A",
+            }
+
+        schedule_info = {"loaded": obs.schedule_ledger is not None}
+        if obs.schedule_ledger and obs.schedule_ledger.schedule:
+            schedule_info["routes_indexed"] = len(obs.schedule_ledger.schedule.index)
+
+        historical_info = {
+            "type": "database-backed",
+            "table": obs.historical._table if obs.historical else "N/A",
+        }
+
+        predicted_info = {
+            "type": "database-backed",
+            "table": obs.predicted._table if obs.predicted else "N/A",
+        }
+
+        vehicle_info = {
+            "type": "database-backed",
+            "table": obs.vehicle_ledger._table if obs.vehicle_ledger else "N/A",
+        }
+
+        return {
+            "topology": topology_info,
+            "schedule": schedule_info,
+            "historical": historical_info,
+            "predicted": predicted_info,
+            "vehicle": vehicle_info,
+        }
+
+    # ============================================================
+    # Model Info (for Dashboard GUI)
+    # ============================================================
+
+    def set_predictor_info(self, model_name: str):
+        """Store model name for GUI display."""
+        self._model_name = model_name
+
+    def get_model_info(self) -> dict:
+        """Get model loading status and info."""
+        model_name = getattr(self, "_model_name", None)
+        return {
+            "loaded": model_name is not None,
+            "model_name": model_name or "Not loaded",
+        }
+
+    # ============================================================
+    # Service Thread Status (for Dashboard GUI)
+    # ============================================================
+
+    def get_service_thread_status(self) -> dict:
+        """Get status of all background service threads."""
+        from . import services
+
+        threads = {
+            "Collection": services.COLLECTION_THREAD,
+            "Saving": services.SAVING_THREAD,
+            "Weather": services.WEATHER_THREAD,
+            "Traffic": services.TRAFFIC_THREAD,
+            "Geocoding": services.GEOCODING_THREAD,
+            "Uptime": services.UPTIME_THREAD,
+            "GUI": services.GUI_THREAD,
+        }
+
+        status = {}
+        for name, thread in threads.items():
+            if thread is not None and thread.is_alive():
+                status[name] = "running"
+            elif thread is not None:
+                status[name] = "stopped"
+            else:
+                status[name] = "not started"
+
+        # Add validation status
+        validation = services.get_validation_status()
+        status["Batch Validation"] = validation.get("batch", "idle")
+        status["Live Validation"] = validation.get("live", "idle")
+
+        return status
