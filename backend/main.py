@@ -879,6 +879,13 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                 sys.exit(1)
 
         print("\n[5/7] Starting data collection services...")
+        from interaction.state_interface import StateInterface
+        state_interface = StateInterface(observatory)
+        if predictor is not None:
+            state_interface.set_predictor_info(
+                getattr(predictor, "_model_name", time_model_name or "loaded")
+            )
+        ingestor_services.set_state_interface(state_interface)
         ingestor_services.start_services(observatory, collection_config)
 
         print("\n[6/7] Starting background tasks...")
