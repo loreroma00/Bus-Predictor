@@ -538,7 +538,7 @@ def start_gui(state: "StateInterface", port: int = 8050):
     app = create_app(state)
 
     def run_server():
-        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
