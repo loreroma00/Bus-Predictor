@@ -7,6 +7,7 @@ The GUI only depends on this interface, ensuring low coupling and respecting top
 
 import io
 import logging
+import threading
 import time
 from typing import Optional
 from application.domain import h3_utils
@@ -31,6 +32,11 @@ class StateInterface:
         self._last_feed_timestamp: float = 0.0
         self._command_registry: dict = {}
         self._last_command_output: str = ""
+        self._cached_predictions: list[dict] = []
+        self._cached_vehicle_trips: list[dict] = []
+        self._cache_lock = threading.Lock()
+        self._predictions_cache_time: float = 0.0
+        self._vehicle_trips_cache_time: float = 0.0
 
     # ============================================================
     # City & Hexagon Access
@@ -568,8 +574,13 @@ class StateInterface:
     def get_recent_predictions(self, limit: int = 30) -> list[dict]:
         """Fetch recent predictions from the PredictedLedger database.
 
-        Returns a list of dicts with prediction info, most recent first.
+        Returns cached results, refreshing from DB at most every 30 seconds
+        to avoid blocking the GUI thread.
         """
+        now = time.time()
+        if now - self._predictions_cache_time < 30:
+            return self._cached_predictions
+
         obs = self._observatory
         if not obs.predicted:
             return []
@@ -580,6 +591,8 @@ class StateInterface:
         try:
             df = obs.predicted.query(trip_date=today)
             if df.empty:
+                self._predictions_cache_time = now
+                self._cached_predictions = []
                 return []
 
             # Deduplicate by (route_id, direction_id, scheduled_start) — keep latest
@@ -609,12 +622,22 @@ class StateInterface:
                     break
 
             rows.sort(key=lambda r: r["route_id"])
+            self._cached_predictions = rows
+            self._predictions_cache_time = now
             return rows
         except Exception:
-            return []
+            self._predictions_cache_time = now
+            return self._cached_predictions
 
     def get_recent_vehicle_trips(self, limit: int = 20) -> list[dict]:
-        """Fetch recent vehicle trip records from the VehicleLedger database."""
+        """Fetch recent vehicle trip records from the VehicleLedger database.
+
+        Returns cached results, refreshing from DB at most every 30 seconds.
+        """
+        now = time.time()
+        if now - self._vehicle_trips_cache_time < 30:
+            return self._cached_vehicle_trips
+
         obs = self._observatory
         if not obs.vehicle_ledger:
             return []
@@ -625,6 +648,8 @@ class StateInterface:
         try:
             df = obs.vehicle_ledger.query(date_start=today)
             if df.empty:
+                self._vehicle_trips_cache_time = now
+                self._cached_vehicle_trips = []
                 return []
 
             df = df.sort_values("recorded_at", ascending=False).head(limit)
@@ -638,9 +663,12 @@ class StateInterface:
                     "measurements": int(row.get("measurement_count", 0)),
                     "vehicle_type": str(row.get("vehicle_type_name", "?")),
                 })
+            self._cached_vehicle_trips = rows
+            self._vehicle_trips_cache_time = now
             return rows
         except Exception:
-            return []
+            self._vehicle_trips_cache_time = now
+            return self._cached_vehicle_trips
 
     # ============================================================
     # Model Info (for Dashboard GUI)
@@ -672,28 +700,18 @@ class StateInterface:
 
     def get_available_commands(self) -> list[dict]:
         """Get list of available commands with their help text."""
+        # Commands known to need arguments (from their help text patterns)
+        _ARGS_COMMANDS = {
+            "print hex", "print diary", "fetch data", "print diaries vehicle",
+            "pause traffic service", "validate", "validate live",
+            "weather strategy", "fotoromanzo",
+        }
         commands = []
         for cmd_name, cmd_instance in self._command_registry.items():
-            # Determine if command needs arguments from help text
-            help_buf = io.StringIO()
-            handler = logging.StreamHandler(help_buf)
-            handler.setFormatter(logging.Formatter("%(message)s"))
-            logger = logging.getLogger()
-            logger.addHandler(handler)
-            try:
-                cmd_instance.help()
-            except Exception:
-                pass
-            logger.removeHandler(handler)
-            help_text = help_buf.getvalue().strip()
-
-            # Infer whether args needed from help text pattern "<...>"
-            needs_args = "<" in help_text and ">" in help_text
-
             commands.append({
                 "name": cmd_name,
-                "help": help_text,
-                "needs_args": needs_args,
+                "help": cmd_name,
+                "needs_args": cmd_name in _ARGS_COMMANDS,
             })
         return commands
 

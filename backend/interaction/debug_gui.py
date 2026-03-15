@@ -9,6 +9,7 @@ Single-page dark dashboard with:
 No application logic lives here. All data comes from StateInterface.
 """
 
+import logging
 import threading
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,8 @@ import dash
 from dash import html, dcc, dash_table, Input, Output, State, no_update
 import dash_leaflet as dl
 import dash_bootstrap_components as dbc
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .state_interface import StateInterface
@@ -177,6 +180,13 @@ def _register_callbacks(app):
         if not _state:
             return [], []
 
+        try:
+            return _build_map_layers()
+        except Exception as e:
+            _log.error(f"Map update error: {e}", exc_info=True)
+            return [], []
+
+    def _build_map_layers():
         # Hexagons with traffic data
         hex_children = []
         traffic_hexes = _state.get_traffic_hexagons("Rome")
@@ -235,16 +245,19 @@ def _register_callbacks(app):
         if not _state:
             return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
 
-        stats = _state.get_system_stats()
-        feed_ts = _state.get_feed_timestamp()
-        traffic = _state.get_traffic_stats("Rome")
+        try:
+            stats = _state.get_system_stats()
+            traffic = _state.get_traffic_stats("Rome")
 
-        return dbc.Row([
-            dbc.Col(_stat_card("Active", stats["active_buses"], _GREEN), width=3),
-            dbc.Col(_stat_card("Deposit", stats["deposit_buses"], _ORANGE), width=3),
-            dbc.Col(_stat_card("Observers", stats["observer_count"], _ACCENT_BLUE), width=3),
-            dbc.Col(_stat_card("Hexagons", traffic["with_traffic"], _ACCENT), width=3),
-        ], className="g-2")
+            return dbc.Row([
+                dbc.Col(_stat_card("Active", stats["active_buses"], _GREEN), width=3),
+                dbc.Col(_stat_card("Deposit", stats["deposit_buses"], _ORANGE), width=3),
+                dbc.Col(_stat_card("Observers", stats["observer_count"], _ACCENT_BLUE), width=3),
+                dbc.Col(_stat_card("Hexagons", traffic["with_traffic"], _ACCENT), width=3),
+            ], className="g-2")
+        except Exception as e:
+            _log.error(f"Stats update error: {e}", exc_info=True)
+            return html.Div(f"Error: {e}", style={"color": _RED})
 
     @app.callback(
         Output("tab-content", "children"),
@@ -264,14 +277,18 @@ def _register_callbacks(app):
                 return no_update
             return _render_commands_tab()
 
-        if active_tab == "tab-overview":
-            return _render_overview_tab()
-        elif active_tab == "tab-ledgers":
-            return _render_ledgers_tab()
-        elif active_tab == "tab-model":
-            return _render_model_tab()
-        elif active_tab == "tab-vehicles":
-            return _render_vehicles_tab()
+        try:
+            if active_tab == "tab-overview":
+                return _render_overview_tab()
+            elif active_tab == "tab-ledgers":
+                return _render_ledgers_tab()
+            elif active_tab == "tab-model":
+                return _render_model_tab()
+            elif active_tab == "tab-vehicles":
+                return _render_vehicles_tab()
+        except Exception as e:
+            _log.error(f"Tab render error ({active_tab}): {e}", exc_info=True)
+            return html.Div(f"Error loading tab: {e}", style={"color": _RED})
         return html.Div()
 
     @app.callback(
