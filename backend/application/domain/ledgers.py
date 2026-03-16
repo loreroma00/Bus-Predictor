@@ -174,18 +174,22 @@ StopArrival = MeasurementRecord
 
 
 class HistoricalLedger:
-    """Append-only record of per-measurement observations, backed by database."""
+    """Append-only record of per-measurement observations, backed by database.
+
+    Maintains an in-memory buffer keyed by trip_id for fast GUI access.
+    DB is used as persistent storage and as a bootstrap source on restart.
+    """
 
     def __init__(self, connection_string: str = None, table_name: str = None):
         from config import Ledger
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.HISTORICAL_TABLE
+        self._today_by_trip: Dict[str, list[dict]] = {}
 
     def record_measurements(self, records: list[MeasurementRecord]):
-        """Append a batch of measurement records to the database."""
+        """Append a batch of measurement records to the database and in-memory buffer."""
         if not records:
             return
-        from persistence.ledger_db import write_historical
         rows = [
             {
                 "trip_id": r.trip_id,
@@ -220,10 +224,27 @@ class HistoricalLedger:
             }
             for r in records
         ]
+
+        # In-memory buffer
+        for row in rows:
+            tid = row["trip_id"]
+            if tid not in self._today_by_trip:
+                self._today_by_trip[tid] = []
+            self._today_by_trip[tid].append(row)
+
+        from persistence.ledger_db import write_historical
         write_historical(self._conn_str, self._table, rows)
 
     # Keep old method as alias for backward compat
     record_arrivals = record_measurements
+
+    def get_trip_measurements(self, trip_id: str) -> list[dict]:
+        """Return in-memory measurements for a trip (for GUI detail popup)."""
+        return self._today_by_trip.get(trip_id, [])
+
+    def get_today_trip_count(self) -> int:
+        """Return count of trips recorded today (in memory)."""
+        return len(self._today_by_trip)
 
     def query(
         self,
@@ -232,7 +253,7 @@ class HistoricalLedger:
         date_start: float = None,
         date_end: float = None,
     ) -> pd.DataFrame:
-        """Query historical measurements.  Returns empty DataFrame if no data."""
+        """Query historical measurements from DB.  Returns empty DataFrame if no data."""
         from persistence.ledger_db import read_historical
         return read_historical(
             self._conn_str, self._table,
@@ -267,18 +288,30 @@ class StopPredictionRecord:
 
 
 class PredictedLedger:
-    """Append-only record of model predictions, backed by database."""
+    """Append-only record of model predictions, backed by database.
+
+    Maintains in-memory buffers for fast GUI access:
+    - _today_trips: one summary dict per trip (for table view)
+    - _today_stops: per-stop records keyed by trip key (for detail popup)
+    DB is used as persistent storage and as a bootstrap source on restart.
+    """
 
     def __init__(self, connection_string: str = None, table_name: str = None):
         from config import Ledger
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.PREDICTED_TABLE
+        # In-memory buffers
+        self._today_trips: list[dict] = []
+        self._today_stops: Dict[str, list[dict]] = {}  # key: "route_dir_start"
+        self._today_trip_keys: set = set()  # for dedup
+
+    def _trip_key(self, route_id, direction_id, scheduled_start):
+        return f"{route_id}_{direction_id}_{scheduled_start}"
 
     def record_predictions(self, predictions: list[StopPredictionRecord]):
-        """Append prediction records to the database."""
+        """Append prediction records to the database and in-memory buffers."""
         if not predictions:
             return
-        from persistence.ledger_db import write_predicted
         records = [
             {
                 "route_id": p.route_id,
@@ -294,14 +327,61 @@ class PredictedLedger:
             }
             for p in predictions
         ]
+
+        # Populate in-memory buffers
+        # Group by trip key to build summary + stops
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for rec in records:
+            key = self._trip_key(rec["route_id"], rec["direction_id"], rec["scheduled_start"])
+            grouped[key].append(rec)
+
+        for key, stop_records in grouped.items():
+            # Store per-stop data (overwrite if same trip predicted again)
+            self._today_stops[key] = sorted(stop_records, key=lambda r: r["stop_sequence"])
+
+            # Build/update trip summary
+            delays = [r["predicted_delay_sec"] for r in stop_records]
+            first = stop_records[0]
+            summary = {
+                "route_id": first["route_id"],
+                "direction_id": first["direction_id"],
+                "trip_date": first["trip_date"],
+                "scheduled_start": first["scheduled_start"],
+                "stop_count": len(stop_records),
+                "avg_delay": round(sum(delays) / len(delays), 1) if delays else 0,
+                "max_delay": round(max(delays), 1) if delays else 0,
+                "prediction_timestamp": first["prediction_timestamp"],
+            }
+
+            if key in self._today_trip_keys:
+                # Update existing summary
+                for i, t in enumerate(self._today_trips):
+                    if self._trip_key(t["route_id"], t["direction_id"], t["scheduled_start"]) == key:
+                        self._today_trips[i] = summary
+                        break
+            else:
+                self._today_trips.append(summary)
+                self._today_trip_keys.add(key)
+
+        from persistence.ledger_db import write_predicted
         write_predicted(self._conn_str, self._table, records)
+
+    def get_today_predictions(self) -> list[dict]:
+        """Return trip summaries from in-memory buffer (for GUI table)."""
+        return self._today_trips
+
+    def get_trip_stops(self, route_id: str, direction_id: int, scheduled_start: str) -> list[dict]:
+        """Return per-stop prediction records for a specific trip (for detail popup)."""
+        key = self._trip_key(route_id, direction_id, scheduled_start)
+        return self._today_stops.get(key, [])
 
     def query(
         self,
         route_id: str = None,
         trip_date: str = None,       # "DD-MM-YYYY" — converted to ISO for SQL
     ) -> pd.DataFrame:
-        """Query predicted arrivals for a route/date."""
+        """Query predicted arrivals for a route/date from DB."""
         from persistence.ledger_db import read_predicted
         trip_date_iso = _dd_mm_yyyy_to_iso(trip_date) if trip_date else None
         return read_predicted(
@@ -494,7 +574,11 @@ class VehicleTripRecord:
 
 
 class VehicleLedger:
-    """Append-only record of per-vehicle trip performance, backed by database."""
+    """Append-only record of per-vehicle trip performance, backed by database.
+
+    Maintains an in-memory buffer for fast GUI access.
+    DB is used as persistent storage and as a bootstrap source on restart.
+    """
 
     _FIELDS = [
         "vehicle_id", "trip_id", "route_id", "direction_id",
@@ -511,18 +595,24 @@ class VehicleLedger:
         from config import Ledger
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.VEHICLE_TABLE
+        self._today_records: list[dict] = []
 
     def record_trip(self, record: VehicleTripRecord):
         """Append a single vehicle trip record."""
         self.record_trips([record])
 
     def record_trips(self, records: list[VehicleTripRecord]):
-        """Append vehicle trip records to the database."""
+        """Append vehicle trip records to the database and in-memory buffer."""
         if not records:
             return
         from persistence.ledger_db import write_vehicle_trips
         rows = [{f: getattr(r, f) for f in self._FIELDS} for r in records]
+        self._today_records.extend(rows)
         write_vehicle_trips(self._conn_str, self._table, rows)
+
+    def get_today_vehicle_trips(self) -> list[dict]:
+        """Return all vehicle trip records from in-memory buffer (for GUI table)."""
+        return self._today_records
 
     def query(
         self,

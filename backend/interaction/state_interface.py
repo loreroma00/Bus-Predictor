@@ -7,7 +7,6 @@ The GUI only depends on this interface, ensuring low coupling and respecting top
 
 import io
 import logging
-import threading
 import time
 from typing import Optional
 from application.domain import h3_utils
@@ -32,11 +31,6 @@ class StateInterface:
         self._last_feed_timestamp: float = 0.0
         self._command_registry: dict = {}
         self._last_command_output: str = ""
-        self._cached_predictions: list[dict] = []
-        self._cached_vehicle_trips: list[dict] = []
-        self._cache_lock = threading.Lock()
-        self._predictions_cache_time: float = 0.0
-        self._vehicle_trips_cache_time: float = 0.0
 
     # ============================================================
     # City & Hexagon Access
@@ -571,104 +565,33 @@ class StateInterface:
             "vehicle": vehicle_info,
         }
 
-    def get_recent_predictions(self, limit: int = 30) -> list[dict]:
-        """Fetch recent predictions from the PredictedLedger database.
-
-        Returns cached results, refreshing from DB at most every 30 seconds
-        to avoid blocking the GUI thread.
-        """
-        now = time.time()
-        if now - self._predictions_cache_time < 30:
-            return self._cached_predictions
-
+    def get_recent_predictions(self) -> list[dict]:
+        """Return all predictions from in-memory buffer (no DB query)."""
         obs = self._observatory
         if not obs.predicted:
             return []
+        return obs.predicted.get_today_predictions()
 
-        from datetime import datetime
-        today = datetime.now().strftime("%d-%m-%Y")
-
-        try:
-            df = obs.predicted.query(trip_date=today)
-            if df.empty:
-                self._predictions_cache_time = now
-                self._cached_predictions = []
-                return []
-
-            # Deduplicate by (route_id, direction_id, scheduled_start) — keep latest
-            if "prediction_timestamp" in df.columns:
-                df = df.sort_values("prediction_timestamp", ascending=False)
-                df = df.drop_duplicates(
-                    subset=["route_id", "direction_id", "scheduled_start", "stop_sequence"],
-                    keep="first",
-                )
-
-            # Group by trip and return summaries
-            groups = df.groupby(["route_id", "direction_id", "scheduled_start"])
-            rows = []
-            for (route_id, direction_id, scheduled_start), group in groups:
-                avg_delay = group["predicted_delay_sec"].mean()
-                max_delay = group["predicted_delay_sec"].max()
-                stop_count = len(group)
-                rows.append({
-                    "route_id": str(route_id),
-                    "direction_id": int(direction_id),
-                    "scheduled_start": str(scheduled_start)[:5],
-                    "stops": stop_count,
-                    "avg_delay": f"{avg_delay:+.0f}s",
-                    "max_delay": f"{max_delay:+.0f}s",
-                })
-                if len(rows) >= limit:
-                    break
-
-            rows.sort(key=lambda r: r["route_id"])
-            self._cached_predictions = rows
-            self._predictions_cache_time = now
-            return rows
-        except Exception:
-            self._predictions_cache_time = now
-            return self._cached_predictions
-
-    def get_recent_vehicle_trips(self, limit: int = 20) -> list[dict]:
-        """Fetch recent vehicle trip records from the VehicleLedger database.
-
-        Returns cached results, refreshing from DB at most every 30 seconds.
-        """
-        now = time.time()
-        if now - self._vehicle_trips_cache_time < 30:
-            return self._cached_vehicle_trips
-
+    def get_recent_vehicle_trips(self) -> list[dict]:
+        """Return all vehicle trip records from in-memory buffer (no DB query)."""
         obs = self._observatory
         if not obs.vehicle_ledger:
             return []
+        return obs.vehicle_ledger.get_today_vehicle_trips()
 
-        from datetime import datetime
-        today = datetime.now().strftime("%Y-%m-%d")
+    def get_prediction_stops(self, route_id: str, direction_id: int, scheduled_start: str) -> list[dict]:
+        """Return per-stop prediction data for a specific trip (for detail popup)."""
+        obs = self._observatory
+        if not obs.predicted:
+            return []
+        return obs.predicted.get_trip_stops(route_id, direction_id, scheduled_start)
 
-        try:
-            df = obs.vehicle_ledger.query(date_start=today)
-            if df.empty:
-                self._vehicle_trips_cache_time = now
-                self._cached_vehicle_trips = []
-                return []
-
-            df = df.sort_values("recorded_at", ascending=False).head(limit)
-            rows = []
-            for _, row in df.iterrows():
-                rows.append({
-                    "vehicle_id": str(row.get("vehicle_id", "")),
-                    "route_id": str(row.get("route_id", "")),
-                    "scheduled_start": str(row.get("scheduled_start", ""))[:5],
-                    "mean_delay": f"{row.get('mean_delay_sec', 0):+.0f}s",
-                    "measurements": int(row.get("measurement_count", 0)),
-                    "vehicle_type": str(row.get("vehicle_type_name", "?")),
-                })
-            self._cached_vehicle_trips = rows
-            self._vehicle_trips_cache_time = now
-            return rows
-        except Exception:
-            self._vehicle_trips_cache_time = now
-            return self._cached_vehicle_trips
+    def get_trip_measurements(self, trip_id: str) -> list[dict]:
+        """Return per-measurement data for a specific trip (for detail popup)."""
+        obs = self._observatory
+        if not obs.historical:
+            return []
+        return obs.historical.get_trip_measurements(trip_id)
 
     # ============================================================
     # Model Info (for Dashboard GUI)
