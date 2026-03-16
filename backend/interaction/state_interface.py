@@ -565,6 +565,16 @@ class StateInterface:
             "vehicle": vehicle_info,
         }
 
+    def resolve_direction_name(self, route_id: str, direction_id: int) -> str:
+        """Resolve direction_id to its textual headsign from the topology."""
+        topology = self._observatory.topology
+        if not topology:
+            return str(direction_id)
+        for trip in topology.trips.values():
+            if trip.route.id == route_id and trip.direction_id == direction_id:
+                return trip.direction_name or f"Direction {direction_id}"
+        return str(direction_id)
+
     def get_recent_predictions(self) -> list[dict]:
         """Return all predictions from in-memory buffer (no DB query)."""
         obs = self._observatory

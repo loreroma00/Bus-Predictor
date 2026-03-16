@@ -171,8 +171,9 @@ def _build_layout():
                 "height": "calc(100vh - 56px)",
             }),
         ], style={"display": "flex"}),
-        # Hidden store for active tab
+        # Hidden stores
         dcc.Store(id="active-tab-store", data="tab-map"),
+        dcc.Store(id="ledger-subtab-store", data="subtab-predictions"),
         dcc.Interval(id="refresh-interval", interval=_REFRESH_MS, n_intervals=0),
         # Detail modals
         _build_prediction_modal(),
@@ -427,12 +428,13 @@ def _register_callbacks(app):
         direction_id = int(row.get("direction_id", 0))
         scheduled_start = row.get("scheduled_start", "")
 
+        direction_name = _state.resolve_direction_name(route_id, direction_id)
         stops = _state.get_prediction_stops(route_id, direction_id, scheduled_start)
         if not stops:
-            return True, f"Route {route_id} | Dir {direction_id} | {scheduled_start}", \
+            return True, f"Route {route_id} | {direction_name} | {scheduled_start}", \
                 html.Div("No stop-level data available.", style={"color": _TEXT_DIM})
 
-        title = f"Route {route_id} | Dir {direction_id} | {scheduled_start}"
+        title = f"Route {route_id} | {direction_name} | {scheduled_start}"
         table = dash_table.DataTable(
             columns=[
                 {"name": "Seq", "id": "stop_sequence"},
@@ -464,12 +466,13 @@ def _register_callbacks(app):
             return False, "", ""
         row = table_data[active_cell["row"]]
 
-        title = f"Vehicle {row.get('vehicle_id', '?')} | Route {row.get('route_id', '?')} | {row.get('scheduled_start', '')}"
+        direction_name = row.get("direction", row.get("direction_id", "?"))
+        title = f"Vehicle {row.get('vehicle_id', '?')} | Route {row.get('route_id', '?')} {direction_name} | {row.get('scheduled_start', '')}"
 
         detail_items = []
         display_fields = [
             ("Vehicle ID", "vehicle_id"), ("Trip ID", "trip_id"),
-            ("Route", "route_id"), ("Direction", "direction_id"),
+            ("Route", "route_id"), ("Direction", "direction"),
             ("Vehicle Type", "vehicle_type_name"),
             ("Trip Date", "trip_date"), ("Scheduled Start", "scheduled_start"),
             ("Duration (s)", "trip_duration_sec"),
@@ -491,23 +494,42 @@ def _register_callbacks(app):
 
         return True, title, html.Div(detail_items)
 
+    # Ledger subtabs
+    @app.callback(
+        Output("ledger-subtab-content", "children"),
+        Input("ledger-subtabs", "active_tab"),
+        Input("refresh-interval", "n_intervals"),
+    )
+    def render_ledger_subtab(active_subtab, _n):
+        if not _state:
+            return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
+        try:
+            if active_subtab == "subtab-predictions":
+                return _render_predictions_subtab()
+            elif active_subtab == "subtab-vehicle-trips":
+                return _render_vehicle_trips_subtab()
+        except Exception as e:
+            _log.error(f"Ledger subtab error ({active_subtab}): {e}", exc_info=True)
+            return html.Div(f"Error: {e}", style={"color": _RED})
+        return html.Div()
 
-# ============================================================
-# Tab Renderers
-# ============================================================
-
-
-def _render_map_tab():
-    """Map + active vehicles mini-table below."""
-    rows = _state.get_tracking_summary()
-    vehicle_table = html.Div()
-    if rows:
-        vehicle_table = html.Div([
-            html.H6("Active Vehicles", style={
-                "color": _ACCENT, "marginTop": "12px", "marginBottom": "8px",
-                "fontWeight": "bold",
-            }),
-            dash_table.DataTable(
+    # Map vehicles table with active-only filter
+    @app.callback(
+        Output("map-vehicles-table", "children"),
+        Input("active-only-switch", "value"),
+        Input("refresh-interval", "n_intervals"),
+    )
+    def update_map_vehicles(active_only, _n):
+        if not _state:
+            return html.Div()
+        try:
+            rows = _state.get_tracking_summary()
+            if active_only:
+                rows = [r for r in rows if r.get("status") == "ACTIVE"]
+            if not rows:
+                return html.Div("No vehicles to show.",
+                                style={"color": _TEXT_DIM, "padding": "12px"})
+            return dash_table.DataTable(
                 columns=[
                     {"name": "ID", "id": "bus_id"},
                     {"name": "Route", "id": "route_id"},
@@ -532,84 +554,129 @@ def _render_map_tab():
                         "color": _ORANGE, "fontWeight": "bold",
                     },
                 ],
-            ),
-        ])
+            )
+        except Exception as e:
+            _log.error(f"Map vehicles error: {e}", exc_info=True)
+            return html.Div(f"Error: {e}", style={"color": _RED})
 
+
+# ============================================================
+# Tab Renderers
+# ============================================================
+
+
+def _render_map_tab():
+    """Map + active vehicles mini-table below with active-only toggle."""
     return html.Div([
         _build_map_component(),
-        vehicle_table,
+        html.Div([
+            html.H6("Vehicles", style={
+                "color": _ACCENT, "marginTop": "12px", "marginBottom": "8px",
+                "fontWeight": "bold", "display": "inline-block",
+            }),
+            html.Div([
+                dbc.Switch(
+                    id="active-only-switch",
+                    label="Active only",
+                    value=True,
+                    style={"color": _TEXT_DIM, "fontSize": "0.8rem"},
+                ),
+            ], style={"display": "inline-block", "marginLeft": "16px", "verticalAlign": "middle"}),
+        ]),
+        html.Div(id="map-vehicles-table"),
     ])
 
 
 def _render_ledgers_tab():
-    """Full-width prediction + vehicle trip tables with all in-memory data."""
-    items = []
-
-    # Predictions table
+    """Ledger subtabs: Predictions / Vehicle Trips / Historical."""
     predictions = _state.get_recent_predictions()
-    items.append(html.H6(
-        f"Predictions ({len(predictions)} trips)",
-        style={"color": _ACCENT, "fontWeight": "bold", "marginBottom": "8px"},
-    ))
-
-    if predictions:
-        items.append(dash_table.DataTable(
-            id="predictions-table",
-            columns=[
-                {"name": "Route", "id": "route_id"},
-                {"name": "Dir", "id": "direction_id"},
-                {"name": "Date", "id": "trip_date"},
-                {"name": "Start", "id": "scheduled_start"},
-                {"name": "Stops", "id": "stop_count"},
-                {"name": "Avg Delay", "id": "avg_delay"},
-                {"name": "Max Delay", "id": "max_delay"},
-            ],
-            data=predictions,
-            page_size=50,
-            sort_action="native",
-            style_table={"overflowX": "auto", "marginBottom": "24px"},
-            style_header=_TABLE_STYLE_HEADER,
-            style_cell={**_TABLE_STYLE_CELL, "cursor": "pointer"},
-        ))
-    else:
-        items.append(html.Div(
-            "No predictions recorded yet.",
-            style={"color": _TEXT_DIM, "marginBottom": "24px", "padding": "12px"},
-        ))
-
-    # Vehicle trips table
     vehicle_trips = _state.get_recent_vehicle_trips()
-    items.append(html.H6(
-        f"Vehicle Trips ({len(vehicle_trips)} recorded)",
-        style={"color": _ACCENT, "fontWeight": "bold", "marginBottom": "8px"},
-    ))
 
-    if vehicle_trips:
-        items.append(dash_table.DataTable(
-            id="vehicle-trips-table",
-            columns=[
-                {"name": "Vehicle", "id": "vehicle_id"},
-                {"name": "Route", "id": "route_id"},
-                {"name": "Trip ID", "id": "trip_id"},
-                {"name": "Start", "id": "scheduled_start"},
-                {"name": "Mean Delay (s)", "id": "mean_delay_sec"},
-                {"name": "Measurements", "id": "measurement_count"},
-                {"name": "Type", "id": "vehicle_type_name"},
-            ],
-            data=vehicle_trips,
-            page_size=50,
-            sort_action="native",
-            style_table={"overflowX": "auto"},
-            style_header=_TABLE_STYLE_HEADER,
-            style_cell={**_TABLE_STYLE_CELL, "cursor": "pointer"},
-        ))
-    else:
-        items.append(html.Div(
+    return html.Div([
+        dbc.Tabs([
+            dbc.Tab(label=f"Predictions ({len(predictions)})", tab_id="subtab-predictions"),
+            dbc.Tab(label=f"Vehicle Trips ({len(vehicle_trips)})", tab_id="subtab-vehicle-trips"),
+        ], id="ledger-subtabs", active_tab="subtab-predictions",
+           style={"marginBottom": "12px"}),
+        html.Div(id="ledger-subtab-content"),
+    ])
+
+
+def _render_predictions_subtab():
+    """Full-width predictions table with direction names resolved."""
+    predictions = _state.get_recent_predictions()
+    if not predictions:
+        return html.Div(
+            "No predictions recorded yet.",
+            style={"color": _TEXT_DIM, "padding": "20px", "textAlign": "center"},
+        )
+
+    # Resolve direction_id → name for display
+    display_data = []
+    for p in predictions:
+        row = dict(p)
+        row["direction"] = _state.resolve_direction_name(
+            row.get("route_id", ""), int(row.get("direction_id", 0))
+        )
+        display_data.append(row)
+
+    return dash_table.DataTable(
+        id="predictions-table",
+        columns=[
+            {"name": "Route", "id": "route_id"},
+            {"name": "Direction", "id": "direction"},
+            {"name": "Date", "id": "trip_date"},
+            {"name": "Start", "id": "scheduled_start"},
+            {"name": "Stops", "id": "stop_count"},
+            {"name": "Avg Delay", "id": "avg_delay"},
+            {"name": "Max Delay", "id": "max_delay"},
+        ],
+        data=display_data,
+        page_size=50,
+        sort_action="native",
+        style_table={"overflowX": "auto"},
+        style_header=_TABLE_STYLE_HEADER,
+        style_cell={**_TABLE_STYLE_CELL, "cursor": "pointer"},
+    )
+
+
+def _render_vehicle_trips_subtab():
+    """Full-width vehicle trips table with direction names resolved."""
+    vehicle_trips = _state.get_recent_vehicle_trips()
+    if not vehicle_trips:
+        return html.Div(
             "No vehicle trips recorded yet.",
-            style={"color": _TEXT_DIM, "padding": "12px"},
-        ))
+            style={"color": _TEXT_DIM, "padding": "20px", "textAlign": "center"},
+        )
 
-    return html.Div(items)
+    # Resolve direction_id → name for display
+    display_data = []
+    for vt in vehicle_trips:
+        row = dict(vt)
+        row["direction"] = _state.resolve_direction_name(
+            row.get("route_id", ""), int(row.get("direction_id", 0))
+        )
+        display_data.append(row)
+
+    return dash_table.DataTable(
+        id="vehicle-trips-table",
+        columns=[
+            {"name": "Vehicle", "id": "vehicle_id"},
+            {"name": "Route", "id": "route_id"},
+            {"name": "Direction", "id": "direction"},
+            {"name": "Trip ID", "id": "trip_id"},
+            {"name": "Start", "id": "scheduled_start"},
+            {"name": "Mean Delay (s)", "id": "mean_delay_sec"},
+            {"name": "Measurements", "id": "measurement_count"},
+            {"name": "Type", "id": "vehicle_type_name"},
+        ],
+        data=display_data,
+        page_size=50,
+        sort_action="native",
+        style_table={"overflowX": "auto"},
+        style_header=_TABLE_STYLE_HEADER,
+        style_cell={**_TABLE_STYLE_CELL, "cursor": "pointer"},
+    )
 
 
 def _render_overview_tab():
