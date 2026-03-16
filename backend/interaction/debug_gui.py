@@ -356,11 +356,17 @@ def _register_callbacks(app):
         if not _state:
             return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
 
+        ctx = dash.callback_context
+        trigger = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+        is_interval = "refresh-interval" in trigger
+
+        # Map and Commands tabs have their own interval-driven callbacks,
+        # so skip re-rendering the whole tab on interval ticks (which would
+        # recreate the dl.Map component and reset zoom/pan).
+        if active_tab in ("tab-commands", "tab-map") and is_interval:
+            return no_update
+
         if active_tab == "tab-commands":
-            ctx = dash.callback_context
-            trigger = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-            if "refresh-interval" in trigger:
-                return no_update
             return _render_commands_tab()
 
         try:
