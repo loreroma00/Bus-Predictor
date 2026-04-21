@@ -7,6 +7,10 @@ __pycache__/
 *.pyo
 
 config.ini
+ARCHITECTURE.md
+CLAUDE_OLD.mv
+RESPONSABILITIES.md
+REPORT.md
 
 *.pkl
 *.zip
@@ -23,6 +27,5 @@ htmlcov/
 .tox/
 .nox/
 
-*.egg-info/
-dist/
-build/
+.py~
+Gemini_Generated_Image_*.png

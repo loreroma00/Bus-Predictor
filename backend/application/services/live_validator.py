@@ -410,8 +410,9 @@ class LiveValidationSession:
             vector_table = Prediction.VECTOR_TABLE
             label_table = Prediction.LABEL_TABLE
             conn_str = Prediction.VECTOR_DB_CONNECTION
-        except Exception:
+        except Exception as e:
             self.logger.warning("DB config not available: skipping DB fallback")
+            self.logger.exception(e)
             return 0
 
         resolved = 0
@@ -451,64 +452,11 @@ class LiveValidationSession:
                     resolved += 1
             finally:
                 await conn.close()
-        except Exception:
+        except Exception as e:
             self.logger.exception("DB fallback query failed")
+            self.logger.exception(e)
 
         return resolved
-
-    def _compute_validation_result_from_db_rows(self, trip_id: str, forecast, db_rows):
-        """Compute validation result from database rows."""
-        pred_by_stop_seq = {int(stop.stop_sequence): stop for stop in forecast.stops}
-
-        delay_squared_errors = []
-        occupancy_matches = []
-
-        for row in db_rows:
-            stop_seq = row["stop_sequence"]
-            if stop_seq is None:
-                continue
-
-            predicted_stop = pred_by_stop_seq.get(int(stop_seq))
-            if predicted_stop is None:
-                continue
-
-            actual_delay = row["schedule_adherence"]
-            # Filter out invalid/poisoned values from DB:
-            # -1000.0 = sentinel (no data), |delay| > 7200 = likely corrupted
-            if (
-                actual_delay is not None
-                and float(actual_delay) != -1000.0
-                and abs(float(actual_delay)) <= 7200
-            ):
-                err = float(predicted_stop.cumulative_delay_sec) - float(actual_delay)
-                delay_squared_errors.append(err * err)
-
-            actual_occupancy = row["occupancy_status"]
-            if actual_occupancy is not None:
-                actual_occupancy = int(actual_occupancy)
-                if 0 <= actual_occupancy <= 6:
-                    occupancy_matches.append(
-                        (int(predicted_stop.crowd_level), actual_occupancy)
-                    )
-
-        if delay_squared_errors:
-            mse = sum(delay_squared_errors) / len(delay_squared_errors)
-            rmse = mse**0.5
-        else:
-            mse = 0.0
-            rmse = 0.0
-
-        return TripValidationResult(
-            trip_id=trip_id,
-            route_id=forecast.route_id,
-            direction_id=forecast.direction_id,
-            scheduled_start=forecast.scheduled_start,
-            mse=mse,
-            rmse=rmse,
-            n_measurements=len(delay_squared_errors),
-            delay_errors=[e**0.5 for e in delay_squared_errors],
-            occupancy_matches=occupancy_matches,
-        )
 
     def _compute_validation_result_from_db_rows(self, trip_id: str, forecast, db_rows):
         """Compute validation result from database rows."""
@@ -730,12 +678,13 @@ class LiveValidationSession:
 
                 try:
                     forecasts = self.predictor.get_batch_forecast(chunk_requests)
-                except Exception:
+                except Exception as e:
                     self.logger.exception(
                         "Chunk prediction failed for range %d-%d",
                         chunk_start + 1,
                         chunk_end,
                     )
+                    self.logger.exception(e)
                     for failed_trip in chunk_trips:
                         trip_id = failed_trip["trip_id"]
                         self.failed_trip_ids.add(trip_id)
@@ -756,8 +705,9 @@ class LiveValidationSession:
 
             self.logger.info(f"Predicted {len(results)} trips successfully")
 
-        except Exception:
+        except Exception as e:
             self.logger.exception("Batch prediction failed for %d trips", len(trips))
+            self.logger.exception(e)
             if trips:
                 self.logger.error("First trip in failed batch: %s", trips[0])
 
@@ -1077,8 +1027,9 @@ class LiveValidationSession:
         for ws in self.websockets:
             try:
                 await ws.send_json(message)
-            except Exception:
+            except Exception as e:
                 disconnected.append(ws)
+                self.logger.exception(e)
 
         for ws in disconnected:
             self.remove_websocket(ws)

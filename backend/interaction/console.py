@@ -11,7 +11,6 @@ from application import domain
 from persistence import writeParquet
 from . import commands
 
-
 # ============================================================
 # Command Registry - instantiated commands with dependencies
 # ============================================================
@@ -44,7 +43,9 @@ def register_commands(observatory, predictor=None, bus_type_predictor=None):
         "weather strategy": commands.weather_strategy_cmd(observatory),
         "fotoromanzo": commands.fotoromanzo(observatory),
         # Validation commands (longer prefix first for correct matching)
-        "validate live": commands.validate_live(predictor, observatory, bus_type_predictor),
+        "validate_live": commands.validate_live(
+            predictor, observatory, bus_type_predictor
+        ),
         "validate": commands.validate_date(predictor, observatory),
         # Complex commands
         "normalize diaries": commands.normalize_diaries(
@@ -68,7 +69,8 @@ def run_console_loop():
 
             # Find matching command
             matched = False
-            for cmd_name, command_instance in _command_registry.items():
+            sorted_items = dict(sorted(_command_registry.keys()))
+            for cmd_name, command_instance in sorted_items.items():
                 if cmd.lower().startswith(cmd_name):
                     args = cmd[len(cmd_name) :].strip()
                     command_instance.execute(args)

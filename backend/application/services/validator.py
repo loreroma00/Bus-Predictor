@@ -10,7 +10,6 @@ This module validates ML model predictions by:
 6. Writing detailed logs and summary reports
 """
 
-import os
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
