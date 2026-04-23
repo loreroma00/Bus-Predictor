@@ -34,15 +34,6 @@ A glimpse of what the current delay model achieves on held-out data. Charts are 
 | **Mean trajectory** — predicted cumulative delay vs. ground truth along a trip | ![Mean trajectory](backend/results/fotoromanzo_medio_bus_model_mse_ODE.png) |
 | **Occupancy classifier** — confusion matrix on the 7-class crowd label | ![Confusion matrix](backend/results/confusion_matrix_bus_model_mse_ODE.png) |
 
-## Repository layout
-
-The repo is organised around two cooperating components:
-
-- **`backend/`** — the heart of the project. Hosts the real-time collector, the training pipeline, the FastAPI prediction server, the debug GUI, and all persistence logic.
-- **`frontend-thesis/`** — a CLI that talks to the backend for interactive predictions and retrospective or live validation against a given day.
-
-Additional top-level documents (`ARCHITECTURE.md`, `PERFORMANCE.md`, `REPORT.md`, `RESPONSABILITIES.md`) provide deeper context on specific facets of the system. They are being rewritten alongside the refactor and should be read as historical context until that work lands.
-
 ## Status & roadmap
 
 This is an active, single-author project. The current focus is a structural refactor aimed at clearer module boundaries, lighter coupling between the collector and the prediction path, and a cleaner separation between research and serving concerns. Once the dust settles, the priorities are:
