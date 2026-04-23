@@ -27,6 +27,7 @@ MIN_MEASUREMENTS = 7  # discard trips with fewer measurements than this
 
 @dataclass
 class TripValidationResult:
+    """Per-trip validation outcome: prediction error metrics and occupancy match stats."""
     trip_id: str
     route_id: str
     direction_id: int
@@ -41,6 +42,7 @@ class TripValidationResult:
 
 @dataclass
 class LiveValidationStatus:
+    """Snapshot of a LiveValidationSession: counts, error statistics, file paths, and timing."""
     session_id: str
     date: str
     status: str
@@ -82,6 +84,7 @@ class LiveValidationSession:
         observatory,
         bus_type_predictor=None,
     ):
+        """Set up session state (predictions, pending set, websockets) for ``target_date``."""
         self.session_id = session_id
         self.target_date = target_date
         self.predictor = predictor
@@ -289,6 +292,7 @@ class LiveValidationSession:
         date_yyyymmdd = target_dt.strftime("%Y%m%d")
 
         def _parse_start_minutes(start_hhmm: str) -> Optional[int]:
+            """Return minutes-since-midnight for an ``HH:MM`` string, or None if malformed."""
             if not start_hhmm or ":" not in start_hhmm:
                 return None
             try:

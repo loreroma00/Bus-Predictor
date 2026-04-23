@@ -19,6 +19,7 @@ class ConsoleEventBus(EventBus):
     """
 
     def __init__(self):
+        """Initialize with an empty event-name -> handlers map."""
         self._subscribers: Dict[str, List[Callable]] = {}
 
     def subscribe(self, event_name: str, handler: Callable):

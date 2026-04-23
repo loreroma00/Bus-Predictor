@@ -40,6 +40,7 @@ class Measurement:
         measurement_time: float = None,
         delay_genuine: int = 0,
     ):
+        """Initialize the instance."""
         self.id = id
         self.autobus_id = autobus_id
         self.next_stop = next_stop  # This is the next stop in the trip, by stop_id
@@ -72,6 +73,7 @@ class Measurement:
         self.traffic_data_pending = False
 
     def to_dict(self, trip_id):
+        """To dict."""
         from .time_utils import to_readable_time
 
         # Flatten GPS Data for Parquet
@@ -112,6 +114,7 @@ class Measurement:
         }
 
     def __repr__(self):
+        """Return a developer-friendly string representation."""
         from .time_utils import to_readable_time
 
         readable_meas = to_readable_time(self.measurement_time)
@@ -136,11 +139,14 @@ class Measurement:
         return f"\n{self.id} | {self.trip_id} | {self.next_stop} ({dist_str}) | {lat} | {lon} | {occ_str} | Taken at: {readable_meas} | Delay: {self.schedule_adherence:.1f}s | Type: {self.bus_type}"
 
     def __str__(self):
+        """Return a human-readable string representation."""
         return self.__repr__()
 
 
 class Diary:
+    """Diary."""
     def __init__(self, observer, trip_id, scheduled_start_time: str = None):
+        """Initialize the instance."""
         self.observer = observer
         self.trip_id = trip_id  # Store the specific Trip ID this diary belongs to
         self.scheduled_start_time = scheduled_start_time  # Format: "HH:MM:SS"
@@ -156,22 +162,28 @@ class Diary:
         self._actual_start_detected: bool = False
 
     def add_measurement(self, measurement):
+        """Add a measurement."""
         self.measurements.append(measurement)
         print(f"Added measurement to diary: {measurement}")
 
     def get_measurement(self, index):
+        """Return the measurement."""
         return self.measurements[index]
 
     def get_last_measurement(self):
+        """Return the last measurement."""
         return self.measurements[-1] if self.measurements else None
 
     def get_observer(self):
+        """Return the observer."""
         return self.observer
 
     def set_observer(self, observer):
+        """Set the observer."""
         self.observer = observer
 
     def get_measurements_amount(self):
+        """Return the measurements amount."""
         return len(self.measurements)
 
     def get_pending_traffic_measurements(self) -> list:
@@ -180,9 +192,11 @@ class Diary:
 
     def to_dict_list(self):
         # Exports measurements using the stored Trip Context
+        """To dict list."""
         return [m.to_dict(self.trip_id) for m in self.measurements]
 
     def __str__(self):
+        """Return a human-readable string representation."""
         if not self.measurements:
             return f"Diary for Trip {self.trip_id} (Empty)"
 
@@ -264,12 +278,14 @@ class Observer:
     def __init__(
         self, observatory: "Observatory", assignedVehicle: "Autobus", diary: Diary
     ):
+        """Initialize the instance."""
         self.assignedVehicle: "Autobus" = assignedVehicle
         self.observatory: "Observatory" = observatory
         self.current_diary: Diary = diary
         self.diary_history: list[Diary] = []
 
     def archive_current_diary(self):
+        """Archive current diary."""
         if self.current_diary:
             self.current_diary.is_finished = True
             self.diary_history.append(self.current_diary)
@@ -303,6 +319,7 @@ class Observer:
             self.current_diary = None
 
     def start_new_trip(self, new_trip, scheduled_start_time: str = None):
+        """Start the new trip."""
         if self.current_diary:
             self.archive_current_diary()
         self.current_diary = Diary(self, new_trip.id, scheduled_start_time)
@@ -328,6 +345,7 @@ class Observer:
         schedule_adherence: float = 0.0,
         delay_genuine: int = 0,
     ):
+        """Record measurement."""
         diary = self.current_diary
 
         # === Actual Departure Detection ===
@@ -417,9 +435,11 @@ class Observer:
         )
 
     def get_bus(self):
+        """Return the bus."""
         return self.assignedVehicle
 
     def set_bus(self, assignedVehicle: "Autobus"):
+        """Set the bus."""
         self.assignedVehicle = assignedVehicle
 
     def updateDiary(
@@ -430,6 +450,7 @@ class Observer:
         current_speed: float = None,
         traffic_data_pending: bool = False,
     ):
+        """Updatediary."""
         if not self.current_diary:
             return
 

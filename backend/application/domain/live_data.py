@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 
 class GPSData:
+    """Gpsdata."""
     def __init__(
         self,
         id: int,
@@ -25,6 +26,7 @@ class GPSData:
         current_stop_sequence=None,
         current_status=None,
     ):
+        """Initialize the instance."""
         self.id = id
         self.trip = trip
         self.timestamp = timestamp  # Timestamp of the GPS data
@@ -39,12 +41,15 @@ class GPSData:
         self.current_status = current_status  # 1 = STOPPED_AT, 2 = IN_TRANSIT_TO
 
     def get_longitude(self):
+        """Return the longitude."""
         return self.longitude
 
     def get_latitude(self):
+        """Return the latitude."""
         return self.latitude
 
     def log_data(self):
+        """Log data."""
         logging.info("GPS Data ID: " + str(self.id))
         logging.info("Trip ID: " + str(self.trip.id))
         logging.info("Timestamp: " + to_readable_time(self.timestamp))
@@ -55,8 +60,10 @@ class GPSData:
 
 
 class Update:  # A combination of vehicleUpdate and tripUpdate to have all update info in one object
+    """Update."""
     def __init__(self, autobus: "Autobus", next_stops):
         # State Initialization
+        """Initialize the instance."""
         self.autobus: "Autobus" = autobus
         
         # Index real-time updates by stop_sequence for fast lookup
@@ -74,6 +81,7 @@ class Update:  # A combination of vehicleUpdate and tripUpdate to have all updat
         self.upcoming_stops = self._calculate_upcoming_stops()
 
     def _calculate_upcoming_stops(self):
+        """Calculate upcoming stops."""
         if not self.has_stop_data:
             return []
 
@@ -90,6 +98,7 @@ class Update:  # A combination of vehicleUpdate and tripUpdate to have all updat
         return formatted_stops
 
     def get_next_stop(self):
+        """Return the next stop."""
         if self.upcoming_stops:
             return self.upcoming_stops[0]
         return None
@@ -102,6 +111,7 @@ class Update:  # A combination of vehicleUpdate and tripUpdate to have all updat
 
     def _format_stop_info(self, st):
         # Normalize time (GTFS can be > 24h, e.g. 25:00:00)
+        """Format stop info."""
         time_str = st["arrival_time"]
         stop_name = st.get("stop_name", "Unknown Stop")
         seq = int(st["stop_sequence"])
@@ -128,20 +138,24 @@ class Update:  # A combination of vehicleUpdate and tripUpdate to have all updat
         }
 
     def find_stop_distance(self, stop_id):
+        """Find stop distance."""
         stop_dist = self.autobus.trip.stop_times[stop_id]["shape_dist_traveled"]
         return stop_dist
 
     def get_autobus(self):
+        """Return the autobus."""
         return self.autobus
 
     def log_data(self):
         # Update ID removed from object
+        """Log data."""
         logging.info("Autobus: " + str(self.autobus.label))
         logging.info("Route: " + str(self.autobus.trip.route.id))
         logging.info("Trip ID: " + str(self.autobus.trip.id))
         self.autobus.GPSData.log_data()
 
     def __str__(self):
+        """Return a human-readable string representation."""
         output = "BUS INFO:\n"
         output += f"Vehicle: {self.autobus.label}\n"
 
@@ -165,6 +179,7 @@ class Update:  # A combination of vehicleUpdate and tripUpdate to have all updat
 
 
 class Autobus:
+    """Autobus."""
     def __init__(
         self,
         id: int,
@@ -178,6 +193,7 @@ class Autobus:
         vehicle_type=None,
         label: str = None,
     ):
+        """Initialize the instance."""
         self.id = id  # Vehicle ID
         self.label = label if label else str(id)
         self.old_GPSData = old_GPSData
@@ -196,21 +212,27 @@ class Autobus:
         self.is_in_preferential: bool = False
 
     def get_label(self) -> str:
+        """Return the label."""
         return self.label
 
     def set_vehicle_type(self, vehicle_type):
+        """Set the vehicle type."""
         self.vehicle_type = vehicle_type
 
     def get_vehicle_type(self):
+        """Return the vehicle type."""
         return self.vehicle_type
 
     def set_latest_update(self, update: "Update"):
+        """Set the latest update."""
         self.latest_update = update
 
     def get_latest_update(self) -> "Update":
+        """Return the latest update."""
         return self.latest_update
 
     def set_observer(self, observer: "Observer"):
+        """Set the observer."""
         self.observer = observer
 
     def get_crowding_level(self) -> str:
@@ -230,41 +252,53 @@ class Autobus:
         return mapping.get(self.occupancy_status, "UNKNOWN")
 
     def get_observer(self) -> "Observer":
+        """Return the observer."""
         return self.observer
 
     def set_gpsData(self, GPSData: "GPSData"):
+        """Set the gpsdata."""
         self.old_GPSData = self.GPSData
         self.GPSData = GPSData
         self.last_seen_timestamp = time.time()
 
     def get_gpsData(self) -> "GPSData":
+        """Return the gpsdata."""
         return self.GPSData
 
     def set_location_name(self, location_name: str):
+        """Set the location name."""
         self.location_name = location_name
 
     def get_location_name(self) -> str:
+        """Return the location name."""
         return self.location_name
 
     def get_hexagon_id(self) -> str:
+        """Return the hexagon id."""
         return self.hexagon_id
 
     def set_hexagon_id(self, hexagon_id: str):
+        """Set the hexagon id."""
         self.hexagon_id = hexagon_id
 
     def set_trip(self, trip: "Trip"):
+        """Set the trip."""
         self.trip = trip
 
     def get_trip(self) -> "Trip":
+        """Return the trip."""
         return self.trip
 
     def get_id(self) -> int:
+        """Return the id."""
         return self.id
 
     def set_occupancy_status(self, occupancy_status: int):
+        """Set the occupancy status."""
         self.occupancy_status = occupancy_status
 
     def derive_speed(self) -> float:
+        """Derive speed."""
         if self.GPSData is None or self.old_GPSData is None:
             self.derived_speed = 0
             return self.derived_speed
@@ -284,6 +318,7 @@ class Autobus:
         return self.GPSData.speed
 
     def derive_bearing(self) -> float:
+        """Derive bearing."""
         if self.GPSData is None or self.old_GPSData is None:
             return self.derived_bearing if self.derived_bearing else 0
 
@@ -299,26 +334,34 @@ class Autobus:
         return self.derived_bearing
 
     def set_is_in_preferential(self, is_in_preferential: bool):
+        """Set the is in preferential."""
         self.is_in_preferential = is_in_preferential
 
     def get_is_in_preferential(self) -> bool:
+        """Return the is in preferential."""
         return self.is_in_preferential
 
     def get_bearing(self) -> float:
+        """Return the bearing."""
         return self.derived_bearing
 
     def get_speed(self) -> float:
+        """Return the speed."""
         return self.derived_speed
 
 
 class Schedule:
+    """Schedule."""
     def __init__(self):
+        """Initialize the instance."""
         self.index = {}  # route -> direction -> date -> [Trip]
 
     def load(self, trips_map):
+        """Load."""
         self._build_index(trips_map)
 
     def _build_index(self, trips_map):
+        """Build the index."""
         count = 0
         for trip in trips_map.values():
             r_id = trip.route.id

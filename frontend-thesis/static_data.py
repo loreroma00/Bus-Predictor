@@ -22,6 +22,7 @@ class StaticDataFetcher:
     """Fetches and manages GTFS static data files."""
 
     def __init__(self, base_path: Optional[str] = None):
+        """Initialize the instance."""
         self.base_path = base_path or os.getcwd()
         self.zip_path = os.path.join(self.base_path, "rome_static_gtfs.zip")
 

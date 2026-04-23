@@ -82,12 +82,16 @@ class Observatory:
         return self.observed_cities.get(city_name)
 
     @overload
-    def add_bus_to_city(self, city_name: str, bus: Autobus, hex_id: str): ...
+    def add_bus_to_city(self, city_name: str, bus: Autobus, hex_id: str):
+        """Overload: place the bus at a pre-resolved H3 hex."""
+        ...
 
     @overload
     def add_bus_to_city(
         self, city_name: str, bus: Autobus, latitude: float, longitude: float
-    ): ...
+    ):
+        """Overload: place the bus via latitude/longitude (hex is computed)."""
+        ...
 
     def add_bus_to_city(
         self,
@@ -159,10 +163,14 @@ class Observatory:
     @overload
     def move_bus(
         self, city_name: str, bus: Autobus, latitude: float, longitude: float
-    ): ...
+    ):
+        """Overload: move the bus using new latitude/longitude (hex recomputed)."""
+        ...
 
     @overload
-    def move_bus(self, city_name: str, bus: Autobus, new_hex_id: str): ...
+    def move_bus(self, city_name: str, bus: Autobus, new_hex_id: str):
+        """Overload: move the bus to a pre-resolved H3 hex."""
+        ...
 
     def move_bus(
         self,
@@ -319,6 +327,7 @@ class Observatory:
         return self._observer_manager.get_all_current_diaries()
 
     def get_vehicle_diaries(self, vehicle_id: str):
+        """Return every diary (historical + current) tied to a specific vehicle."""
         return self._observer_manager.get_vehicle_diaries(vehicle_id)
 
     def get_id_by_label(self, label: str) -> str | None:
@@ -400,6 +409,7 @@ class Observatory:
         return served_count / expected_count
 
     def get_vehicle_type(self, v_id: str) -> VehicleType | None:
+        """Look up a VehicleType by ID, retrying with leading zeros stripped."""
         # 1. Strict lookup
         v_id_str = str(v_id)
         vt = self.fleet.get(v_id_str)
@@ -418,6 +428,7 @@ class Observatory:
         return None
 
     def update_fleet_count(self, v_id: str):
+        """Placeholder for dynamic fleet counting; currently unused."""
         # TODO: Implement dynamic fleet counting if needed
         pass
 

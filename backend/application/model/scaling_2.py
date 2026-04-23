@@ -1,3 +1,5 @@
+"""Final dataset scaling stage: hand-crafted physical scaling + route encoding, writes ``dataset_lstm_final.parquet``."""
+
 import os
 import json
 import pandas as pd
@@ -12,6 +14,7 @@ STOP_ROUTE_CONFIG = os.path.join(PARQUET_DIR, "stop_route_config.json")
 
 
 def scaling(input_parquet: str, output_parquet: str, encoder_path: str):
+    """Remove outlier trips, apply physical feature scaling, fit the route LabelEncoder, and save the final training parquet."""
     print("Reading Dataset...")
     df = pd.read_parquet(input_parquet)
 

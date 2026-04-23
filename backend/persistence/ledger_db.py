@@ -32,12 +32,14 @@ class LedgerDBWriter:
     """Batched async writer for a single ledger table."""
 
     def __init__(self, connection_string: str, table_name: str, batch_size: int = 50):
+        """Initialize the instance."""
         self._conn_str = connection_string
         self._table_name = table_name
         self._batch_size = batch_size
         self._pool: Optional[Any] = None
 
     async def _ensure_pool(self):
+        """Ensure pool."""
         if self._pool is not None:
             return self._pool
         if not ASYNCPG_AVAILABLE:
@@ -64,6 +66,7 @@ class LedgerDBWriter:
             logger.error(f"Ledger insert failed ({self._table_name}): {e}")
 
     async def close(self):
+        """Close."""
         if self._pool:
             await self._pool.close()
             self._pool = None
@@ -79,6 +82,7 @@ _writers: dict[str, LedgerDBWriter] = {}
 
 
 def _get_writer(connection_string: str, table_name: str) -> LedgerDBWriter:
+    """Get writer."""
     if table_name not in _writers:
         _writers[table_name] = LedgerDBWriter(connection_string, table_name)
     return _writers[table_name]

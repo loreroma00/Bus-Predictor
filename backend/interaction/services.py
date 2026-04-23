@@ -33,6 +33,7 @@ _state_interface = None
 
 
 def uptime_loop(stop_event):
+    """Log a heartbeat once per minute until ``stop_event`` is set."""
     logging.info(" > Uptime Logger Started.")
     while not stop_event.is_set():
         log_uptime()
@@ -172,6 +173,7 @@ def start_batch_validation(date_str, predictor, observatory):
         return
 
     def _run():
+        """Thread body: construct the Validator and run ``validate_date`` for ``date_str``."""
         from application.services.validator import Validator
         try:
             validator = Validator(predictor, observatory)
@@ -211,6 +213,7 @@ def start_live_validation(date_str, predictor, observatory, bus_type_predictor=N
     LIVE_VALIDATOR_SESSION = session
 
     def _run():
+        """Thread body: spin up a fresh asyncio loop and drive the LiveValidationSession."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:

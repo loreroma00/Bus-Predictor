@@ -1,3 +1,5 @@
+"""Fleet loader — parses the ATAC fleet CSV into VehicleType records keyed by bus ID."""
+
 import csv
 import logging
 import re
@@ -23,12 +25,14 @@ FUEL_MAPPING = {
 }
 
 def safe_int(val: str, default: int = 0) -> int:
+    """Parse ``val`` as int (via float), returning ``default`` on empty / malformed input."""
     try:
         return int(float(val)) if val else default
     except (ValueError, TypeError):
         return default
 
 def safe_float(val: str, default: float = 0.0) -> float:
+    """Parse ``val`` as float, returning ``default`` on empty / malformed input."""
     try:
         return float(val) if val else default
     except (ValueError, TypeError):
@@ -91,6 +95,7 @@ def parse_id_ranges(range_str: str) -> List[str]:
     return ids
 
 def get_enum_value(enum_class, value_str):
+    """Resolve ``value_str`` to a member of ``enum_class`` via mapping, name, or case-insensitive match."""
     if not value_str: return None
     
     # Check manual mapping first if it exists

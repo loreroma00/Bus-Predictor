@@ -14,6 +14,7 @@ class ObserverManager:
     """Manages the lifecycle of observers and provides diary search/retrieval."""
 
     def __init__(self):
+        """Initialize with an empty vehicle-id → Observer map."""
         self.observers = {}
 
     def create_observer(

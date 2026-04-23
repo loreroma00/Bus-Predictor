@@ -28,6 +28,7 @@ _feed_fetcher = None
 
 
 class VehicleTypeNotFoundException(Exception):
+    """Raised when a vehicle label cannot be matched to a known VehicleType."""
     pass
 
 

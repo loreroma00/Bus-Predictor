@@ -14,6 +14,7 @@ class TestDomainEventBus:
         received = []
 
         def handler(data):
+            """Handler."""
             received.append(data)
 
         bus.subscribe("test_event", handler)
@@ -28,6 +29,7 @@ class TestDomainEventBus:
         received = []
 
         def handler(data):
+            """Handler."""
             received.append(data)
 
         bus.subscribe("test_event", handler)
@@ -41,6 +43,7 @@ class TestDomainEventBus:
         bus = DomainEventBus()
 
         def handler(data):
+            """Handler."""
             pass
 
         # Not subscribed
@@ -57,9 +60,11 @@ class TestDomainEventBus:
         results = []
 
         def bad_handler(data):
+            """Bad handler."""
             raise ValueError("Boom")
 
         def good_handler(data):
+            """Good handler."""
             results.append("ok")
 
         bus.subscribe("test_event", bad_handler)

@@ -135,9 +135,11 @@ class BusDataset(Dataset):
         print("Dataset initialized successfully.")
 
     def __len__(self):
+        """Return the number of trips in the dataset."""
         return self.num_trips
 
     def __getitem__(self, idx):
+        """Return the x1/x2 cat+dense tensors, labels, length, and t_grid for one trip."""
         return (
             self.x1_cat[idx],
             self.x1_dense[idx],
@@ -151,6 +153,7 @@ class BusDataset(Dataset):
 
 
 def load_dataset(path: str, train_size: float):
+    """Build a BusDataset from ``path`` and split it into train/val DataLoaders."""
     full_dataset = BusDataset(path)
 
     train_size = int(train_size * len(full_dataset))

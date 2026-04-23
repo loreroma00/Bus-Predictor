@@ -15,6 +15,7 @@ class APIClient:
     """HTTP client for the prediction API."""
 
     def __init__(self, base_url: Optional[str] = None):
+        """Initialize the instance."""
         self.base_url = (base_url or API_URL).rstrip("/")
         self.ws_url = self.base_url.replace("https://", "wss://").replace(
             "http://", "ws://"
@@ -125,6 +126,7 @@ class LiveValidationClient:
     """WebSocket client for live validation updates."""
 
     def __init__(self, base_url: str):
+        """Initialize the instance."""
         self.ws_url = base_url.replace("https://", "wss://").replace("http://", "ws://")
         self.session_id: Optional[str] = None
         self._on_status: Optional[Callable] = None

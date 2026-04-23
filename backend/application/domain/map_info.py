@@ -1,3 +1,5 @@
+"""Geocoding services — sync and async Nominatim wrappers with per-hex street caching."""
+
 import logging
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
@@ -79,6 +81,7 @@ class SyncGeocodingService:
     """
 
     def __init__(self, city: "City"):
+        """Bind the service to the ``City`` whose hexagons cache the resolved streets."""
         self._city = city
 
     def enqueue(self, lat: float, lon: float, hex_id: str) -> None:
@@ -128,6 +131,7 @@ class AsyncGeocodingService:
     """
 
     def __init__(self, city: "City"):
+        """Bind the service to a ``City`` and initialise the async resolution queue."""
         self._city = city
         self._queue: queue.Queue[tuple[float, float, str]] = queue.Queue()
         self._pending: set[tuple[float, float]] = set()

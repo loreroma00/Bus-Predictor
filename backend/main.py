@@ -50,6 +50,7 @@ async def test_database_connection():
     config = load_config()
 
     def log_conn_details(uri):
+        """Log conn details."""
         try:
             p = urlparse(uri)
             logger.info(
@@ -59,6 +60,7 @@ async def test_database_connection():
             logger.info(f"   Target: [Could not parse connection string]")
 
     async def test_table_operations(db_conn, table_type, table_name):
+        """Test: table operations."""
         if not await db_conn.connect():
             logger.error(f"Failed to connect for {table_name}")
             return
@@ -304,6 +306,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
     PARQUET_DIR = PROJECT_ROOT / "parquets"
 
     class PredictRequest(BaseModel):
+        """Predictrequest."""
         route_id: str
         direction_id: int
         start_date: str
@@ -314,6 +317,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         @field_validator("start_date")
         @classmethod
         def validate_date(cls, v):
+            """Validate date."""
             try:
                 datetime.strptime(v, "%d-%m-%Y")
                 return v
@@ -323,6 +327,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         @field_validator("start_time")
         @classmethod
         def validate_time(cls, v):
+            """Validate time."""
             try:
                 datetime.strptime(v, "%H:%M")
                 return v
@@ -330,6 +335,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                 raise ValueError("start_time must be in HH:MM format")
 
     class StopPredictionResponse(BaseModel):
+        """Stoppredictionresponse."""
         stop_sequence: int
         distance_m: float
         cumulative_delay_sec: float
@@ -338,6 +344,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         crowd_level: int
 
     class PredictResponse(BaseModel):
+        """Predictresponse."""
         route_id: str
         direction_id: int
         trip_date: str
@@ -345,6 +352,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         stops: list[StopPredictionResponse]
 
     class StopPredictionWithInfo(BaseModel):
+        """Stoppredictionwithinfo."""
         stop_sequence: int
         stop_id: str
         stop_name: str
@@ -355,6 +363,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         confidence_rating: Optional[float] = None
 
     class PredictedTrip(BaseModel):
+        """Predictedtrip."""
         trip_id: str
         route_id: str
         direction_id: int
@@ -365,9 +374,11 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         stop_sequence: dict[int, StopPredictionWithInfo]
 
     class BatchPredictRequest(BaseModel):
+        """Batchpredictrequest."""
         trips: list[PredictRequest]
 
     class FailedTrip(BaseModel):
+        """Failedtrip."""
         index: int
         route_id: str
         direction_id: int
@@ -375,6 +386,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         error: str
 
     class BatchPredictResponse(BaseModel):
+        """Batchpredictresponse."""
         successful: list[PredictedTrip]
         failed: list[FailedTrip]
         total_requested: int
@@ -382,10 +394,12 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         total_failed: int
 
     class ModelInfo(BaseModel):
+        """Modelinfo."""
         filename: str
         path: str
 
     class WeatherResponse(BaseModel):
+        """Weatherresponse."""
         temperature: float
         apparent_temperature: float
         humidity: float
@@ -395,25 +409,31 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         description: str
 
     class RouteSummary(BaseModel):
+        """Routesummary."""
         route_id: str
 
     class RoutesResponse(BaseModel):
+        """Routesresponse."""
         routes: list[RouteSummary]
 
     class DirectionInfo(BaseModel):
+        """Directioninfo."""
         direction_id: int
         trip_headsign: str
 
     class DirectionsResponse(BaseModel):
+        """Directionsresponse."""
         route_id: str
         directions: list[DirectionInfo]
 
     class ShapePoint(BaseModel):
+        """Shapepoint."""
         lat: float
         lon: float
         dist: float
 
     class StopInfo(BaseModel):
+        """Stopinfo."""
         stop_id: str
         stop_name: str
         stop_lat: float
@@ -422,10 +442,12 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         shape_dist_traveled: Optional[float] = None
 
     class TripSchedule(BaseModel):
+        """Tripschedule."""
         trip_id: str
         start_time: str
 
     class RouteDirectionResponse(BaseModel):
+        """Routedirectionresponse."""
         route_id: str
         direction_id: int
         trip_headsign: str
@@ -434,11 +456,13 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         schedule: list[TripSchedule]
 
     class ValidateRequest(BaseModel):
+        """Validaterequest."""
         date: str
 
         @field_validator("date")
         @classmethod
         def validate_date(cls, v):
+            """Validate date."""
             try:
                 datetime.strptime(v, "%d-%m-%Y")
                 return v
@@ -446,6 +470,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                 raise ValueError("date must be in DD-MM-YYYY format")
 
     class TripValidationSummary(BaseModel):
+        """Tripvalidationsummary."""
         trip_id: str
         route_id: str
         direction_id: int
@@ -456,6 +481,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         error: Optional[str] = None
 
     class ValidateResponse(BaseModel):
+        """Validateresponse."""
         date: str
         total_scheduled_trips: int
         total_trips_with_ground_truth: int
@@ -474,11 +500,13 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         report_file: str
 
     class LiveValidateScheduleRequest(BaseModel):
+        """Livevalidateschedulerequest."""
         date: str
 
         @field_validator("date")
         @classmethod
         def validate_date(cls, v):
+            """Validate date."""
             try:
                 datetime.strptime(v, "%d-%m-%Y")
                 return v
@@ -486,6 +514,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
                 raise ValueError("date must be in DD-MM-YYYY format")
 
     class LiveValidateScheduleResponse(BaseModel):
+        """Livevalidatescheduleresponse."""
         session_id: str
         date: str
         total_scheduled: int
@@ -495,6 +524,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         stops_at: Optional[str] = None
 
     class LiveValidateStatusResponse(BaseModel):
+        """Livevalidatestatusresponse."""
         session_id: Optional[str] = None
         date: Optional[str] = None
         status: Optional[str] = None
@@ -704,6 +734,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         logging.info(f"[pre-gen] done: {generated} generated, {errors} skipped")
 
     def load_config_api() -> dict:
+        """Load the config api."""
         config = configparser.ConfigParser()
         if CONFIG_PATH.exists():
             config.read(CONFIG_PATH)
@@ -775,6 +806,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         )
 
     def interactive_model_selection():
+        """Interactive model selection."""
         nonlocal predictor
         print("\n" + "=" * 50)
         print("ATAC Bus Delay Prediction - Model Selection")
@@ -801,6 +833,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
         return load_model_by_exp_id(selected.filename)
 
     def generate_canonical_map():
+        """Generate canonical map."""
         if not (PARQUET_DIR / "stop_route_map.parquet").exists():
             print("Generating stop_route_map.parquet...")
             from application.preprocessing.canonical_shape_mapper import (
@@ -810,6 +843,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
             gen_main()
 
     async def periodic_ledger_check():
+        """Periodic ledger check."""
         from application.services.shared_state import check_for_updates
         from datetime import datetime as _dt
 
@@ -841,6 +875,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
     @app.on_event("startup")
     async def startup_event():
+        """Startup event."""
         nonlocal predictor, available_models, observatory, city
 
         print("\n" + "=" * 50)
@@ -918,6 +953,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
     @app.get("/models", response_model=list[ModelInfo])
     async def list_models():
+        """List models."""
         return available_models
 
     @app.get("/weather", response_model=WeatherResponse)
@@ -1488,6 +1524,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
     @app.get("/health")
     async def health():
+        """Health."""
         return {
             "status": "healthy",
             "model_loaded": predictor is not None,
@@ -1497,6 +1534,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
     @app.on_event("shutdown")
     async def shutdown_event():
+        """Shutdown event."""
         print("\nShutting down data collection services...")
         from interaction import services as ingestor_services
         from interaction.main import last_save
@@ -1518,6 +1556,7 @@ def run_serve(time_model_name: Optional[str], crowd_model_name: Optional[str], h
 
 
 def main():
+    """Main."""
     parser = argparse.ArgumentParser(
         description="ATAC Bus Delay Prediction Backend",
         formatter_class=argparse.RawDescriptionHelpFormatter,

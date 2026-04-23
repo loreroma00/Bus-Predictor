@@ -62,6 +62,7 @@ _TABLE_STYLE_CELL = {
 
 
 def _hex_color(speed_ratio: float) -> str:
+    """Hex color."""
     if speed_ratio > 0.7:
         return _GREEN
     if speed_ratio > 0.3:
@@ -70,6 +71,7 @@ def _hex_color(speed_ratio: float) -> str:
 
 
 def _format_timestamp(ts: float) -> str:
+    """Format timestamp."""
     if not ts:
         return "N/A"
     from datetime import datetime
@@ -82,6 +84,7 @@ def _format_timestamp(ts: float) -> str:
 
 
 def _build_header():
+    """Build the header."""
     return dbc.Navbar(
         dbc.Container([
             dbc.Row([
@@ -106,6 +109,7 @@ def _build_header():
 
 
 def _stat_card(title, value, color=_ACCENT):
+    """Stat card."""
     return dbc.Card(
         dbc.CardBody([
             html.P(title, style={
@@ -124,6 +128,7 @@ def _stat_card(title, value, color=_ACCENT):
 
 
 def _sidebar_button(label, icon, tab_id):
+    """Sidebar button."""
     return html.Div(
         html.Button(
             html.Div([
@@ -142,6 +147,7 @@ def _sidebar_button(label, icon, tab_id):
 
 
 def _build_sidebar():
+    """Build the sidebar."""
     return html.Div([
         _sidebar_button("Map", "\U0001f5fa", "tab-map"),
         _sidebar_button("Ledger", "\U0001f4ca", "tab-ledgers"),
@@ -157,6 +163,7 @@ def _build_sidebar():
 
 
 def _build_layout():
+    """Build the layout."""
     return html.Div([
         _build_header(),
         html.Div([
@@ -185,6 +192,7 @@ def _build_layout():
 
 
 def _build_prediction_modal():
+    """Build the prediction modal."""
     return dbc.Modal([
         dbc.ModalHeader(
             dbc.ModalTitle(id="pred-modal-title"),
@@ -201,6 +209,7 @@ def _build_prediction_modal():
 
 
 def _build_vehicle_modal():
+    """Build the vehicle modal."""
     return dbc.Modal([
         dbc.ModalHeader(
             dbc.ModalTitle(id="veh-modal-title"),
@@ -221,6 +230,7 @@ def _build_vehicle_modal():
 # ============================================================
 
 def _build_map_component():
+    """Build the map component."""
     return html.Div([
         dl.Map([
             dl.TileLayer(
@@ -245,6 +255,7 @@ def _build_map_component():
 def _register_callbacks(app):
 
     # Sidebar tab switching
+    """Register callbacks."""
     @app.callback(
         Output("active-tab-store", "data"),
         Input({"type": "sidebar-btn", "tab": dash.ALL}, "n_clicks"),
@@ -252,6 +263,7 @@ def _register_callbacks(app):
         prevent_initial_call=True,
     )
     def switch_tab(n_clicks_list, current_tab):
+        """Switch tab."""
         ctx = dash.callback_context
         if not ctx.triggered:
             return no_update
@@ -270,6 +282,7 @@ def _register_callbacks(app):
         Input("active-tab-store", "data"),
     )
     def update_map(_n, active_tab):
+        """Update the map."""
         if not _state or active_tab != "tab-map":
             return no_update, no_update
         try:
@@ -279,6 +292,7 @@ def _register_callbacks(app):
             return [], []
 
     def _build_map_layers():
+        """Build the map layers."""
         hex_children = []
         traffic_hexes = _state.get_traffic_hexagons("Rome")
         for h in traffic_hexes:
@@ -331,6 +345,7 @@ def _register_callbacks(app):
         Input("refresh-interval", "n_intervals"),
     )
     def update_stats(_n):
+        """Update the stats."""
         if not _state:
             return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
         try:
@@ -353,6 +368,7 @@ def _register_callbacks(app):
         Input("refresh-interval", "n_intervals"),
     )
     def render_tab(active_tab, _n):
+        """Render tab."""
         if not _state:
             return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
 
@@ -391,6 +407,7 @@ def _register_callbacks(app):
         prevent_initial_call=True,
     )
     def execute_command(n_clicks_list, args_list):
+        """Execute command."""
         if not _state:
             return no_update
         ctx = dash.callback_context
@@ -427,6 +444,7 @@ def _register_callbacks(app):
         prevent_initial_call=True,
     )
     def show_prediction_detail(active_cell, table_data):
+        """Show prediction detail."""
         if not active_cell or not _state:
             return False, "", ""
         row = table_data[active_cell["row"]]
@@ -468,6 +486,7 @@ def _register_callbacks(app):
         prevent_initial_call=True,
     )
     def show_vehicle_detail(active_cell, table_data):
+        """Show vehicle detail."""
         if not active_cell or not _state:
             return False, "", ""
         row = table_data[active_cell["row"]]
@@ -507,6 +526,7 @@ def _register_callbacks(app):
         Input("refresh-interval", "n_intervals"),
     )
     def render_ledger_subtab(active_subtab, _n):
+        """Render ledger subtab."""
         if not _state:
             return html.Div("Waiting for data...", style={"color": _TEXT_DIM})
         try:
@@ -526,6 +546,7 @@ def _register_callbacks(app):
         Input("refresh-interval", "n_intervals"),
     )
     def update_map_vehicles(active_only, _n):
+        """Update the map vehicles."""
         if not _state:
             return html.Div()
         try:
@@ -890,6 +911,7 @@ def _render_commands_tab():
 
 
 def _ledger_card(title, rows, color=_ACCENT):
+    """Ledger card."""
     row_elements = []
     for label, value in rows:
         row_elements.append(html.Div([
@@ -915,6 +937,7 @@ def _ledger_card(title, rows, color=_ACCENT):
 
 
 def create_app(state: "StateInterface") -> dash.Dash:
+    """Create a app."""
     global _state
     _state = state
 
@@ -930,9 +953,11 @@ def create_app(state: "StateInterface") -> dash.Dash:
 
 
 def start_gui(state: "StateInterface", port: int = 8050):
+    """Start the gui."""
     app = create_app(state)
 
     def run_server():
+        """Run the server."""
         app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
     thread = threading.Thread(target=run_server, daemon=True)
@@ -942,4 +967,5 @@ def start_gui(state: "StateInterface", port: int = 8050):
 
 
 def stop_gui():
+    """Stop the gui."""
     pass

@@ -8,6 +8,7 @@ class TestPreferentialUpdate:
 
     def test_preferential_update_on_add_and_move(self):
         # 1. Setup City and Hexagon with preferential lane
+        """Test: preferential update on add and move."""
         city = City("TestCity")
         hex_id = "892d3fbe257ffff"
         hexagon = Hexagon(hex_id)

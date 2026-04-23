@@ -50,6 +50,7 @@ class BasicTripVerification(TripVerificationStrategy):
         self.min_shape_coverage = min_shape_coverage
 
     def is_trip_valid(self, diary: "Diary", shape: "Shape" = None) -> bool:
+        """Return True if the diary meets the minimum-measurement and coverage thresholds."""
         # No measurements = invalid
         if not diary.measurements:
             return False
@@ -118,6 +119,7 @@ class ScaledMeasurementVerification(TripVerificationStrategy):
     def is_trip_valid(
         self, diary: "Diary", shape: "Shape" = None, stop_count: int = None
     ) -> bool:
+        """Return True if the diary meets a dynamic minimum scaled by ``stop_count``."""
         if not diary.measurements:
             return False
 

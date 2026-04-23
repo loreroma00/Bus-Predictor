@@ -67,6 +67,7 @@ class TestEventDrivenServices:
         shutdown_called = []
 
         def mock_shutdown(data):
+            """Mock shutdown."""
             shutdown_called.append(True)
 
         bus.subscribe("shutdown_requested", mock_shutdown)

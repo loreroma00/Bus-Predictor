@@ -169,6 +169,7 @@ def run_scaling():
 
 
 def main():
+    """Main."""
     parser = argparse.ArgumentParser(
         description="Prepare dataset for ML training",
         formatter_class=argparse.RawDescriptionHelpFormatter,

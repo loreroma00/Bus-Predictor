@@ -1,3 +1,5 @@
+"""Vectorizers turning Measurements into feature+label pairs for prediction, traffic, and vehicle datasets."""
+
 import uuid
 import logging
 from datetime import datetime
@@ -18,16 +20,19 @@ if TYPE_CHECKING:
 
 
 class DayType:
+    """Integer enum for day-of-week classes: weekday / Saturday / Sunday."""
     WEEKDAY = 0
     SATURDAY = 1
     SUNDAY = 2
 
 
 class BusType:
+    """Placeholder for bus-type enumeration (populated downstream)."""
     pass
 
 
 class PredictionLabel(LabelVector):
+    """Label for a prediction vector: observed time and occupancy at a stop."""
     def __init__(
         self,
         id: int,
@@ -35,6 +40,7 @@ class PredictionLabel(LabelVector):
         time_seconds: int,
         occupancy_status: int,
     ):
+        """Store the raw target fields unmodified."""
         self.id = id
         self.time = time
         self.time_seconds = time_seconds
@@ -42,6 +48,7 @@ class PredictionLabel(LabelVector):
 
 
 class PredictionVector(Vector):
+    """Feature vector for the delay/occupancy model: trip, route, stop, and traffic context."""
     def __init__(
         self,
         id: int,
@@ -81,6 +88,7 @@ class PredictionVector(Vector):
         starting_time_sin: float = 0.0,
         delay_genuine: int = 0,
     ):
+        """Store all feature fields and derive rush-hour flag + time_sin/cos encoding."""
         self.id = id
         self.time = time
         self.trip_id = trip_id
@@ -139,6 +147,7 @@ class PredictionVector(Vector):
         self.served_ratio = served_ratio
 
     def _is_rush_hour(self, time: float) -> int:
+        """Return 1 during 07:00–09:59, 17:00–18:59, or 19:00–19:30 local time; else 0."""
         _, _, time_str = get_timestamp_components(time)
         time_obj = datetime.strptime(time_str, "%H:%M:%S")
         match time_obj.hour:
@@ -155,6 +164,7 @@ class PredictionVector(Vector):
 
 
 class PredictionVectorizer(Vectorizer):
+    """Builds a (PredictionVector, PredictionLabel) pair from a Measurement and its route/shape/trip context."""
     def __init__(
         self,
         measurement: "Measurement",
@@ -163,6 +173,7 @@ class PredictionVectorizer(Vectorizer):
         trip: "Trip",
         served_ratio: float,
     ):
+        """Bind the source measurement, the related route/shape/trip, and the served-route ratio."""
         self.measurement = measurement
         self.route = route
         self.shape = shape
@@ -301,6 +312,7 @@ class PredictionVectorizer(Vectorizer):
 
 
 class TrafficLabel(LabelVector):
+    """Label for a traffic vector: observed speed ratio and absolute speed."""
     def __init__(
         self,
         id: str,
@@ -308,6 +320,7 @@ class TrafficLabel(LabelVector):
         speed_ratio: float,
         current_traffic_speed: float,
     ):
+        """Store the observed traffic targets unmodified."""
         self.id = id
         self.time = time
         self.speed_ratio = speed_ratio
@@ -315,6 +328,7 @@ class TrafficLabel(LabelVector):
 
 
 class TrafficVector(Vector):
+    """Feature vector for the traffic model at a given hexagon and time."""
     def __init__(
         self,
         id: str,
@@ -323,6 +337,7 @@ class TrafficVector(Vector):
         time: float,
         hexagon_id: str = None,
     ):
+        """Store hexagon/time identifiers and derive rush-hour flag + time_sin/cos encoding."""
         self.id = id
         self.trip_id = trip_id
         self.time = time
@@ -337,6 +352,7 @@ class TrafficVector(Vector):
         self.time_encoding: tuple[float, float] = get_time_sin_cos(time)
 
     def _is_rush_hour(self, time: float) -> int:
+        """Return 1 during 07:00–09:59, 17:00–18:59, or 19:00–19:30 local time; else 0."""
         _, _, time_str = get_timestamp_components(time)
         time_obj = datetime.strptime(time_str, "%H:%M:%S")
         match time_obj.hour:
@@ -353,10 +369,12 @@ class TrafficVector(Vector):
 
 
 class TrafficVectorizer(Vectorizer):
+    """Builds a (TrafficVector, TrafficLabel) pair from a single Measurement."""
     def __init__(
         self,
         measurement: "Measurement",
     ):
+        """Bind the source measurement whose fields supply both features and targets."""
         self.measurement = measurement
 
     def vectorize(self) -> tuple[TrafficVector, TrafficLabel]:
@@ -404,13 +422,16 @@ class TrafficVectorizer(Vectorizer):
 
 
 class VehicleLabel(LabelVector):
+    """Label for a vehicle vector: the observed vehicle type."""
     def __init__(self, id: str, vehicle_type: str, time: float):
+        """Store the id, observed vehicle type, and timestamp."""
         self.id = id
         self.vehicle_type = vehicle_type
         self.time = time
 
 
 class VehicleVector(Vector):
+    """Feature vector for the vehicle-type classifier: route/trip/direction/time."""
     def __init__(
         self,
         id: str,
@@ -419,6 +440,7 @@ class VehicleVector(Vector):
         direction_id: int,
         timestamp: float,
     ):
+        """Store route/trip/direction identifiers and timestamp."""
         self.id = id
         self.route_id = route_id
         self.trip_id = trip_id
@@ -427,17 +449,20 @@ class VehicleVector(Vector):
 
 
 class VehicleVectorizer(Vectorizer):
+    """Builds a (VehicleVector, VehicleLabel) pair for vehicle-type training."""
     def __init__(
         self,
         measurement: "Measurement",
         trip: "Trip",
         vehicle_type_name: str = "Unknown",
     ):
+        """Bind the measurement, owning trip, and the resolved vehicle-type label."""
         self.measurement = measurement
         self.trip = trip
         self.vehicle_type_name = vehicle_type_name
 
     def vectorize(self) -> tuple[VehicleVector, VehicleLabel]:
+        """Return a (VehicleVector, VehicleLabel) built from ``measurement`` and ``trip``."""
         vector_id = str(uuid.uuid4())
 
         vector = VehicleVector(

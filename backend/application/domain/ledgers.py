@@ -48,15 +48,19 @@ class TopologyLedger:
     # ---- convenience accessors ----
 
     def get_trip(self, trip_id: str) -> Optional[Trip]:
+        """Return the Trip for ``trip_id`` or None."""
         return self.trips.get(trip_id)
 
     def get_stop(self, stop_id: str) -> Optional[dict]:
+        """Return the stop metadata dict for ``stop_id`` or None."""
         return self.stops.get(stop_id)
 
     def get_route(self, route_id: str) -> Optional[Route]:
+        """Return the Route for ``route_id`` or None."""
         return self.routes.get(route_id)
 
     def get_shape_for_trip(self, trip_id: str) -> Optional[Shape]:
+        """Return the Shape attached to ``trip_id``, or None if the trip or its shape is missing."""
         trip = self.trips.get(trip_id)
         return trip.get_shape() if trip else None
 
@@ -181,6 +185,7 @@ class HistoricalLedger:
     """
 
     def __init__(self, connection_string: str = None, table_name: str = None):
+        """Bind the ledger to a DB connection and target table; defaults come from config."""
         from config import Ledger
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.HISTORICAL_TABLE
@@ -297,6 +302,7 @@ class PredictedLedger:
     """
 
     def __init__(self, connection_string: str = None, table_name: str = None):
+        """Bind the ledger to a DB connection and table; defaults come from config."""
         from config import Ledger
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.PREDICTED_TABLE
@@ -306,6 +312,7 @@ class PredictedLedger:
         self._today_trip_keys: set = set()  # for dedup
 
     def _trip_key(self, route_id, direction_id, scheduled_start):
+        """Compose the composite in-memory key used to deduplicate trip summaries."""
         return f"{route_id}_{direction_id}_{scheduled_start}"
 
     def record_predictions(self, predictions: list[StopPredictionRecord]):
@@ -592,6 +599,7 @@ class VehicleLedger:
     ]
 
     def __init__(self, connection_string: str = None, table_name: str = None):
+        """Bind the ledger to a DB connection and table; defaults come from config."""
         from config import Ledger
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.VEHICLE_TABLE

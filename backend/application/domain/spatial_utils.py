@@ -1,10 +1,12 @@
+"""Spatial helpers — haversine distance, speed/bearing derivation, and MVT tile math."""
+
 import logging
 import math
 import h3
 
 
 def _derive_distance_moved(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    # Haversine formula to calculate distance in km
+    """Return the great-circle distance in km between two ``(lat, lon)`` points (haversine)."""
     lat1, lon1 = (
         math.radians(lat1),
         math.radians(lon1),
@@ -26,6 +28,7 @@ def _derive_distance_moved(lat1: float, lon1: float, lat2: float, lon2: float) -
 def derive_speed(
     lat1: float, lon1: float, lat2: float, lon2: float, timestamp1, timestamp2
 ) -> float:
+    """Return km/h computed from two positions and their timestamps; 0 for negligible moves."""
     distance_km = _derive_distance_moved(lat1, lon1, lat2, lon2)
 
     if distance_km < 0.01:
@@ -40,6 +43,7 @@ def derive_speed(
 
 
 def derive_bearing(lat1: float, lon1: float, lat2: float, lon2: float):
+    """Return compass bearing in degrees (0–360) from point 1 to point 2; -1 for negligible moves."""
     distance_km = _derive_distance_moved(lat1, lon1, lat2, lon2)
 
     if distance_km < 0.01:
@@ -66,6 +70,7 @@ def derive_bearing(lat1: float, lon1: float, lat2: float, lon2: float):
 
 
 def get_cardinal_direction(bearing: float) -> str:
+    """Bucket a bearing in degrees into one of the 8 cardinal/inter-cardinal labels."""
     directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
     index = int((bearing + 22.5) / 45.0) % 8
     return directions[index]

@@ -194,6 +194,7 @@ class TimescaleDBConnection:
             # self._write_queue.extend(items)
 
     def _prepare_prediction_vectors(self, items: List[PredictionVector]):
+        """Prepare prediction vectors."""
         query = f"""
             INSERT INTO {self.table_name} (
                 id, ts, route_id, direction_id, stop_sequence,
@@ -275,6 +276,7 @@ class TimescaleDBConnection:
         return query, rows
 
     def _prepare_prediction_labels(self, items: List[PredictionLabel]):
+        """Prepare prediction labels."""
         query = f"""
             INSERT INTO {self.table_name} (
                 id, ts, time_seconds, occupancy_status
@@ -299,6 +301,7 @@ class TimescaleDBConnection:
         return query, rows
 
     def _prepare_traffic_vectors(self, items: List[TrafficVector]):
+        """Prepare traffic vectors."""
         query = f"""
             INSERT INTO {self.table_name} (
                 id, ts, day_type, rush_hour_status, time_sin, time_cos, hexagon_id, trip_id
@@ -327,6 +330,7 @@ class TimescaleDBConnection:
         return query, rows
 
     def _prepare_traffic_labels(self, items: List[TrafficLabel]):
+        """Prepare traffic labels."""
         query = f"""
             INSERT INTO {self.table_name} (
                 id, ts, speed_ratio, current_traffic_speed
@@ -351,6 +355,7 @@ class TimescaleDBConnection:
         return query, rows
 
     def _prepare_vehicle_vectors(self, items: List[VehicleVector]):
+        """Prepare vehicle vectors."""
         query = f"""
             INSERT INTO {self.table_name} (
                 id, ts, route_id, trip_id, direction_id
@@ -378,6 +383,7 @@ class TimescaleDBConnection:
         return query, rows
 
     def _prepare_vehicle_labels(self, items: List[VehicleLabel]):
+        """Prepare vehicle labels."""
         query = f"""
             INSERT INTO {self.table_name} (
                 id, ts, vehicle_type

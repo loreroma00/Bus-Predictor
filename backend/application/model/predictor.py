@@ -1,3 +1,5 @@
+"""Inference wrapper: loads the twin BusLSTM/OccupancyLSTM checkpoints and maps raw trip inputs to per-stop forecasts."""
+
 import os
 import json
 import math
@@ -26,6 +28,7 @@ STOP_ROUTE_CONFIG_PATH = PARQUET_DIR / "stop_route_config.json"
 
 @dataclass
 class StopPrediction:
+    """Per-stop forecast: expected arrival, cumulative delay, and crowd class."""
     stop_sequence: int
     distance_m: float
     cumulative_delay_sec: float
@@ -35,6 +38,7 @@ class StopPrediction:
 
 @dataclass
 class TripForecast:
+    """One full trip forecast: route/direction identity plus a list of StopPredictions."""
     route_id: str
     direction_id: int
     trip_date: str
@@ -43,6 +47,8 @@ class TripForecast:
 
 
 class Predictor:
+    """Dual-model bus-trip predictor (delay + occupancy) backed by the shared static stop map."""
+
     def __init__(
         self,
         config_path: str,
@@ -52,6 +58,7 @@ class Predictor:
         h3_encoding_path: Optional[str] = None,
         static_map_path: Optional[str] = None,
     ):
+        """Load both model checkpoints, route/H3 encoders, static stop map, and model config."""
         print(f"Loading DUAL models...")
 
         route_path = Path(route_encoding_path) if route_encoding_path else ROUTE_ENCODING_PATH
@@ -130,6 +137,7 @@ class Predictor:
         print(f"Dual models loaded successfully.")
 
     def _sanitize_categorical_inputs(self, x1_cat_batch: np.ndarray, x2_cat_batch: np.ndarray, context: str = "") -> tuple[np.ndarray, np.ndarray]:
+        """Clamp out-of-range categorical indices to 0 so nn.Embedding lookups cannot fault."""
         x1_cards = self.config["x1_cat_cards"]
         x2_cards = self.config["x2_cat_cards"]
 
@@ -150,6 +158,7 @@ class Predictor:
         return x1_cat_batch, x2_cat_batch
 
     def has_trip_template(self, route_id: str, direction_id: Any) -> bool:
+        """Return True if the static stop map has a trip template for this route/direction."""
         trip_static = self.static_map[
             (self.static_map["route_id_norm"] == str(route_id)) &
             (self.static_map["direction_id_norm"] == str(direction_id))
@@ -157,6 +166,7 @@ class Predictor:
         return not trip_static.empty
 
     def _get_day_type(self, d: date) -> int:
+        """Encode calendar day as 0 (weekday), 1 (Saturday), or 2 (Sunday)."""
         weekday = d.weekday()
         if weekday == 5:
             return 1
@@ -165,6 +175,7 @@ class Predictor:
         return 0
 
     def _format_delay(self, delay_seconds: float) -> str:
+        """Render a signed delay (seconds) as a human ``±Xm Ys`` string."""
         total_seconds = int(round(delay_seconds))
         sign = "+" if total_seconds >= 0 else "-"
         total_seconds = abs(total_seconds)
@@ -173,6 +184,7 @@ class Predictor:
         return f"{sign}{minutes}m {seconds}s"
 
     def _format_time(self, time_seconds: float) -> str:
+        """Render a seconds-of-day value as ``HH:MM:SS`` (modulo 24h)."""
         total_seconds = int(round(time_seconds)) % 86400
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
@@ -293,6 +305,7 @@ class Predictor:
     def get_trip_forecast_raw(self, route_id: str, direction_id: int,
                               time_seconds: int, day_type: int,
                               weather_code: int, bus_type: int) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+        """Run both models on a single trip and return raw (delays, crowd, trip_stops_df) without formatting."""
         trip_stops = self.static_map[
             (self.static_map["route_id_norm"] == str(route_id)) &
             (self.static_map["direction_id_norm"] == str(direction_id))
@@ -316,6 +329,7 @@ class Predictor:
     def get_trip_forecast(self, route_id: str, direction_id: int,
                           start_date: str, start_time: str,
                           weather_code: int, bus_type: int) -> TripForecast:
+        """Produce a fully-formatted TripForecast for one scheduled trip."""
         from datetime import datetime
         trip_date = datetime.strptime(start_date, "%d-%m-%Y").date()
         time_parts = start_time.split(":")

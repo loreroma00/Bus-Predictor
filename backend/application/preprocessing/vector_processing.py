@@ -66,12 +66,14 @@ STATIC_TRIP_FEATURES = [
 
 
 def load_static_map() -> pd.DataFrame:
+    """Load the canonical stop/route map parquet or raise FileNotFoundError."""
     if not os.path.exists(STATIC_MAP_FILE):
         raise FileNotFoundError(f"Static map file '{STATIC_MAP_FILE}' not found.")
     return pd.read_parquet(STATIC_MAP_FILE)
 
 
 def load_traffic_avg() -> pd.DataFrame:
+    """Load the precomputed per-hex traffic averages parquet, or return an empty DataFrame if absent."""
     if not os.path.exists(TRAFFIC_AVG_FILE):
         print(f"Warning: Traffic averages file '{TRAFFIC_AVG_FILE}' not found.")
         return pd.DataFrame()
@@ -289,6 +291,7 @@ def interpolate_schedule_adherence(df: pd.DataFrame, trip_col: str) -> pd.DataFr
     trip_col_values = df[trip_col].values.copy()
 
     def interp_group(group):
+        """Interpolate missing schedule_adherence values within one trip using adjacent timestamps."""
         mask = group["schedule_adherence"].isna()
         if not mask.any():
             return group

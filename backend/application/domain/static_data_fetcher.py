@@ -26,6 +26,7 @@ class StaticDataFetcher:
     """Fetches and manages GTFS static data files."""
     
     def __init__(self, zip_path=FULL_PATH):
+        """Store the local path used for the GTFS zip cache."""
         self.zip_path = zip_path
     
     def fetch(self) -> str:

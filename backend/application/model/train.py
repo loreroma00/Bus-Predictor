@@ -62,6 +62,7 @@ def train(
     preloaded_data=None,
     config_modello=None,
 ):
+    """Train the twin BusLSTM/OccupancyLSTM models end-to-end and persist checkpoints + config."""
     # 1. GESTIONE DELLA MEMORIA (Caricamento o Iniezione)
     if preloaded_data is None:
         print("Loading data from disk...")
@@ -337,6 +338,7 @@ def train(
 # GESTORE DEL BATCH
 # ==========================================
 def batch_train():
+    """Run the grid-search experiments declared in ``grid_search.json``, sharing one preloaded dataset."""
     print("Initializing batch training...")
 
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))

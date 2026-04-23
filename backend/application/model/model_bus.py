@@ -1,3 +1,5 @@
+"""Trains the LightGBM bus_type predictor used by the prediction server."""
+
 import pandas as pd
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
@@ -5,6 +7,7 @@ from sklearn.metrics import accuracy_score, classification_report
 import joblib
 
 def train_bus_type_predictor(parquet_path: str, model_save_path: str):
+    """Train and persist a LightGBM classifier predicting bus_type from route/time/day features."""
     print("Inizializzazione della pipeline LightGBM...")
     
     # 1. CARICAMENTO DATI

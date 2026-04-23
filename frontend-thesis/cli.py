@@ -547,6 +547,7 @@ def get_live_status(api_client: APIClient):
 
 
 def main():
+    """Main."""
     parser = argparse.ArgumentParser(description="ATAC Bus Delay Prediction CLI")
     parser.add_argument(
         "--api-url",

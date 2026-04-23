@@ -157,6 +157,7 @@ def check_key_format_consistency(data):
 
 
 def main():
+    """Main."""
     print("=" * 60)
     print("GEOCODING CACHE DIAGNOSTIC")
     print("=" * 60)

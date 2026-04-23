@@ -115,6 +115,7 @@ def initialize_collection(config=None, lenient_pipeline: bool = False):
 
 
 def main(debug_mode: bool = False, lenient_pipeline: bool = False):
+    """Entry point for ``collect``: bootstraps logging, services, and the observation loop (plus debug GUI)."""
     # Set up logging
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)  # Capture everything, handlers will filter

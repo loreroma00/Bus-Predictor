@@ -1,8 +1,11 @@
+"""Discrete (non-ODE) variant of the BusLSTM with FCNN encoder + LSTM decoder and twin delay/occupancy heads."""
+
 import torch
 import torch.nn as nn
 
 class BusLSTM(nn.Module):
-    
+    """FCNN-encoder + LSTM-decoder with delay regression and occupancy classification heads."""
+
     def __init__(self,
                  n_x1_dense_features: int,
                  n_x2_dense_features: int,
@@ -12,7 +15,8 @@ class BusLSTM(nn.Module):
                  lstm_hidden_size: int = 128,
                  num_lstm_layers: int = 2,
                  num_occupancy_classes: int = 7
-        ): 
+        ):
+        """Build embeddings, FCNN encoder, LSTM decoder, and twin output heads."""
         super(BusLSTM, self).__init__()
 
         self.num_lstm_layers = num_lstm_layers
@@ -95,7 +99,7 @@ class BusLSTM(nn.Module):
         print(f"Input Encoder: {encoder_input_size} | Input Decoder: {decoder_input_size}")
         
     def forward(self, x1_cat, x1_dense, x2_cat, x2_dense):
-
+        """Encode x1 into LSTM initial state, decode over x2, and return (delay, occupancy) logits."""
         # ================================
         # 1. ENCODER
         # ===============================

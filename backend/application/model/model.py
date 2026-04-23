@@ -1,3 +1,5 @@
+"""Model definitions: OccupancyLSTM (crowd classification) and BusLSTM (Neural-ODE delay regressor)."""
+
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
@@ -19,6 +21,7 @@ class OccupancyLSTM(nn.Module):
                  num_lstm_layers: int = 2,
                  num_occupancy_classes: int = 7
         ):
+        """Build embeddings, FCNN encoder, LSTM decoder, and crowd-classification head."""
         super(OccupancyLSTM, self).__init__()
 
         self.num_lstm_layers = num_lstm_layers
@@ -79,6 +82,7 @@ class OccupancyLSTM(nn.Module):
         print(f"Input Encoder: {encoder_input_size} | Input Decoder: {decoder_input_size}")
 
     def forward(self, x1_cat, x1_dense, x2_cat, x2_dense, lengths=None):
+        """Encode trip context, run packed LSTM over stops, and return crowd logits."""
         batch_size = x1_cat.size(0)
         seq_length = x2_dense.size(1)
 
@@ -125,7 +129,10 @@ class OccupancyLSTM(nn.Module):
 
 
 class ODEFunc(nn.Module):
+    """Small MLP that parameterises the ODE vector field ``dh/dt`` used by BusLSTM."""
+
     def __init__(self, hidden_dim):
+        """Build the 2-layer MLP with Tanh activation."""
         super(ODEFunc, self).__init__()
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, 64),
@@ -134,6 +141,7 @@ class ODEFunc(nn.Module):
         )
 
     def forward(self, t, h):
+        """Return dh/dt at time ``t`` given hidden state ``h``."""
         return self.net(h)
 
 
@@ -146,7 +154,7 @@ class BusLSTM(nn.Module):
     """
 
     def __init__(self, n_x1_dense_features: int, n_x2_dense_features: int, x1_cat_cardinalities: list, x2_cat_cardinalities: list, encoder_hidden_size: int = 128, lstm_hidden_size: int = 128):
-
+        """Build embeddings, FCNN encoder, Neural-ODE block, LSTMCell decoder, and delay head."""
         super(BusLSTM, self).__init__()
         self.lstm_hidden_size = lstm_hidden_size
 
@@ -201,6 +209,7 @@ class BusLSTM(nn.Module):
         print(f"Input Encoder: {encoder_input_size} | Input Decoder: {decoder_input_size}")
 
     def forward(self, x1_cat, x1_dense, x2_cat, x2_dense, lengths=None, t_grid=None):
+        """Encode trip context then ODE-evolve + LSTMCell over stops to emit per-stop delay predictions."""
         batch_size = x1_cat.size(0)
         seq_length = x2_dense.size(1)
 

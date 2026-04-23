@@ -153,6 +153,7 @@ class LenientPipeline(Pipeline):
         served_ratio: float = 1.0,
         config: dict = None,
     ):
+        """Bind the diary, topology, and served_ratio used by the lenient cleaning rules."""
         self.diary = diary
         self.topology = topology
         self.served_ratio = served_ratio
@@ -163,6 +164,7 @@ class LenientPipeline(Pipeline):
     ) -> list[
         tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
     ]:
+        """Vectorize the diary and drop the whole trip on a few hard validity failures."""
         if not self.diary or not self.diary.measurements:
             return []
 
@@ -198,6 +200,7 @@ class TrafficPipeline(Pipeline):
         diary: "Diary",
         config: dict = None,
     ):
+        """Bind the diary and load the traffic-cleaning thresholds from the config dict."""
         self.diary = diary
 
         # Load cleaning parameters
@@ -246,6 +249,7 @@ class VehiclePipeline(Pipeline):
         config: dict = None,
         vehicle_type_name: str = "Unknown",
     ):
+        """Bind the diary, topology, vehicle-type label, and cleaning thresholds."""
         self.diary = diary
         self.topology = topology
         self.vehicle_type_name = vehicle_type_name
@@ -448,13 +452,17 @@ def _is_uptime_sufficient(
 @overload
 def _check_data_integrity(
     data: "Diary", uptime_timestamps: list[int], served_ratio: float
-) -> "Diary": ...
+) -> "Diary":
+    """Diary overload — see implementation below."""
+    ...
 @overload
 def _check_data_integrity(
     data: dict[str, list["Measurement"]],
     uptime_timestamps: list[int],
     served_ratio: float,
-) -> dict[str, list["Measurement"]]: ...
+) -> dict[str, list["Measurement"]]:
+    """Dict-of-measurements overload — see implementation below."""
+    ...
 
 
 def _check_data_integrity(
@@ -467,6 +475,7 @@ def _check_data_integrity(
     """
 
     def is_valid(m: "Measurement") -> bool:
+        """Return True if the measurement has non-zero speed fields and the bot was online at its timestamp."""
         # 1. Zero check
         # Explicit check for 0.0 (float) or 0 (int)
         # Note: None is technically allowed here (filtered elsewhere maybe?)
@@ -474,6 +483,7 @@ def _check_data_integrity(
 
         # Helper to safely check for 0
         def is_zero(val):
+            """Return True when ``val`` is explicitly 0 or 0.0 (and not None)."""
             return val is not None and (val == 0 or val == 0.0)
 
         # Note: current_speed might be from GPS or derived.
@@ -657,11 +667,15 @@ def _get_attr_path(obj, path):
 
 
 @overload
-def _check_for_duplicates(data: "Diary", keys: list[str] = None) -> "Diary": ...
+def _check_for_duplicates(data: "Diary", keys: list[str] = None) -> "Diary":
+    """Diary overload — see implementation below."""
+    ...
 @overload
 def _check_for_duplicates(
     data: dict[str, list["Measurement"]], keys: list[str] = None
-) -> dict[str, list["Measurement"]]: ...
+) -> dict[str, list["Measurement"]]:
+    """Dict-of-measurements overload — see implementation below."""
+    ...
 
 
 def _check_for_duplicates(
@@ -676,6 +690,7 @@ def _check_for_duplicates(
 
     # Helper for list processing
     def process_list(measurements: list["Measurement"]) -> list["Measurement"]:
+        """Return ``measurements`` with duplicates (same tuple of ``keys``) removed, preserving order."""
         seen = set()
         unique = []
         for m in measurements:
@@ -727,13 +742,17 @@ def _check_for_duplicates(
 @overload
 def _remove_outliers(
     data: "Diary", max_bus_speed_kmh: int = 120, max_time_gap_seconds: int = 600
-) -> "Diary": ...
+) -> "Diary":
+    """Diary overload — see implementation below."""
+    ...
 @overload
 def _remove_outliers(
     data: dict[str, list["Measurement"]],
     max_bus_speed_kmh: int = 120,
     max_time_gap_seconds: int = 600,
-) -> dict[str, list["Measurement"]]: ...
+) -> dict[str, list["Measurement"]]:
+    """Dict-of-measurements overload — see implementation below."""
+    ...
 
 
 def _remove_outliers(
@@ -747,6 +766,7 @@ def _remove_outliers(
 
     # Helper to process a list of measurements
     def process_list(measurements: list["Measurement"]) -> list["Measurement"]:
+        """Return ``measurements`` with GPS-speed and time-gap outliers removed."""
         if len(measurements) < 2:
             return []  # Filter out single measurements
 
@@ -802,13 +822,17 @@ def _remove_outliers(
 @overload
 def _check_for_runs(
     data: "Diary", topology=None, min_measurements_per_run: int = 7
-) -> "Diary": ...
+) -> "Diary":
+    """Diary overload — see implementation below."""
+    ...
 @overload
 def _check_for_runs(
     data: dict[str, list["Measurement"]],
     topology=None,
     min_measurements_per_run: int = 7,
-) -> dict[str, list["Measurement"]]: ...
+) -> dict[str, list["Measurement"]]:
+    """Dict-of-measurements overload — see implementation below."""
+    ...
 
 
 def _check_for_runs(
@@ -821,6 +845,7 @@ def _check_for_runs(
     """
 
     def is_valid_run(trip_id: str, measurements: list["Measurement"]) -> bool:
+        """Return True if the run has enough measurements and touches at least one terminus stop."""
         if len(measurements) < min_measurements_per_run:
             logger.info(f"🚌 Trip {trip_id} dropped: < min measurements")
             return False
@@ -874,13 +899,17 @@ def _vectorize(
     data: "Diary", topology=None, served_ratio: float = 1.0
 ) -> list[
     tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-]: ...
+]:
+    """Diary overload — see implementation below."""
+    ...
 @overload
 def _vectorize(
     data: dict[str, list["Measurement"]], topology=None, served_ratio: float = 1.0
 ) -> list[
     tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-]: ...
+]:
+    """Dict-of-measurements overload — see implementation below."""
+    ...
 
 
 def _vectorize(

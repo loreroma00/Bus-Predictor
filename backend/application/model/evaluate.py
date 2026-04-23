@@ -1,3 +1,5 @@
+"""Offline dual-model evaluation: runs inference on the test parquet and writes metrics/plots."""
+
 import os
 import json
 import torch
@@ -29,6 +31,7 @@ TEST_FILE_PATH = PARQUET_DIR / "dataset_lstm_final_TEST.parquet"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def save_confusion_matrix_image(cm, num_classes, nome):
+    """Render a seaborn heatmap of the confusion matrix and save it under ``confusion_matrix_DUAL_<nome>.png``."""
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
     ax.set_xlabel("Predetto")
@@ -41,6 +44,7 @@ def save_confusion_matrix_image(cm, num_classes, nome):
 
 
 def plot_campana_errori(errors_np, output_path):
+    """Plot the prediction-error histogram (bell curve) to ``output_path``."""
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.hist(errors_np, bins=60, density=True, alpha=0.7, color="steelblue", edgecolor="white")
     ax.set_xlabel("Errore (secondi)")
@@ -53,9 +57,11 @@ def plot_campana_errori(errors_np, output_path):
 
 
 def evaluate_model(config_path: Path):
+    """Load the DUAL checkpoints pointed to by ``config_path`` and compute MAE/RMSE/accuracy over the test set."""
     print(f"\n--- AVVIO BANCO DI PROVA DUAL SU {DEVICE} ---")
 
     def _decode_time_from_sin_cos(sin_val, cos_val):
+        """Recover an ``HH:MM`` string from a (sin, cos) time-of-day encoding."""
         angle = np.arctan2(float(sin_val), float(cos_val))
         if angle < 0: angle += 2 * np.pi
         minutes = int(round((angle / (2 * np.pi)) * 24 * 60)) % (24 * 60)

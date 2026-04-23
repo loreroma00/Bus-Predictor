@@ -1,9 +1,12 @@
+"""Training-loss log renderer plus delay plotting helpers."""
+
 import os
 import re
 import glob
 import matplotlib.pyplot as plt
 
 def elabora_e_inquadra(log_filepath):
+    """Parse a training-loss log and render train/val loss curves to a PNG."""
     print(f"\n[*] Analisi del segnale per: {log_filepath}")
     
     # Deriviamo il nome del file di output e il titolo dal nome del file txt
@@ -68,6 +71,7 @@ def elabora_e_inquadra(log_filepath):
     return True
 
 def main():
+    """Interactive entry point: find log files in the CWD and render each into a loss PNG."""
     print("=== MOTORE DI RENDERING GRAFICI LOSS ===")
     
     # Cerca tutti i file txt nella cartella corrente
@@ -175,6 +179,7 @@ def generate_fotoromanzo(predicted_df, actual_df, stops_map, route_id, trip_id, 
 
     # Y-axis: format as mm:ss
     def fmt_delay(x, _):
+        """Format a seconds value as ``±M:SS`` for the delay-axis tick formatter."""
         sign = '-' if x < 0 else '+'
         mins, secs = divmod(abs(int(x)), 60)
         return f"{sign}{mins}:{secs:02d}"

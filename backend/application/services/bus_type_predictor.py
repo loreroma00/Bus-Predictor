@@ -17,7 +17,10 @@ MODEL_PATH = Path(__file__).resolve().parent.parent / "model" / "bus_type_predic
 
 
 class BusTypePredictor:
+    """Wraps the trained LightGBM bus-type classifier for inference at predict time."""
+
     def __init__(self, model_path: Optional[str] = None):
+        """Load the LightGBM model from ``model_path`` (or the default ``bus_type_predictor.pkl``)."""
         path = Path(model_path) if model_path else MODEL_PATH
         if not path.exists():
             raise FileNotFoundError(f"Bus type model not found: {path}")

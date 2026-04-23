@@ -24,11 +24,13 @@ class Command(ABC):
 
     @abstractmethod
     def execute(self, args):
+        """Execute."""
         pass
 
     @staticmethod
     @abstractmethod
     def help():
+        """Help."""
         pass
 
 
@@ -38,12 +40,15 @@ class Command(ABC):
 
 
 class print_hex(Command):
+    """Print hex."""
     command_name = "print hex"
 
     def __init__(self, observatory: "Observatory"):
+        """Initialize the instance."""
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         hex_id = args.strip()
         city = self._obs.get_city("Rome")  # Default to Rome for now
         if not city:
@@ -83,16 +88,20 @@ class print_hex(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("print hex <hex_id>: Show details for a specific hexagon")
 
 
 class debug_traffic(Command):
+    """Debug traffic."""
     command_name = "debug traffic"
 
     def __init__(self, observatory: "Observatory"):
+        """Initialize the instance."""
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         from application.live import data as live_data
 
         city = self._obs.get_city("Rome")
@@ -128,23 +137,28 @@ class debug_traffic(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info(
             "debug traffic: Show hexagons with traffic data and verify object references"
         )
 
 
 class print_diary(Command):
+    """Print diary."""
     command_name = "print diary"
 
     def __init__(self, observatory: "Observatory"):
+        """Initialize the instance."""
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         t_id = args.strip()
         found = False
 
         # Create resolver functions
         def resolve_stop_name(stop_id):
+            """Resolve stop name."""
             try:
                 topology = self._obs.get_topology()
                 if topology:
@@ -156,6 +170,7 @@ class print_diary(Command):
                 return f"ERROR:{e}"
 
         def resolve_street_name(lat, lon):
+            """Resolve street name."""
             try:
                 city = self._obs.get_city("Rome")
                 if city and self._obs._geocoding:
@@ -194,19 +209,23 @@ class print_diary(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("print diary <trip_id>: Show recorded stops for a specific trip")
 
 
 class fetch_data(
     Command
 ):  # TO REDO: Static data to be inferred from position; debating if useful or not...
+    """Fetch data."""
     command_name = "fetch data"
 
     def __init__(self, observatory, time_formatter):
+        """Initialize the instance."""
         self._obs = observatory
         self._format_time = time_formatter
 
     def execute(self, args):
+        """Execute."""
         t_id = args.strip()
         diary = self._obs.search_diary(t_id)
 
@@ -266,16 +285,20 @@ class fetch_data(
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("fetch data <trip_id>: Show static schedule + live vehicle status")
 
 
 class print_all_diaries(Command):
+    """Print all diaries."""
     command_name = "print diaries"
 
     def __init__(self, observatory):
+        """Initialize the instance."""
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         diaries, count_diaries, count_observers = self._obs.get_all_current_diaries()
         for d in diaries:
             logging.info(d)
@@ -284,6 +307,7 @@ class print_all_diaries(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("print diaries: Show all active diaries")
 
 
@@ -293,47 +317,59 @@ class print_all_diaries(Command):
 
 
 class command_quit(Command):
+    """Command quit."""
     command_name = "quit"
 
     def __init__(self):
+        """Initialize the instance."""
         pass  # No dependencies needed
 
     def execute(self, args):
+        """Execute."""
         logging.info("Shutting Down...")
         console_events.emit("shutdown_requested")
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("quit: Stop the observer and save data")
 
 
 class stop_observers(Command):
+    """Stop observers."""
     command_name = "stop observers"
 
     def __init__(self):
+        """Initialize the instance."""
         pass
 
     def execute(self, args):
+        """Execute."""
         console_events.emit("services_stop")
 
     @staticmethod
     def help():
+        """Help."""
         logging.info(
             "stop observers: Stop collection and auto-save (triggers final save)"
         )
 
 
 class start_observers(Command):
+    """Start observers."""
     command_name = "start observers"
 
     def __init__(self):
+        """Initialize the instance."""
         pass
 
     def execute(self, args):
+        """Execute."""
         console_events.emit("services_start")
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("start observers: Start/Restart collection and auto-save loops")
 
 
@@ -343,6 +379,7 @@ class start_observers(Command):
 
 
 class normalize_diaries(Command):
+    """Normalize diaries."""
     command_name = "normalize diaries"
 
     def __init__(self, normalizer_fn, observatory_factory, parquet_writer):
@@ -358,6 +395,7 @@ class normalize_diaries(Command):
 
     def execute(self, args):
         # Import here to avoid circular deps - this is a batch operation
+        """Execute."""
         from application.post_processing import normalize_diary as nd
 
         logging.info("=== Diary Normalizer ===")
@@ -394,16 +432,20 @@ class normalize_diaries(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("normalize diaries: Normalize all diaries")
 
 
 class command_help(Command):
+    """Command help."""
     command_name = "help"
 
     def __init__(self):
+        """Initialize the instance."""
         pass
 
     def execute(self, args):
+        """Execute."""
         logging.info("\nAvailable Commands:")
         for subclass in Command.__subclasses__():
             try:
@@ -413,16 +455,20 @@ class command_help(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("help: Show this help message")
 
 
 class pause_traffic_service(Command):
+    """Pause traffic service."""
     command_name = "pause traffic service"
 
     def __init__(self):
+        """Initialize the instance."""
         pass
 
     def execute(self, args):
+        """Execute."""
         try:
             seconds = int(args.strip())
         except ValueError:
@@ -438,6 +484,7 @@ class pause_traffic_service(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info(
             "pause traffic service <seconds>: Pause traffic updates for the specified duration"
         )
@@ -449,13 +496,16 @@ class pause_traffic_service(Command):
 
 
 class validate_date(Command):
+    """Validate date."""
     command_name = "validate"
 
     def __init__(self, predictor, observatory):
+        """Initialize the instance."""
         self._predictor = predictor
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         if self._predictor is None:
             logging.warning("No predictor loaded. Start with 'serve' mode or load a model first.")
             return
@@ -470,18 +520,22 @@ class validate_date(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("validate <DD-MM-YYYY>: Run batch validation for a date (background thread)")
 
 
 class validate_live(Command):
+    """Validate live."""
     command_name = "validate live"
 
     def __init__(self, predictor, observatory, bus_type_predictor=None):
+        """Initialize the instance."""
         self._predictor = predictor
         self._obs = observatory
         self._bus_type_predictor = bus_type_predictor
 
     def execute(self, args):
+        """Execute."""
         if self._predictor is None:
             logging.warning("No predictor loaded. Start with 'serve' mode or load a model first.")
             return
@@ -499,31 +553,39 @@ class validate_live(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("validate live <DD-MM-YYYY>: Start live validation session (background thread)")
 
 
 class stop_validation(Command):
+    """Stop validation."""
     command_name = "stop validation"
 
     def __init__(self):
+        """Initialize the instance."""
         pass
 
     def execute(self, args):
+        """Execute."""
         from . import services
         services.stop_live_validation()
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("stop validation: Stop any running live validation session")
 
 
 class validation_status(Command):
+    """Validation status."""
     command_name = "validation status"
 
     def __init__(self):
+        """Initialize the instance."""
         pass
 
     def execute(self, args):
+        """Execute."""
         from . import services
         status = services.get_validation_status()
 
@@ -542,16 +604,20 @@ class validation_status(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("validation status: Show status of running validators")
 
 
 class print_all_diaries_vehicle(Command):
+    """Print all diaries vehicle."""
     command_name = "print diaries vehicle"
 
     def __init__(self, observatory):
+        """Initialize the instance."""
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         if not args:
             logging.warning("Usage: print diaries vehicle <vehicle_label>")
             return
@@ -574,18 +640,22 @@ class print_all_diaries_vehicle(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info(
             "print diaries vehicle <vehicle_label>: Show all diaries for a specific vehicle"
         )
 
 
 class fotoromanzo(Command):
+    """Fotoromanzo."""
     command_name = "fotoromanzo"
 
     def __init__(self, observatory: "Observatory"):
+        """Initialize the instance."""
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         trip_id = args.strip()
         if not trip_id:
             logging.warning("Usage: fotoromanzo <trip_id>")
@@ -643,16 +713,20 @@ class fotoromanzo(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("fotoromanzo <trip_id>: Generate predicted vs actual delay chart for a trip")
 
 
 class weather_strategy_cmd(Command):
+    """Weather strategy cmd."""
     command_name = "weather strategy"
 
     def __init__(self, observatory):
+        """Initialize the instance."""
         self._obs = observatory
 
     def execute(self, args):
+        """Execute."""
         from application.domain.weather_strategy import get_weather_strategy, get_available_weather_strategies
 
         city = self._obs.get_city("Rome")
@@ -672,4 +746,5 @@ class weather_strategy_cmd(Command):
 
     @staticmethod
     def help():
+        """Help."""
         logging.info("weather strategy [name]: Show or change the weather update strategy")

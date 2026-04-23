@@ -1,3 +1,5 @@
+"""Legacy scaling helpers: fit StandardScaler/LabelEncoder on the dataset and invert predictions."""
+
 import os
 import pandas as pd
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -11,6 +13,7 @@ PARQUET_DIR = os.path.join(PROJECT_ROOT, "parquets")
 
 
 def scaling(input_parquet: str, output_parquet: str, scaler_path: str):
+    """Fit feature/target StandardScalers + route LabelEncoder on ``input_parquet`` and save both the scaled parquet and the scalers."""
     print("Reading Dataset...")
     df: pd.DataFrame = pd.read_parquet(input_parquet)
 
@@ -67,6 +70,7 @@ def scaling(input_parquet: str, output_parquet: str, scaler_path: str):
 
 
 def descaling(value: float, scaler_path: str):
+    """Invert the target scaler in ``scaler_path`` to convert a scaled prediction back to seconds."""
     # Carichiamo il dizionario contenente gli scaler
     scalers = joblib.load(scaler_path)
     

@@ -57,6 +57,7 @@ def _process_linestring(linestring, static_map):
 
 
 def generate_static_map():
+    """Generate static map."""
     print(f"Loading {INPUT_FILE}...")
     try:
         # Load GeoJSON

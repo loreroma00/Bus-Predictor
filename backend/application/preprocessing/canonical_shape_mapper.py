@@ -1,3 +1,5 @@
+"""Stage-1 pipeline: resamples GTFS shapes into 100 uniform canonical segments per route."""
+
 import os
 import sys
 import pandas as pd
@@ -95,10 +97,12 @@ from application.domain.static_data_fetcher import StaticDataFetcher
 
 
 def get_h3_index(lat: float, lng: float, resolution: int = H3_RESOLUTION) -> str:
+    """Return the H3 cell ID at ``resolution`` for a (lat, lng) pair."""
     return h3.latlng_to_cell(lat, lng, resolution)
 
 
 def haversine_np(lat1, lon1, lat2, lon2):
+    """Vectorised great-circle distance (metres) between two lat/lon arrays."""
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
     dlon = lon2 - lon1
     dlat = lat2 - lat1
@@ -286,6 +290,7 @@ def process_stop_route_map(
 
 
 def main():
+    """Entry point: runs the canonical-shape mapping pipeline end-to-end."""
     print("Starting Stop-Based Route Mapping...")
 
     # 1. Setup & Fetch Data

@@ -1,3 +1,5 @@
+"""Weather domain object mapping Open-Meteo WMO codes to human descriptions."""
+
 import time
 
 WEATHER_MAP = {
@@ -33,6 +35,8 @@ WEATHER_MAP = {
 
 
 class Weather:
+    """Point-in-time weather observation or forecast for a hexagon."""
+
     FORECAST_PROBABILITY_UNKNOWN = -1.0
 
     def __init__(
@@ -47,6 +51,7 @@ class Weather:
         forecast_probability: float = FORECAST_PROBABILITY_UNKNOWN,
         is_forecast: bool = False,
     ):
+        """Store weather fields, defaulting ``valid_time`` to now and normalising weather_code to int."""
         self.time = valid_time if valid_time else time.time()
         self.temperature = temperature  # in °C
         self.apparent_temperature = apparent_temperature  # in °C
@@ -63,42 +68,52 @@ class Weather:
 
     @property
     def temperature(self) -> float:
+        """Air temperature in °C."""
         return self._temperature
 
     @temperature.setter
     def temperature(self, value: float) -> None:
+        """Set the air temperature in °C."""
         self._temperature = value
 
     @property
     def humidity(self) -> float:
+        """Relative humidity in %."""
         return self._humidity
 
     @humidity.setter
     def humidity(self, value: float) -> None:
+        """Set the relative humidity in %."""
         self._humidity = value
 
     @property
     def precip_intensity(self) -> float:
+        """Precipitation intensity in mm/h."""
         return self._precip_intensity
 
     @precip_intensity.setter
     def precip_intensity(self, value: float) -> None:
+        """Set the precipitation intensity in mm/h."""
         self._precip_intensity = value
 
     @property
     def wind_speed(self) -> float:
+        """Wind speed in m/s."""
         return self._wind_speed
 
     @wind_speed.setter
     def wind_speed(self, value: float) -> None:
+        """Set the wind speed in m/s."""
         self._wind_speed = value
 
     @property
     def weather_code(self) -> int:
+        """Open-Meteo WMO weather code."""
         return self._weather_code
 
     @weather_code.setter
     def weather_code(self, value: int) -> None:
+        """Set the WMO weather code."""
         self._weather_code = value
 
     @property
@@ -108,4 +123,5 @@ class Weather:
 
     @property
     def has_forecast_probability(self) -> bool:
+        """True when a real forecast probability was provided (not the unknown sentinel)."""
         return self.forecast_probability != self.FORECAST_PROBABILITY_UNKNOWN

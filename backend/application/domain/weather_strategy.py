@@ -123,6 +123,7 @@ class GreedyWeatherStrategy(WeatherUpdateStrategy):
     strategy_name = "greedy"
 
     def update(self, city, weather_url: str) -> None:
+        """Fetch weather for every hexagon in the city and apply it."""
         hex_snapshot = list(city.hexagons.values())
         _fetch_and_apply(hex_snapshot, weather_url)
         logging.info(f"Greedy weather update: {len(hex_snapshot)} hexagons")
@@ -134,10 +135,12 @@ class SubsetWeatherStrategy(WeatherUpdateStrategy):
     strategy_name = "subset"
 
     def __init__(self, n_subsets: int = 4):
+        """Store the partition size and the rotating subset index."""
         self.n_subsets = max(1, n_subsets)
         self._current_index = 0
 
     def update(self, city, weather_url: str) -> None:
+        """Fetch weather for the next 1/N subset of hexagons and advance the rotation."""
         hex_snapshot = list(city.hexagons.values())
         if not hex_snapshot:
             return

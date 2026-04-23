@@ -62,6 +62,7 @@ class TrafficService:
         logging.info(f"Traffic Service paused for {seconds} seconds.")
 
     def _is_paused(self) -> bool:
+        """Return True while the pause window set by ``pause`` has not elapsed."""
         return time.time() < self._paused_until
 
     def _is_tile_expired(

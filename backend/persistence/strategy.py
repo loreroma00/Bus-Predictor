@@ -58,6 +58,7 @@ class FileCacheStrategy(BaseCacheStrategy):
     strategy_name = "file"
 
     def __init__(self, cache_dir: str = "."):
+        """Initialize the instance."""
         self._cache_dir = cache_dir
         self._topology_path = os.path.join(cache_dir, TOPOLOGY_CACHE_FILE)
         self._schedule_path = os.path.join(cache_dir, SCHEDULE_CACHE_FILE)
@@ -89,6 +90,7 @@ class FileCacheStrategy(BaseCacheStrategy):
     # ---------- Internal ----------
 
     def _load(self, path: str, expected_md5: Optional[str], label: str):
+        """Load."""
         if not os.path.exists(path):
             return None
         try:
@@ -111,6 +113,7 @@ class FileCacheStrategy(BaseCacheStrategy):
             return None
 
     def _save(self, path: str, obj, label: str):
+        """Save."""
         try:
             with open(path, "wb") as f:
                 pickle.dump(obj, f)
@@ -195,15 +198,19 @@ class NoCacheStrategy(BaseCacheStrategy):
     strategy_name = "none"
 
     def load_topology(self, expected_md5: Optional[str] = None):
+        """Load the topology."""
         return None
 
     def save_topology(self, topology, source_md5: Optional[str] = None):
+        """Save the topology."""
         pass
 
     def load_schedule(self, expected_md5: Optional[str] = None):
+        """Load the schedule."""
         return None
 
     def save_schedule(self, schedule_ledger, source_md5: Optional[str] = None):
+        """Save the schedule."""
         pass
 
 
@@ -288,6 +295,7 @@ class saving_strategy(ABC):
 
     @abstractmethod
     def execute(self, diaries_list, filename):
+        """Execute."""
         pass
 
 
@@ -296,6 +304,7 @@ class saving_parquet(saving_strategy):
 
     def execute(self, diaries_list, filename):
         # Import here to avoid circular dependency
+        """Execute."""
         from .diaries import DIARIES_PATH, updateParquet, writeParquet
         import pandas as pd
 
@@ -329,6 +338,7 @@ class saving_database(saving_strategy):
     """
 
     def __init__(self, connection_string: str = None, table_name: str = None):
+        """Initialize the instance."""
         self.connection_string = connection_string
         self.table_name = table_name
 

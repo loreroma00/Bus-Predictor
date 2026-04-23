@@ -14,6 +14,7 @@ class LedgerBuilder:
     """Builds TopologyLedger and ScheduleLedger from GTFS DataFrames."""
 
     def __init__(self):
+        """Initialize with empty DataFrame slots for each GTFS file."""
         # Raw DataFrames
         self.stops = None
         self.routes = None
@@ -27,6 +28,7 @@ class LedgerBuilder:
         print("Reading static data (CSVs)...")
 
         def read_csv_safe(filename):
+            """Read a GTFS CSV as strings, or return None if the file is missing."""
             if os.path.exists(filename):
                 return pd.read_csv(
                     filename, sep=",", header=0, dtype=str, low_memory=False

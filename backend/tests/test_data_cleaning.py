@@ -16,6 +16,7 @@ def create_measurement(
     id, trip_id, lat, lon, time_val, speed=10, next_stop=None, derived_speed=None
 ):
     # Mock/Stub GPSData
+    """Create a measurement."""
     gps = MagicMock(spec=GPSData)
     gps.latitude = lat
     gps.longitude = lon
@@ -49,6 +50,7 @@ def create_measurement(
 
 
 class TestDataCleaning:
+    """Testdatacleaning."""
     def test_check_for_duplicates_diary(self):
         """Test _check_for_duplicates with a Diary object."""
         diary = Diary(observer=None, trip_id="trip_1")

@@ -8,6 +8,7 @@ WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
 
 class Traffic:
+    """Traffic."""
     def __init__(
         self,
         north_speed: float = 0,
@@ -27,6 +28,7 @@ class Traffic:
         west_speed_ratio: float = 0,
         north_west_speed_ratio: float = 0,
     ):
+        """Initialize the instance."""
         self.traffic_dict = {
             "N": {
                 "current_speed": north_speed,
@@ -87,9 +89,11 @@ class Traffic:
         }
 
     def set_current_speed(self, direction: str, current_speed: float):
+        """Set the current speed."""
         self.traffic_dict[direction]["current_speed"] = current_speed
 
     def _set_flow_speed(self, direction: str):
+        """Set flow speed."""
         if (
             self.traffic_dict[direction]["speed_ratio"] > 0
             and self.traffic_dict[direction]["current_speed"] > 0
@@ -116,17 +120,22 @@ class Traffic:
         self._set_flow_speed(direction)
 
     def get_flow_speed(self, direction: str) -> float:
+        """Return the flow speed."""
         return self.traffic_dict[direction]["flow_speed"]
 
     def get_current_speed(self, direction: str) -> float:
+        """Return the current speed."""
         return self.traffic_dict[direction]["current_speed"]
 
     def get_speed_ratio(self, direction: str) -> float:
+        """Return the speed ratio."""
         return self.traffic_dict[direction]["speed_ratio"]
 
 
 class Hexagon:
+    """Hexagon."""
     def __init__(self, hex_id: str):
+        """Initialize the instance."""
         self.hex_id = hex_id
         self.streets: dict[tuple[float, float], str] = {}  # (lat, lng) -> street name
         self.neighbours = []
@@ -148,12 +157,15 @@ class Hexagon:
         return (time.time() - self.last_traffic_update) > ttl_seconds
 
     def add_bus(self, bus: Bus):
+        """Add a bus."""
         self.mobile_agents["buses"][str(bus.id)] = bus
 
     def remove_bus(self, bus_id: str) -> Bus | None:
+        """Remove the bus."""
         return self.mobile_agents["buses"].pop(str(bus_id), None)
 
     def get_bus(self, bus_id: str) -> Bus | None:
+        """Return the bus."""
         return self.mobile_agents["buses"].get(str(bus_id), None)
 
     def add_street(self, lat: float, lng: float, street_name: str):
@@ -162,6 +174,7 @@ class Hexagon:
         self.streets[key] = street_name
 
     def get_street_by_name(self, street_name: str) -> tuple[float, float] | None:
+        """Return the street by name."""
         for (lat, lng), name in self.streets.items():
             if name == street_name:
                 return (lat, lng)
@@ -173,14 +186,17 @@ class Hexagon:
         return self.streets.get(key, None)
 
     def get_weather(self) -> Weather:
+        """Return the weather."""
         return self.weather
 
     def set_weather(self, weather: Weather):
+        """Set the weather."""
         self.weather = weather
         hour_bucket = int(float(weather.time) // 3600)
         self.set_weather_for_hour_bucket(hour_bucket, weather)
 
     def set_weather_for_hour_bucket(self, hour_bucket: int, weather: Weather):
+        """Set the weather for hour bucket."""
         for item in self.weather_forecast_by_hour:
             if hour_bucket in item:
                 item[hour_bucket] = weather
@@ -188,9 +204,11 @@ class Hexagon:
         self.weather_forecast_by_hour.append({hour_bucket: weather})
 
     def set_weather_forecast(self, weather_forecast: list[dict[int, Weather]]):
+        """Set the weather forecast."""
         self.weather_forecast_by_hour = weather_forecast
 
     def get_weather_for_hour_bucket(self, hour_bucket: int) -> Weather | None:
+        """Return the weather for hour bucket."""
         for item in self.weather_forecast_by_hour:
             weather = item.get(hour_bucket)
             if weather is not None:
@@ -198,30 +216,39 @@ class Hexagon:
         return None
 
     def get_temperature(self) -> float:
+        """Return the temperature."""
         return self.weather.temperature
 
     def set_temperature(self, temperature: float):
+        """Set the temperature."""
         self.weather.temperature = temperature
 
     def get_humidity(self) -> float:
+        """Return the humidity."""
         return self.weather.humidity
 
     def set_humidity(self, humidity: float):
+        """Set the humidity."""
         self.weather.humidity = humidity
 
     def get_wind_speed(self) -> float:
+        """Return the wind speed."""
         return self.weather.wind_speed
 
     def set_wind_speed(self, wind_speed: float):
+        """Set the wind speed."""
         self.weather.wind_speed = wind_speed
 
     def get_precip_intensity(self) -> float:
+        """Return the precip intensity."""
         return self.weather.precip_intensity
 
     def set_precip_intensity(self, precip_intensity: float):
+        """Set the precip intensity."""
         self.weather.precip_intensity = precip_intensity
 
     def get_preferentials(self):
+        """Return the preferentials."""
         return self.preferentials
 
     def get_current_speed(self, direction: str = None) -> float:
@@ -281,14 +308,18 @@ class Hexagon:
         return False  # Sei nell'esagono giusto, ma direzione sbagliata (es. incrocio)
 
     def get_traffic(self) -> Traffic:
+        """Return the traffic."""
         return self.traffic
 
     def set_traffic(self, traffic: Traffic):
+        """Set the traffic."""
         self.traffic = traffic
 
 
 class City:
+    """City."""
     def __init__(self, name, static_bus_lanes: dict = None):
+        """Initialize the instance."""
         self.name = name
         self.hexagons: dict[str, Hexagon] = {}
         self.bus_index: dict[str, str] = {}  # BusID -> HexID (O(1) lookup)
@@ -310,10 +341,12 @@ class City:
         return list(set(self.bus_index.values()))
 
     @overload
-    def add_bus_to_city(self, bus: Bus, lat: float, lng: float): ...
+    def add_bus_to_city(self, bus: Bus, lat: float, lng: float):
+                                                                 """Add a bus to city."""
 
     @overload
-    def add_bus_to_city(self, bus: Bus, hex_id: str): ...
+    def add_bus_to_city(self, bus: Bus, hex_id: str):
+                                                      """Add a bus to city."""
 
     def add_bus_to_city(
         self, bus: Bus, hex_id: str = None, lat: float = None, lng: float = None
@@ -339,10 +372,12 @@ class City:
             del self.bus_deposit[str(bus.id)]
 
     @overload
-    def move_bus(self, bus_id: str, new_hex_id: str) -> bool: ...
+    def move_bus(self, bus_id: str, new_hex_id: str) -> bool:
+                                                              """Move bus."""
 
     @overload
-    def move_bus(self, bus_id: str, latitude: float, longitude: float) -> bool: ...
+    def move_bus(self, bus_id: str, latitude: float, longitude: float) -> bool:
+                                                                                """Move bus."""
 
     def move_bus(
         self,
@@ -410,26 +445,32 @@ class City:
         self.hexagons[hexagon.hex_id] = hexagon
 
     def add_hexagon_with_coords(self, lat: float, lng: float):
+        """Add a hexagon with coords."""
         hex_id = h3_utils.get_h3_index(lat, lng)
         hexagon = Hexagon(hex_id)
         self.add_hexagon(hexagon)
 
     def get_hex_id(self, lat: float, lng: float) -> str:
+        """Return the hex id."""
         return h3_utils.get_h3_index(lat, lng)
 
     def get_hexagon(self, hex_id: str):
+        """Return the hexagon."""
         return self.hexagons.get(hex_id)
 
     def get_hexagons(self):
+        """Return the hexagons."""
         return self.hexagons
 
     def get_bus(self, bus_id: str) -> Bus | None:
+        """Return the bus."""
         hex_id = self.bus_index.get(bus_id)
         if hex_id:
             return self.hexagons[hex_id].mobile_agents["buses"].get(bus_id)
         return None
 
     def remove_bus(self, bus: Bus) -> tuple[Bus | None, str] | None:
+        """Remove the bus."""
         hex_id = self.bus_index.pop(bus.id, None)
         removed_bus: Bus = None
         if hex_id:
@@ -438,6 +479,7 @@ class City:
 
     def bus_to_deposit(self, bus_id: str):
         # Pop returns keys, so get key first, then pop. Or just pop and process.
+        """Bus to deposit."""
         hex_id = self.bus_index.pop(bus_id, None)  # Remove from index immediately
 
         if hex_id:
@@ -458,11 +500,13 @@ class City:
         self.weather_strategy.update(self, WEATHER_URL)
 
     def get_weather(self, hex_id: str) -> Weather:
+        """Return the weather."""
         return self.hexagons[hex_id].weather
 
     def get_weather_for_hour_bucket(
         self, hex_id: str, hour_bucket: int
     ) -> Weather | None:
+        """Return the weather for hour bucket."""
         hexagon = self.hexagons.get(hex_id)
         if not hexagon:
             return None

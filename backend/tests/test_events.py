@@ -14,6 +14,7 @@ class TestConsoleEventBus:
         received = []
 
         def handler(data):
+            """Handler."""
             received.append(data)
 
         bus.subscribe("test_event", handler)
@@ -28,6 +29,7 @@ class TestConsoleEventBus:
         received = []
 
         def handler(data):
+            """Handler."""
             received.append(data)
 
         bus.subscribe("test_event", handler)
@@ -42,9 +44,11 @@ class TestConsoleEventBus:
         results = []
 
         def handler1(data):
+            """Handler1."""
             results.append("handler1")
 
         def handler2(data):
+            """Handler2."""
             results.append("handler2")
 
         bus.subscribe("test_event", handler1)
@@ -61,6 +65,7 @@ class TestConsoleEventBus:
         received = []
 
         def handler(data):
+            """Handler."""
             received.append(data)
 
         bus.subscribe("test_event", handler)
@@ -81,9 +86,11 @@ class TestConsoleEventBus:
         results = []
 
         def bad_handler(data):
+            """Bad handler."""
             raise ValueError("Intentional error")
 
         def good_handler(data):
+            """Good handler."""
             results.append("success")
 
         bus.subscribe("test_event", bad_handler)
@@ -98,9 +105,11 @@ class TestConsoleEventBus:
         results = []
 
         def handler_a(data):
+            """Handler a."""
             results.append("A")
 
         def handler_b(data):
+            """Handler b."""
             results.append("B")
 
         bus.subscribe("event_a", handler_a)
@@ -115,6 +124,7 @@ class TestConsoleEventBus:
         bus = ConsoleEventBus()
 
         def handler(data):
+            """Handler."""
             pass
 
         # Should not raise
@@ -125,6 +135,7 @@ class TestConsoleEventBus:
         bus = ConsoleEventBus()
 
         def handler(data):
+            """Handler."""
             pass
 
         bus.subscribe("test_event", handler)
@@ -137,6 +148,7 @@ class TestConsoleEventBus:
         bus = ConsoleEventBus()
 
         def handler(data):
+            """Handler."""
             pass
 
         # Should not raise

@@ -26,6 +26,7 @@ DIARIES_PATH = PROJECT_ROOT / "diaries" / "diaries.parquet"
 
 @dataclass
 class TripValidationResult:
+    """Per-trip offline validation outcome: error metrics plus optional failure reason."""
     trip_id: str
     route_id: str
     direction_id: int
@@ -40,6 +41,7 @@ class TripValidationResult:
 
 @dataclass
 class ValidationReport:
+    """Aggregated offline validation results for a target date."""
     date: str
     total_scheduled_trips: int
     total_trips_with_ground_truth: int
@@ -59,7 +61,10 @@ class ValidationReport:
 
 
 class Validator:
+    """Offline validator that replays scheduled trips and compares predictions against stored diaries."""
+
     def __init__(self, predictor, observatory):
+        """Bind the predictor and observatory, prepare the results directory."""
         self.predictor = predictor
         self.observatory = observatory
         self.logger = logging.getLogger("validator")

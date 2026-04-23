@@ -22,6 +22,7 @@ class LiveFeedFetcher:
     """Fetches and parses GTFS-RT vehicle positions and trip updates."""
 
     def __init__(self, vehicles_url=None, trips_url=None):
+        """Store the GTFS-RT endpoints; warns if either URL is missing."""
         self.vehicles_url = vehicles_url
         self.trips_url = trips_url
         
