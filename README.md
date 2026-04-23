@@ -24,6 +24,8 @@ The long-term ambition is a system robust enough to sit behind a production serv
 - **Validates** predictions live against the diaries produced by the collector, streaming error metrics over WebSocket as trips unfold.
 - **Visualises** the running state of the system — live vehicles, traffic, weather overlays — in an interactive debug board.
 
+The current models are the heart of this project, however this pair of models is to be considered part - the heart - of a larger network of supporting modules, creating a simulation of the city's traffic and passenger dynamics to give as trustworhty predicted context to the current architecture. As such, the current results are to be considered largely experimental and likely improveable given the right conditions.
+
 ## Performance snapshot
 
 A glimpse of what the current delay model achieves on held-out data. Charts are auto-generated and live in `backend/results/`.
@@ -39,6 +41,7 @@ A glimpse of what the current delay model achieves on held-out data. Charts are 
 This is an active, single-author project. The current focus is a structural refactor aimed at clearer module boundaries, lighter coupling between the collector and the prediction path, and a cleaner separation between research and serving concerns. Once the dust settles, the priorities are:
 
 - tightening the occupancy model (underused classes are visible in the confusion matrix above),
+- refining the models, including addition of new data,
 - expanding validation tooling so every model change is measurable,
 - and hardening the serving stack toward something closer to a production deployment.
 
