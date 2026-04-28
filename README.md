@@ -44,7 +44,3 @@ This is an active, single-author project. The current focus is a structural refa
 - refining the models, including addition of new data,
 - expanding validation tooling so every model change is measurable,
 - and hardening the serving stack toward something closer to a production deployment.
-
-## License
-
-A license has not been selected yet. Until one is chosen, all rights are reserved by the author.
