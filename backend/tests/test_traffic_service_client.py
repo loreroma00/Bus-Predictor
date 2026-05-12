@@ -1,5 +1,5 @@
 """
-Tests for Traffic Fetcher - TomTom API client and MVT decoding.
+Tests for TrafficService's private TomTom client and MVT decoding.
 """
 
 from unittest.mock import Mock, patch
@@ -39,9 +39,9 @@ class TestTileCalculation:
 
     def test_get_tiles_for_bbox_generates_grid(self):
         """Verify bbox produces a rectangular grid of tiles."""
-        from application.live.traffic_fetcher import TomTomTrafficFetcher
+        from application.live.traffic_service import _TomTomTrafficClient
 
-        fetcher = TomTomTrafficFetcher(api_key="dummy", zoom=12)
+        fetcher = _TomTomTrafficClient(api_key="dummy", zoom=12)
 
         # Small bbox that should cover 2x2 tiles
         tiles = fetcher.get_tiles_for_bbox(
@@ -58,10 +58,10 @@ class TestRateLimiting:
 
     def test_rate_limit_enforced(self):
         """Verify rate limiting adds delay between requests."""
-        from application.live.traffic_fetcher import TomTomTrafficFetcher
+        from application.live.traffic_service import _TomTomTrafficClient
         import time
 
-        fetcher = TomTomTrafficFetcher(api_key="dummy", zoom=12)
+        fetcher = _TomTomTrafficClient(api_key="dummy", zoom=12)
 
         # First call should not delay
         start1 = time.time()
@@ -81,7 +81,7 @@ class TestMVTDecoding:
 
     def test_extract_road_segments_empty_tile(self):
         """Verify empty tile returns empty list."""
-        from application.live.traffic_fetcher import extract_road_segments
+        from application.live.traffic_service import extract_road_segments
 
         empty_tile = {}
         segments = extract_road_segments(empty_tile)
@@ -89,7 +89,7 @@ class TestMVTDecoding:
 
     def test_extract_road_segments_no_flow_layer(self):
         """Verify tile without traffic flow layer returns empty list."""
-        from application.live.traffic_fetcher import extract_road_segments
+        from application.live.traffic_service import extract_road_segments
 
         tile_data = {"Other layer": {"features": []}}
         segments = extract_road_segments(tile_data)
@@ -97,7 +97,7 @@ class TestMVTDecoding:
 
     def test_extract_absolute_segments(self):
         """Verify absolute segment extraction gets speed_kph."""
-        from application.live.traffic_fetcher import extract_road_segments
+        from application.live.traffic_service import extract_road_segments
 
         tile_data = {
             "Traffic flow": {
@@ -124,7 +124,7 @@ class TestMVTDecoding:
 
     def test_extract_relative_segments(self):
         """Verify relative segment extraction gets speed_ratio."""
-        from application.live.traffic_fetcher import extract_road_segments
+        from application.live.traffic_service import extract_road_segments
 
         tile_data = {
             "Traffic flow": {
@@ -154,7 +154,7 @@ class TestSegmentMerging:
 
     def test_merge_matching_segments(self):
         """Verify segments with same key are merged correctly."""
-        from application.live.traffic_fetcher import merge_absolute_relative_segments
+        from application.live.traffic_service import merge_absolute_relative_segments
 
         abs_segments = [
             {
@@ -181,7 +181,7 @@ class TestSegmentMerging:
 
     def test_merge_unmatched_uses_fallback(self):
         """Verify unmatched absolute segments get fallback values."""
-        from application.live.traffic_fetcher import merge_absolute_relative_segments
+        from application.live.traffic_service import merge_absolute_relative_segments
 
         abs_segments = [
             {
@@ -203,10 +203,10 @@ class TestSegmentMerging:
 class TestFetchTile:
     """Test tile fetching with mocked HTTP."""
 
-    @patch("application.live.traffic_fetcher.requests.get")
+    @patch("application.live.traffic_service.requests.get")
     def test_fetch_tile_with_flow_type(self, mock_get):
         """Verify flow_type is included in URL."""
-        from application.live.traffic_fetcher import TomTomTrafficFetcher
+        from application.live.traffic_service import _TomTomTrafficClient
 
         mock_response = Mock()
         mock_response.status_code = 200
@@ -214,9 +214,9 @@ class TestFetchTile:
 
         mock_get.return_value = mock_response
 
-        fetcher = TomTomTrafficFetcher(api_key="test_key", zoom=12)
+        fetcher = _TomTomTrafficClient(api_key="test_key", zoom=12)
 
-        with patch("application.live.traffic_fetcher.mvt.decode") as mock_decode:
+        with patch("application.live.traffic_service.mvt.decode") as mock_decode:
             mock_decode.return_value = {}
 
             fetcher.fetch_tile(2187, 1483, flow_type="relative")
@@ -225,32 +225,32 @@ class TestFetchTile:
             call_args = mock_get.call_args
             assert "relative" in call_args[0][0]
 
-    @patch("application.live.traffic_fetcher.requests.get")
+    @patch("application.live.traffic_service.requests.get")
     def test_fetch_tile_404_returns_none(self, mock_get):
         """Verify 404 response returns None (no data for tile)."""
-        from application.live.traffic_fetcher import TomTomTrafficFetcher
+        from application.live.traffic_service import _TomTomTrafficClient
 
         mock_response = Mock()
         mock_response.status_code = 404
 
         mock_get.return_value = mock_response
 
-        fetcher = TomTomTrafficFetcher(api_key="test_key", zoom=12)
+        fetcher = _TomTomTrafficClient(api_key="test_key", zoom=12)
         result = fetcher.fetch_tile(0, 0)
 
         assert result is None
 
-    @patch("application.live.traffic_fetcher.requests.get")
+    @patch("application.live.traffic_service.requests.get")
     def test_fetch_tile_403_returns_none(self, mock_get):
         """Verify 403 response returns None (invalid API key)."""
-        from application.live.traffic_fetcher import TomTomTrafficFetcher
+        from application.live.traffic_service import _TomTomTrafficClient
 
         mock_response = Mock()
         mock_response.status_code = 403
 
         mock_get.return_value = mock_response
 
-        fetcher = TomTomTrafficFetcher(api_key="invalid_key", zoom=12)
+        fetcher = _TomTomTrafficClient(api_key="invalid_key", zoom=12)
         result = fetcher.fetch_tile(0, 0)
 
         assert result is None
@@ -261,13 +261,13 @@ class TestDualFetch:
 
     @patch.object(
         __import__(
-            "application.live.traffic_fetcher", fromlist=["TomTomTrafficFetcher"]
-        ).TomTomTrafficFetcher,
+            "application.live.traffic_service", fromlist=["_TomTomTrafficClient"]
+        )._TomTomTrafficClient,
         "fetch_tile",
     )
     def test_fetch_tiles_dual_returns_two_lists(self, mock_fetch):
         """Verify fetch_tiles_dual returns both absolute and relative lists."""
-        from application.live.traffic_fetcher import TomTomTrafficFetcher
+        from application.live.traffic_service import _TomTomTrafficClient
 
         # Mock returns different data for each call
         mock_fetch.side_effect = [
@@ -275,8 +275,11 @@ class TestDualFetch:
             {"flow": "rel"},  # relative for tile 1
         ]
 
-        fetcher = TomTomTrafficFetcher(api_key="test", zoom=12)
-        abs_tiles, rel_tiles = fetcher.fetch_tiles_dual([(0, 0)])
+        fetcher = _TomTomTrafficClient(api_key="test", zoom=12)
+        from application.live.traffic_service import TrafficService
+
+        service = TrafficService(city=Mock(), traffic_client=fetcher)
+        abs_tiles, rel_tiles = service._fetch_tiles_dual([(0, 0)])
 
         assert len(abs_tiles) == 1
         assert len(rel_tiles) == 1

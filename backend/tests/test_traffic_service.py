@@ -190,6 +190,37 @@ class TestSpeedAggregationByDirection:
 class TestUpdateTraffic:
     """Test the main update_traffic method."""
 
+    def test_get_traffic_for_hexagon_returns_relative_then_absolute(self):
+        """Verify public hexagon lookup returns domain traffic values."""
+        from application.live.traffic_service import TrafficService
+
+        mock_city = Mock()
+        mock_client = Mock()
+        mock_client.zoom = 12
+
+        mock_hex = Mock()
+        mock_hex.is_traffic_expired.return_value = False
+        mock_hex.get_speed_ratio.side_effect = lambda direction: {
+            "N": 0.7,
+            "NE": 0.8,
+        }.get(direction, 0.0)
+        mock_hex.get_current_speed.side_effect = lambda direction: {
+            "N": 35.0,
+            "NE": 42.0,
+        }.get(direction, 0.0)
+
+        mock_city.hexagons = {"hex_123": mock_hex}
+        service = TrafficService(mock_city, traffic_client=mock_client)
+
+        with patch.object(service, "update_traffic_info") as mock_update:
+            relative, absolute = service.get_traffic_for_hexagon("hex_123")
+
+        mock_update.assert_not_called()
+        assert relative["N"] == 0.7
+        assert relative["NE"] == 0.8
+        assert absolute["N"] == 35.0
+        assert absolute["NE"] == 42.0
+
     def test_update_traffic_calls_city_update_with_direction(self):
         """Verify update_traffic calls city.update_traffic with direction."""
         from application.live.traffic_service import TrafficService
@@ -199,31 +230,27 @@ class TestUpdateTraffic:
 
         mock_city = Mock()
         mock_city.update_traffic = Mock()
-        mock_city.get_hexagons_with_buses.return_value = ["hex_123"]
+        mock_city.get_hexagons_with_live_trips.return_value = ["hex_123"]
         mock_city.hexagons = {"hex_123": mock_hex}
 
-        mock_fetcher = Mock()
-        mock_fetcher.zoom = 12
-        mock_fetcher.fetch_tiles_dual.return_value = (
-            [
-                {
-                    "Traffic flow": {"features": []},
-                    "_tile_x": 2187,
-                    "_tile_y": 1483,
-                    "_tile_zoom": 12,
-                }
-            ],
-            [
-                {
-                    "Traffic flow": {"features": []},
-                    "_tile_x": 2187,
-                    "_tile_y": 1483,
-                    "_tile_zoom": 12,
-                }
-            ],
-        )
+        mock_client = Mock()
+        mock_client.zoom = 12
+        mock_client.fetch_tile.side_effect = [
+            {
+                "Traffic flow": {"features": []},
+                "_tile_x": 2187,
+                "_tile_y": 1483,
+                "_tile_zoom": 12,
+            },
+            {
+                "Traffic flow": {"features": []},
+                "_tile_x": 2187,
+                "_tile_y": 1483,
+                "_tile_zoom": 12,
+            },
+        ]
 
-        service = TrafficService(mock_city, mock_fetcher)
+        service = TrafficService(mock_city, traffic_client=mock_client)
 
         # Mock aggregation to return known data with direction
         with (
@@ -271,5 +298,5 @@ class TestFactoryFunction:
         service = create_traffic_service(mock_city, api_key="test_key", zoom=12)
 
         assert service._city == mock_city
-        assert service._fetcher.api_key == "test_key"
-        assert service._fetcher.zoom == 12
+        assert service._traffic_client.api_key == "test_key"
+        assert service._traffic_client.zoom == 12
