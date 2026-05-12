@@ -8,9 +8,9 @@ import logging
 import threading
 import time
 from application.live import data
-from application.domain.internal_events import domain_events, DIARY_FINISHED
+from application.domain.internal_events import LIVE_TRIP_FINISHED, domain_events
 from persistence import saving_loop, saving_parquet, log_uptime
-from .events import console_events
+from .events import SERVICES_START, SERVICES_STOP, SHUTDOWN_REQUESTED, console_events
 
 COLLECTION_THREAD = None
 SAVING_THREAD = None
@@ -70,7 +70,7 @@ def start_services(observatory=None, config: dict = None):
     gui_port = int(services_cfg.get("debug_gui_port", 8050))
 
     # Subscribe to domain events
-    domain_events.subscribe(DIARY_FINISHED, _on_diary_finished)
+    domain_events.subscribe(LIVE_TRIP_FINISHED, _on_live_trip_finished)
 
     if COLLECTION_THREAD is None or not COLLECTION_THREAD.is_alive():
         COLLECTION_THREAD = threading.Thread(
@@ -293,7 +293,7 @@ def stop_services():
     stop_live_validation()
 
     # Unsubscribe
-    domain_events.unsubscribe(DIARY_FINISHED, _on_diary_finished)
+    domain_events.unsubscribe(LIVE_TRIP_FINISHED, _on_live_trip_finished)
 
     # Stop Dashboard GUI
     try:
@@ -307,60 +307,50 @@ def stop_services():
 # Event Subscriptions
 # ============================================================
 
-def _on_diary_finished(event_data: dict):
-    """Handler: Records measurements in Historical Ledger and vehicle summary
-    in Vehicle Ledger when a diary completes.
-    """
-    # Record raw measurements in Historical Ledger
+def _on_live_trip_finished(event_data: dict):
+    """Record measurements and vehicle summary when a live trip completes."""
     _record_historical(event_data)
-
-    # Record trip summary in Vehicle Ledger
     _record_vehicle_trip(event_data)
 
 
 def _record_historical(event_data: dict):
-    """Extract measurement records from diary and store in the Historical Ledger."""
-    from application.domain.ledgers import extract_measurements_from_diary
+    """Extract measurement records from LiveTrip and store them."""
+    from application.domain.ledgers import extract_measurements_from_live_trip
 
-    diary = event_data.get("diary")
+    live_trip = event_data.get("live_trip")
     route_id = event_data.get("route_id")
-    observatory = event_data.get("observatory")
-    if not diary or not observatory or not route_id:
-        return
-
-    trip = observatory.search_trip(diary.trip_id)
-    if not trip:
+    observatory = data.OBSERVATORY
+    if not live_trip or not observatory or not route_id:
         return
 
     try:
-        records = extract_measurements_from_diary(diary, trip, route_id)
+        records = extract_measurements_from_live_trip(live_trip, route_id)
         observatory.historical.record_measurements(records)
         if records:
-            logging.info(f"Recorded {len(records)} measurements for trip {diary.trip_id}")
+            logging.info(f"Recorded {len(records)} measurements for trip {live_trip.trip_id}")
     except Exception as e:
         logging.error(f"Failed to record historical measurements: {e}")
 
 
 def _record_vehicle_trip(event_data: dict):
-    """Summarize diary into a vehicle trip record and store in VehicleLedger."""
-    from application.domain.ledgers import summarize_diary_for_vehicle
+    """Summarize LiveTrip into vehicle history."""
+    from application.domain.ledgers import summarize_live_trip_for_vehicle
 
-    diary = event_data.get("diary")
+    live_trip = event_data.get("live_trip")
     route_id = event_data.get("route_id")
-    observatory = event_data.get("observatory")
+    observatory = data.OBSERVATORY
     vehicle_type_name = event_data.get("vehicle_type_name", "Unknown")
-    if not diary or not observatory or not route_id:
+    if not live_trip or not observatory or not route_id:
         return
 
-    trip = observatory.search_trip(diary.trip_id)
-    direction_id = trip.direction_id if trip else 0
-
     try:
-        record = summarize_diary_for_vehicle(
-            diary, route_id, direction_id, vehicle_type_name
+        record = summarize_live_trip_for_vehicle(
+            live_trip,
+            route_id=route_id,
+            vehicle_type_name=vehicle_type_name,
         )
         if record:
-            observatory.vehicle_ledger.record_trip(record)
+            observatory.vehicle_history.record_trip(record)
     except Exception as e:
         logging.error(f"Failed to record vehicle trip: {e}")
 
@@ -382,6 +372,6 @@ def _on_shutdown(event_data):
 
 
 # Register handlers
-console_events.subscribe("services_start", _on_services_start)
-console_events.subscribe("services_stop", _on_services_stop)
-console_events.subscribe("shutdown_requested", _on_shutdown)
+console_events.subscribe(SERVICES_START, _on_services_start)
+console_events.subscribe(SERVICES_STOP, _on_services_stop)
+console_events.subscribe(SHUTDOWN_REQUESTED, _on_shutdown)

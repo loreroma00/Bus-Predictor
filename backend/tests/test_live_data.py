@@ -1,36 +1,76 @@
-"""
-Tests for Live Data classes - Autobus, GPSData, Schedule, Update.
-"""
+"""Tests for live data classes: Vehicle, LiveTrip, GPSData, Schedule, Update."""
 
 from unittest.mock import Mock
 import time
 
 
-class TestAutobus:
-    """Test Autobus class functionality."""
+def make_trip():
+    trip = Mock()
+    trip.id = "trip_123"
+    trip.route = Mock()
+    trip.route.id = "route_1"
+    trip.direction_id = 0
+    trip.direction_name = "Termini"
+    trip.stop_times = []
+    return trip
 
-    def test_autobus_creation(self):
-        """Autobus should be creatable with id and trip."""
-        from application.domain.live_data import Autobus
 
-        mock_trip = Mock()
-        mock_trip.trip_id = "trip_123"
+def make_live_trip():
+    from application.domain.static_data import Vehicle
+    from application.domain.live_data import LiveTrip
 
-        bus = Autobus(id="V001", trip=mock_trip)
+    return LiveTrip(trip=make_trip(), vehicle=Vehicle(id="V001", label="V001"))
 
-        assert bus.get_id() == "V001"
-        assert bus.get_trip() == mock_trip
 
-    def test_autobus_gps_data(self):
+class TestVehicle:
+    """Test static Vehicle identity."""
+
+    def test_vehicle_creation(self):
+        """Vehicle should store stable identity only."""
+        from application.domain.static_data import Vehicle
+
+        vehicle = Vehicle(id="V001", label="1001")
+
+        assert vehicle.id == "V001"
+        assert vehicle.label == "1001"
+        assert vehicle.get_history() == []
+
+    def test_vehicle_lazy_history(self):
+        """Vehicle history should be loaded lazily through an injected loader."""
+        from application.domain.static_data import Vehicle
+
+        calls = []
+
+        def loader(vehicle_id):
+            calls.append(vehicle_id)
+            return [{"trip_id": "trip_1"}]
+
+        vehicle = Vehicle(id="V001", label="1001", history_loader=loader)
+
+        assert vehicle.get_history() == [{"trip_id": "trip_1"}]
+        assert vehicle.get_history() == [{"trip_id": "trip_1"}]
+        assert calls == ["1001"]
+
+
+class TestLiveTrip:
+    """Test LiveTrip aggregate functionality."""
+
+    def test_live_trip_creation(self):
+        """LiveTrip should bind a trip to a static vehicle."""
+        live_trip = make_live_trip()
+
+        assert live_trip.get_id() == "V001"
+        assert live_trip.get_trip().id == "trip_123"
+        assert live_trip.measurements == []
+
+    def test_live_trip_gps_data(self):
         """Should be able to set and get GPS data."""
-        from application.domain.live_data import Autobus, GPSData
+        from application.domain.live_data import GPSData
 
-        mock_trip = Mock()
-        bus = Autobus(id="V001", trip=mock_trip)
-
+        live_trip = make_live_trip()
         gps = GPSData(
             id="V001",
-            trip=mock_trip,
+            trip=live_trip.trip,
             timestamp=time.time(),
             latitude=41.9,
             longitude=12.5,
@@ -38,55 +78,34 @@ class TestAutobus:
             heading=180,
         )
 
-        bus.set_gpsData(gps)
-        assert bus.get_gpsData() == gps
+        live_trip.set_gps_data(gps)
+        assert live_trip.get_gps_data() == gps
 
-    def test_autobus_observer(self):
-        """Should be able to set and get observer."""
-        from application.domain.live_data import Autobus
-
-        mock_trip = Mock()
-        bus = Autobus(id="V001", trip=mock_trip)
-
-        mock_observer = Mock()
-        bus.set_observer(mock_observer)
-
-        assert bus.get_observer() == mock_observer
-
-    def test_autobus_latest_update(self):
+    def test_live_trip_latest_update(self):
         """Should be able to set and get latest update."""
-        from application.domain.live_data import Autobus
-
-        mock_trip = Mock()
-        bus = Autobus(id="V001", trip=mock_trip)
-
+        live_trip = make_live_trip()
         mock_update = Mock()
-        bus.set_latest_update(mock_update)
 
-        assert bus.get_latest_update() == mock_update
+        live_trip.set_latest_update(mock_update)
 
-    def test_autobus_location(self):
+        assert live_trip.get_latest_update() == mock_update
+
+    def test_live_trip_location(self):
         """Should be able to set and get location info."""
-        from application.domain.live_data import Autobus
+        live_trip = make_live_trip()
 
-        mock_trip = Mock()
-        bus = Autobus(id="V001", trip=mock_trip)
+        live_trip.set_hexagon_id("abc123")
+        live_trip.set_location_name("Via Roma")
 
-        bus.set_hexagon_id("abc123")
-        bus.set_location_name("Via Roma")
+        assert live_trip.get_hexagon_id() == "abc123"
+        assert live_trip.get_location_name() == "Via Roma"
 
-        assert bus.get_hexagon_id() == "abc123"
-        assert bus.get_location_name() == "Via Roma"
-
-    def test_autobus_crowding_level(self):
+    def test_live_trip_crowding_level(self):
         """Should return readable crowding status."""
-        from application.domain.live_data import Autobus
+        live_trip = make_live_trip()
+        live_trip.set_occupancy_status(1)
 
-        mock_trip = Mock()
-        bus = Autobus(id="V001", trip=mock_trip, occupancy_status=1)
-
-        level = bus.get_crowding_level()
-        assert isinstance(level, str)
+        assert isinstance(live_trip.get_crowding_level(), str)
 
 
 class TestGPSData:
@@ -96,7 +115,7 @@ class TestGPSData:
         """GPSData should store all GPS fields."""
         from application.domain.live_data import GPSData
 
-        mock_trip = Mock()
+        mock_trip = make_trip()
         gps = GPSData(
             id="V001",
             trip=mock_trip,
@@ -122,10 +141,9 @@ class TestGPSData:
         """Optional fields should default to None."""
         from application.domain.live_data import GPSData
 
-        mock_trip = Mock()
         gps = GPSData(
             id="V001",
-            trip=mock_trip,
+            trip=make_trip(),
             timestamp=1234567890,
             latitude=41.9,
             longitude=12.5,
@@ -142,89 +160,75 @@ class TestUpdate:
     """Test Update class functionality."""
 
     def test_update_creation(self):
-        """Update should be creatable with autobus and next_stops."""
-        from application.domain.live_data import Update, Autobus, GPSData
+        """Update should be creatable with LiveTrip and next stops."""
+        from application.domain.live_data import GPSData, Update
 
-        mock_trip = Mock()
-        mock_trip.stop_times = []
-
-        bus = Autobus(id="V001", trip=mock_trip)
-
-        # Create and set GPSData
-        gps = GPSData(
-            id="V001",
-            trip=mock_trip,
-            timestamp=1234567890,
-            latitude=41.9,
-            longitude=12.5,
-            speed=30,
-            heading=180,
-            current_stop_sequence=1,
+        live_trip = make_live_trip()
+        live_trip.set_gps_data(
+            GPSData(
+                id="V001",
+                trip=live_trip.trip,
+                timestamp=1234567890,
+                latitude=41.9,
+                longitude=12.5,
+                speed=30,
+                heading=180,
+                current_stop_sequence=1,
+            )
         )
-        bus.set_gpsData(gps)
 
         next_stops = [{"stop_id": "S1", "stop_sequence": 1, "arrival_time": 1234567890}]
+        update = Update(live_trip, next_stops)
 
-        update = Update(bus, next_stops)
-
-        assert update.get_autobus() == bus
+        assert update.get_live_trip() == live_trip
         assert update.next_stops == next_stops
 
     def test_update_next_stops_stored(self):
         """Update should store the next_stops list."""
-        from application.domain.live_data import Update, Autobus, GPSData
+        from application.domain.live_data import GPSData, Update
 
-        mock_trip = Mock()
-        mock_trip.stop_times = []
-
-        bus = Autobus(id="V001", trip=mock_trip)
-        gps = GPSData(
-            id="V001",
-            trip=mock_trip,
-            timestamp=1234567890,
-            latitude=41.9,
-            longitude=12.5,
-            speed=30,
-            heading=180,
+        live_trip = make_live_trip()
+        live_trip.set_gps_data(
+            GPSData(
+                id="V001",
+                trip=live_trip.trip,
+                timestamp=1234567890,
+                latitude=41.9,
+                longitude=12.5,
+                speed=30,
+                heading=180,
+            )
         )
-        bus.set_gpsData(gps)
 
         next_stops = [
             {"stop_id": "S1", "stop_sequence": 1, "arrival_time": 1234567890},
             {"stop_id": "S2", "stop_sequence": 2, "arrival_time": 1234567950},
         ]
 
-        update = Update(bus, next_stops)
+        update = Update(live_trip, next_stops)
 
-        # Verify the next_stops are stored correctly
         assert len(update.next_stops) == 2
         assert update.next_stops[0]["stop_id"] == "S1"
         assert update.next_stops[1]["stop_id"] == "S2"
 
     def test_update_str(self):
         """__str__ should return formatted string."""
-        from application.domain.live_data import Update, Autobus, GPSData
+        from application.domain.live_data import GPSData, Update
 
-        mock_trip = Mock()
-        mock_trip.trip_id = "trip_123"
-        mock_trip.stop_times = []
-
-        bus = Autobus(id="V001", trip=mock_trip)
-        gps = GPSData(
-            id="V001",
-            trip=mock_trip,
-            timestamp=1234567890,
-            latitude=41.9,
-            longitude=12.5,
-            speed=30,
-            heading=180,
+        live_trip = make_live_trip()
+        live_trip.set_gps_data(
+            GPSData(
+                id="V001",
+                trip=live_trip.trip,
+                timestamp=1234567890,
+                latitude=41.9,
+                longitude=12.5,
+                speed=30,
+                heading=180,
+            )
         )
-        bus.set_gpsData(gps)
 
-        update = Update(bus, [])
-
-        result = str(update)
-        assert isinstance(result, str)
+        assert isinstance(str(Update(live_trip, [])), str)
 
 
 class TestSchedule:
@@ -242,6 +246,4 @@ class TestSchedule:
         from application.domain.live_data import Schedule
 
         schedule = Schedule()
-        result = schedule.get("route_1", 0, "20260115")
-
-        assert result == []
+        assert schedule.get("route_1", 0, "20260115") == []

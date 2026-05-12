@@ -10,11 +10,16 @@ from abc import ABC, abstractmethod
 import pandas as pd
 import time
 
-from .events import console_events
+from .events import (
+    ServicesStartEvent,
+    ServicesStopEvent,
+    ShutdownRequestedEvent,
+    console_events,
+)
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from application.domain.observers import Observatory
+    from application.domain.virtual_entities import Observatory
 
 
 class Command(ABC):
@@ -63,7 +68,7 @@ class print_hex(Command):
 
         logging.info(f"--- Hexagon {hex_id} ---")
         logging.info(f"Streets: {len(hexagon.streets)}")
-        logging.info(f"Buses: {len(hexagon.mobile_agents['buses'])}")
+        logging.info(f"Live trips: {len(hexagon.mobile_agents['live_trips'])}")
 
         # Traffic Data - per direction
         logging.info("\n🚗 Traffic Status (per direction):")
@@ -183,21 +188,21 @@ class print_diary(Command):
                 logging.exception("Traceback:")
                 return f"ERROR:{e}"
 
-        logging.info(f"--- Active Diary for Trip {t_id} ---")
-        diary = self._obs.search_diary(t_id)
-        if diary:
+        logging.info(f"--- LiveTrip for Trip {t_id} ---")
+        live_trip = self._obs.search_live_trip(t_id)
+        if live_trip:
             logging.info(
-                diary.format_rich(
+                live_trip.format_rich(
                     stop_name_resolver=resolve_stop_name,
                     street_name_resolver=resolve_street_name,
                 )
             )
             found = True
 
-        diary = self._obs.search_history(t_id)
-        if diary:
+        live_trip = self._obs.search_completed_live_trip(t_id)
+        if live_trip:
             logging.info(
-                diary.format_rich(
+                live_trip.format_rich(
                     stop_name_resolver=resolve_stop_name,
                     street_name_resolver=resolve_street_name,
                 )
@@ -205,7 +210,7 @@ class print_diary(Command):
             found = True
 
         if not found:
-            logging.warning(f"No diary found for Trip ID {t_id}")
+            logging.warning(f"No live trip found for Trip ID {t_id}")
 
     @staticmethod
     def help():
@@ -227,7 +232,7 @@ class fetch_data(
     def execute(self, args):
         """Execute."""
         t_id = args.strip()
-        diary = self._obs.search_diary(t_id)
+        live_trip = self._obs.search_live_trip(t_id)
 
         logging.info(f"\n--- TRIP {t_id} STATUS ---")
         logging.info(
@@ -235,35 +240,26 @@ class fetch_data(
         )
         logging.info("-" * 75)
 
-        if diary:
-            for m in diary.measurements:
-                s_info = next(
-                    (s for s in diary.scheduledTimes if s["stop_id"] == m.id), None
-                )
-                s_name = s_info["stop_name"] if s_info else m.id
-                t_str = self._format_time(m.actual_time)
-                s_str = m.scheduled_time if m.scheduled_time else "N/A"
+        if live_trip:
+            for m in live_trip.measurements:
+                s_name = m.next_stop or m.id
+                t_str = self._format_time(m.measurement_time)
+                s_str = m.scheduled_start_time if m.scheduled_start_time else "N/A"
                 logging.info(
-                    f"{s_name[:30]:<30} | {m.sequence:<3} | {t_str:<8} | {s_str:<8} | RECORDED"
+                    f"{str(s_name)[:30]:<30} | {m.id:<3} | {t_str:<8} | {s_str:<8} | RECORDED"
                 )
 
-        update = None
-        if diary and diary.observer:
-            bus = diary.observer.get_bus()
-            if bus:
-                update = bus.get_latest_update()
-
-                # Show traffic info for current location
-                if bus.hexagon_id:
-                    city = self._obs.get_city("Rome")
-                    if city:
-                        hexagon = city.hexagons.get(bus.hexagon_id)
-                        if hexagon:
-                            spd = getattr(hexagon, "current_speed", 0)
-                            ratio = hexagon.get_speed_ratio()
-                            logging.info(
-                                f"\n📍 Location Traffic: {spd:.1f} kph (Speed Ratio: {ratio:.0%})"
-                            )
+        update = live_trip.get_latest_update() if live_trip else None
+        if live_trip and live_trip.hexagon_id:
+            city = self._obs.get_city("Rome")
+            if city:
+                hexagon = city.hexagons.get(live_trip.hexagon_id)
+                if hexagon:
+                    spd = hexagon.get_current_speed()
+                    ratio = hexagon.get_speed_ratio()
+                    logging.info(
+                        f"\nLocation Traffic: {spd:.1f} kph (Speed Ratio: {ratio:.0%})"
+                    )
 
         if update:
             for stu in update.next_stops:
@@ -280,7 +276,7 @@ class fetch_data(
                     f"{s_name[:30]:<30} | {stu['stop_sequence']:<3} | {t_display:<16} | {s_str:<8} | PREDICTED"
                 )
 
-        if not diary and not update:
+        if not live_trip and not update:
             logging.warning("No active diary or live data found for this trip.")
 
     @staticmethod
@@ -299,11 +295,11 @@ class print_all_diaries(Command):
 
     def execute(self, args):
         """Execute."""
-        diaries, count_diaries, count_observers = self._obs.get_all_current_diaries()
-        for d in diaries:
-            logging.info(d)
-        logging.info(f"Total Observers: {count_observers}")
-        logging.info(f"Total Diaries: {count_diaries}")
+        rows, count_measurements, count_live_trips = self._obs.get_all_current_measurements()
+        for row in rows:
+            logging.info(row)
+        logging.info(f"Total LiveTrips: {count_live_trips}")
+        logging.info(f"Total Measurements: {count_measurements}")
 
     @staticmethod
     def help():
@@ -327,7 +323,7 @@ class command_quit(Command):
     def execute(self, args):
         """Execute."""
         logging.info("Shutting Down...")
-        console_events.emit("shutdown_requested")
+        console_events.emit(ShutdownRequestedEvent())
 
     @staticmethod
     def help():
@@ -345,7 +341,7 @@ class stop_observers(Command):
 
     def execute(self, args):
         """Execute."""
-        console_events.emit("services_stop")
+        console_events.emit(ServicesStopEvent())
 
     @staticmethod
     def help():
@@ -365,7 +361,7 @@ class start_observers(Command):
 
     def execute(self, args):
         """Execute."""
-        console_events.emit("services_start")
+        console_events.emit(ServicesStartEvent())
 
     @staticmethod
     def help():
@@ -629,14 +625,14 @@ class print_all_diaries_vehicle(Command):
             # Fallback: maybe the user provided the internal ID directly
             vehicle_id = vehicle_label
 
-        diaries = self._obs.get_vehicle_diaries(vehicle_id)
-        if not diaries:
-            logging.warning(f"No diaries found for vehicle {vehicle_label} (ID: {vehicle_id})")
+        live_trips = self._obs.get_vehicle_live_trips(vehicle_id)
+        if not live_trips:
+            logging.warning(f"No live trips found for vehicle {vehicle_label} (ID: {vehicle_id})")
             return
 
-        logging.info(f"--- Diaries for Vehicle {vehicle_label} ({len(diaries)}) ---")
-        for diary in diaries:
-            logging.info(diary)
+        logging.info(f"--- LiveTrips for Vehicle {vehicle_label} ({len(live_trips)}) ---")
+        for live_trip in live_trips:
+            logging.info(live_trip)
 
     @staticmethod
     def help():

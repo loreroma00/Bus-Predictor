@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from application.domain.observers import Diary
+    from application.domain.live_data import LiveTrip
     from application.domain.static_data import Shape
 
 
@@ -15,12 +15,12 @@ class TripVerificationStrategy(ABC):
     """Strategy interface for verifying if a trip was properly served."""
 
     @abstractmethod
-    def is_trip_valid(self, diary: "Diary", shape: "Shape" = None) -> bool:
+    def is_trip_valid(self, live_trip: "LiveTrip", shape: "Shape" = None) -> bool:
         """
-        Returns True if the diary represents a valid, completed trip.
+        Returns True if the live trip represents a valid, completed trip.
 
         Args:
-            diary: The diary to validate
+            live_trip: The live trip to validate
             shape: Optional shape for spatial validation
         """
         pass
@@ -49,31 +49,31 @@ class BasicTripVerification(TripVerificationStrategy):
         self.min_measurements = min_measurements
         self.min_shape_coverage = min_shape_coverage
 
-    def is_trip_valid(self, diary: "Diary", shape: "Shape" = None) -> bool:
-        """Return True if the diary meets the minimum-measurement and coverage thresholds."""
+    def is_trip_valid(self, live_trip: "LiveTrip", shape: "Shape" = None) -> bool:
+        """Return True if the live trip meets the minimum-measurement and coverage thresholds."""
         # No measurements = invalid
-        if not diary.measurements:
+        if not live_trip.measurements:
             return False
 
         # Check minimum measurement count
-        if len(diary.measurements) < self.min_measurements:
+        if len(live_trip.measurements) < self.min_measurements:
             return False
 
         # Shape coverage check (optional)
         if self.min_shape_coverage > 0.0 and shape is not None:
-            coverage = self._calculate_shape_coverage(diary, shape)
+            coverage = self._calculate_shape_coverage(live_trip, shape)
             if coverage < self.min_shape_coverage:
                 return False
 
         return True
 
-    def _calculate_shape_coverage(self, diary: "Diary", shape: "Shape") -> float:
+    def _calculate_shape_coverage(self, live_trip: "LiveTrip", shape: "Shape") -> float:
         """
         Calculate what fraction of the route shape was covered.
 
         Returns ratio in [0.0, 1.0].
         """
-        if not diary.measurements or shape is None:
+        if not live_trip.measurements or shape is None:
             return 0.0
 
         # Get total shape length
@@ -82,8 +82,8 @@ class BasicTripVerification(TripVerificationStrategy):
             return 0.0
 
         # Project first and last measurements onto shape
-        first_m = diary.measurements[0]
-        last_m = diary.measurements[-1]
+        first_m = live_trip.measurements[0]
+        last_m = live_trip.measurements[-1]
 
         first_dist = shape.project(first_m.gpsdata.latitude, first_m.gpsdata.longitude)
         last_dist = shape.project(last_m.gpsdata.latitude, last_m.gpsdata.longitude)
@@ -117,10 +117,10 @@ class ScaledMeasurementVerification(TripVerificationStrategy):
         self.min_shape_coverage = min_shape_coverage
 
     def is_trip_valid(
-        self, diary: "Diary", shape: "Shape" = None, stop_count: int = None
+        self, live_trip: "LiveTrip", shape: "Shape" = None, stop_count: int = None
     ) -> bool:
         """Return True if the diary meets a dynamic minimum scaled by ``stop_count``."""
-        if not diary.measurements:
+        if not live_trip.measurements:
             return False
 
         # Calculate dynamic minimum based on stop count
@@ -132,13 +132,13 @@ class ScaledMeasurementVerification(TripVerificationStrategy):
         else:
             dynamic_min = self.absolute_minimum
 
-        if len(diary.measurements) < dynamic_min:
+        if len(live_trip.measurements) < dynamic_min:
             return False
 
         # Shape coverage check
         if self.min_shape_coverage > 0.0 and shape is not None:
             coverage = BasicTripVerification._calculate_shape_coverage(
-                BasicTripVerification(), diary, shape
+                BasicTripVerification(), live_trip, shape
             )
             if coverage < self.min_shape_coverage:
                 return False

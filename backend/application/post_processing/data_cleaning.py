@@ -24,7 +24,7 @@ from application.domain.interfaces import Pipeline
 from . import vectorization
 
 if TYPE_CHECKING:
-    from ..domain.observers import Measurement, Diary
+    from ..domain.live_data import LiveTrip, Measurement
 
 logger = logging.getLogger(__name__)
 
@@ -562,17 +562,17 @@ def _check_data_integrity(
     return cleaned_dict
 
 
-def _process_parquet_file(file_path: str) -> list["Diary"]:
+def _process_parquet_file(file_path: str) -> list["LiveTrip"]:
     """
-    Reads a parquet file and reconstructs Diary objects.
+    Reads a parquet file and reconstructs lightweight LiveTrip-like objects.
 
     Args:
         file_path: Path to the .parquet file.
 
     Returns:
-        List of Diary objects (one per trip_id found in the file).
+        List of LiveTrip-like objects (one per trip_id found in the file).
     """
-    from ..domain.observers import Diary, Measurement
+    from ..domain.live_data import Measurement
 
     try:
         df = pd.read_parquet(file_path)
@@ -580,7 +580,7 @@ def _process_parquet_file(file_path: str) -> list["Diary"]:
         logger.error(f"Failed to read parquet file {file_path}: {e}")
         return []
 
-    diaries: list["Diary"] = []
+    live_trips: list["LiveTrip"] = []
 
     # Group by trip_id
     if "trip_id" not in df.columns:
@@ -590,9 +590,12 @@ def _process_parquet_file(file_path: str) -> list["Diary"]:
     grouped = df.groupby("trip_id")
 
     for trip_id, group in grouped:
-        # Create a new Diary for this trip
-        # Observer is None as we are reconstructing from file
-        diary = Diary(observer=None, trip_id=str(trip_id))
+        live_trip = SimpleNamespace(
+            trip_id=str(trip_id),
+            measurements=[],
+            scheduled_start_time="",
+            actual_start_time=0.0,
+        )
 
         for _, row in group.iterrows():
             # Reconstruct Weather
@@ -627,7 +630,7 @@ def _process_parquet_file(file_path: str) -> list["Diary"]:
             # Reconstruct Measurement
             m = Measurement(
                 id=row.get("stop_id"),
-                autobus_id=row.get("autobus_id", 0),
+                vehicle_id=row.get("vehicle_id", row.get("autobus_id", 0)),
                 next_stop=row.get("next_stop"),
                 next_stop_distance=row.get("next_stop_distance"),
                 gpsdata=gps_data,
@@ -648,12 +651,12 @@ def _process_parquet_file(file_path: str) -> list["Diary"]:
                 measurement_time=row.get("measurement_time"),
             )
 
-            diary.add_measurement(m)
+            live_trip.measurements.append(m)
 
-        diaries.append(diary)
+        live_trips.append(live_trip)
 
-    logger.info(f"Reconstructed {len(diaries)} diaries from {file_path}")
-    return diaries
+    logger.info(f"Reconstructed {len(live_trips)} live trips from {file_path}")
+    return live_trips
 
 
 def _get_attr_path(obj, path):

@@ -170,18 +170,18 @@ class TrafficService:
 
     def update_traffic(self) -> int:
         """
-        Global loop: updates traffic for all hexagons with buses.
+        Global loop: updates traffic for all hexagons with active live trips.
 
         Returns:
             Count of ALL updated hexagons (including tile coverage propagation)
         """
-        hex_ids = self._city.get_hexagons_with_buses()
+        hex_ids = self._city.get_hexagons_with_live_trips()
 
         if not hex_ids:
-            logging.debug("  Traffic: No hexagons with buses, skipping update")
+            logging.debug("  Traffic: No hexagons with live trips, skipping update")
             return 0
 
-        logging.debug(f"  Traffic: Updating traffic for {len(hex_ids)} hexagons with buses")
+        logging.debug(f"  Traffic: Updating traffic for {len(hex_ids)} hexagons with live trips")
         updated = self.update_traffic_info(hex_ids)
         return len(updated)
 

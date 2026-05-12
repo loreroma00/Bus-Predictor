@@ -31,7 +31,7 @@ from .diaries import (
 
 from .cache import log_uptime, save_pickle, load_pickle
 
-from .ledger_db import (
+from .database import (
     write_historical,
     write_predicted,
     write_vehicle_trips,
@@ -47,6 +47,7 @@ from .database import (
     init_database,
     close_database,
     shutdown_database,
+    test_database_connection,
 )
 
 __all__ = [
@@ -92,4 +93,5 @@ __all__ = [
     "init_database",
     "close_database",
     "shutdown_database",
+    "test_database_connection",
 ]

@@ -1,48 +1,38 @@
 """
-Data Orchestrator - Manages real-time data collection and update processing.
-Uses LiveFeedFetcher for data retrieval.
+Data orchestrator for real-time GTFS-RT ingestion.
 
-Observatory is injected at startup via initialize() - no persistence imports here.
+The live feed is unpacked into ``Update`` objects, then applied to the owning
+``LiveTrip`` aggregate. There are no observers: a live trip owns its current
+state and its measurement list.
 """
 
+from __future__ import annotations
+
 import logging
-import time
 import threading
+import time
 
 from .. import domain as t
 from .feed_fetcher import LiveFeedFetcher
 
-# Threading events
 SHUTDOWN_EVENT = threading.Event()
 STOP_COLLECTION_EVENT = threading.Event()
 
-# Global state
-# CITIES: dict[str, t.City] = {}  <-- REMOVED (Split brain fix)
-OBSERVATORY: t.Observatory = None  # Injected at startup via initialize()
-CACHE_STRATEGY = None  # Injected at startup for saving loop
-TRAFFIC_SERVICE = None  # Injected at startup for traffic updates
-CONFIG: dict = None  # Injected at startup
+OBSERVATORY: t.Observatory = None
+CACHE_STRATEGY = None
+TRAFFIC_SERVICE = None
+CONFIG: dict = None
 
-# Feed fetcher instance
 _feed_fetcher = None
 
 
-class VehicleTypeNotFoundException(Exception):
-    """Raised when a vehicle label cannot be matched to a known VehicleType."""
-    pass
-
-
 def initialize(observatory: t.Observatory, cache_strategy=None, config: dict = None):
-    """
-    Initialize the data module with an Observatory instance.
-    Called once at application startup from main.py.
-    """
+    """Initialize this module with its runtime dependencies."""
     global OBSERVATORY, CACHE_STRATEGY, CONFIG, _feed_fetcher
     OBSERVATORY = observatory
     CACHE_STRATEGY = cache_strategy
     CONFIG = config or {}
 
-    # Initialize Feed Fetcher with config
     urls = CONFIG.get("urls", {})
     _feed_fetcher = LiveFeedFetcher(
         vehicles_url=urls.get("rtgtfs_vehicles"),
@@ -53,30 +43,22 @@ def initialize(observatory: t.Observatory, cache_strategy=None, config: dict = N
 
 
 def wire_traffic_callback():
-    """
-    Wire the traffic update callback to the city.
-    Must be called after TRAFFIC_SERVICE is initialized.
-    """
+    """Wire the expired-traffic callback into the city object."""
     if OBSERVATORY and TRAFFIC_SERVICE:
         city = OBSERVATORY.get_city("Rome")
         if city:
-            city.set_on_bus_entered_expired_hex(_on_bus_entered_expired_hex)
+            city.set_on_live_trip_entered_expired_hex(
+                _on_live_trip_entered_expired_hex
+            )
             logging.debug("  Traffic callback wired to city.")
 
 
 def get_realtime_updates():
-    """
-    Fetches real-time data and returns a list of Update objects.
-    Manages buses and observers for each active vehicle.
-    """
+    """Fetch GTFS-RT rows and apply them to active LiveTrip objects."""
     global OBSERVATORY
-    # Ensure topology is available
     topology = OBSERVATORY.get_topology()
-
-    # Fetch live data
     live_data = _feed_fetcher.fetch()
 
-    # Debug: Feed freshness
     if not live_data.empty and "timestamp" in live_data.columns:
         newest_ts = live_data["timestamp"].max()
         logging.debug(
@@ -88,79 +70,69 @@ def get_realtime_updates():
 
     for _, row in live_data.iterrows():
         try:
-            v_id = row.get("vehicleId")
+            vehicle_id = row.get("vehicleId")
             label = row.get("vehicleLabel")
-            display_id = label if label else v_id
+            display_id = label if label else vehicle_id
 
-            # Skip duplicates
-            if v_id in processed_vehicles:
+            if vehicle_id in processed_vehicles:
                 continue
-            processed_vehicles.add(v_id)
+            processed_vehicles.add(vehicle_id)
 
-            t_id = row.get("tripId")
-
-            # Get trip from topology
-            trip = topology.get_trip(t_id)
+            trip_id = row.get("tripId")
+            trip = topology.get_trip(trip_id)
+            if not trip and OBSERVATORY.check_and_reload_ledger():
+                topology = OBSERVATORY.get_topology()
+                trip = topology.get_trip(trip_id)
 
             if not trip:
-                # Hot swap check
-                if OBSERVATORY.check_and_reload_ledger():
-                    topology = OBSERVATORY.get_topology()
-                    trip = topology.get_trip(t_id)
-
-            if not trip:
-                logging.warning(f"Warning: Trip {t_id} not found. Skipping.")
+                logging.warning(f"Warning: Trip {trip_id} not found. Skipping.")
                 continue
 
-            # Get or create bus
-            bus: t.Autobus = None
-            status: int = 0
-            try:
-                scheduled_start_time = row.get("startTime")
-                bus, status = _get_or_create_bus(
-                    v_id, trip, label=label, scheduled_start_time=scheduled_start_time
-                )
-            except VehicleTypeNotFoundException as e:
-                print(f"{e}")
-                logging.error(e)
-                continue
+            scheduled_start_time = row.get("startTime")
+            live_trip, status = OBSERVATORY.get_or_create_live_trip(
+                vehicle_id=vehicle_id,
+                trip=trip,
+                label=label,
+                scheduled_start_time=scheduled_start_time,
+            )
 
             if status == 0:
                 logging.info(
-                    f"Found NEW Bus: {display_id} - {trip.route.id} {trip.direction_name}"
+                    f"Found NEW LiveTrip: {display_id} - {trip.route.id} {trip.direction_name}"
+                )
+            elif status == 2:
+                logging.info(
+                    f"Detected trip change for {display_id}: now {trip.id}"
                 )
             else:
                 logging.debug(
-                    f"Update for known Bus: {display_id} - {trip.route.id} {trip.direction_name}"
+                    f"Update for LiveTrip: {display_id} - {trip.route.id} {trip.direction_name}"
                 )
 
-            # Create GPS data
-            gps_data = _create_gps_data(v_id, trip, row)
-            bus.set_gpsData(gps_data)
-            bus.set_occupancy_status(row.get("occupancyStatus"))
-            bus.derive_speed()
-            bus.derive_bearing()
+            gps_data = _create_gps_data(vehicle_id, trip, row)
+            live_trip.set_gps_data(gps_data)
+            live_trip.set_occupancy_status(row.get("occupancyStatus"))
+            live_trip.derive_speed()
+            live_trip.derive_bearing()
 
-            # Add bus to city
-            if status == 0:
-                OBSERVATORY.add_bus_to_city(
+            if status in (0, 2):
+                OBSERVATORY.add_live_trip_to_city(
                     "Rome",
-                    bus,
+                    live_trip,
                     latitude=gps_data.latitude,
                     longitude=gps_data.longitude,
                 )
             else:
-                OBSERVATORY.move_bus(
+                OBSERVATORY.move_live_trip(
                     "Rome",
-                    bus,
+                    live_trip,
                     latitude=gps_data.latitude,
                     longitude=gps_data.longitude,
                 )
 
-            # Create update object
-            update_obj = _create_update_object(bus, row)
+            update_obj = _create_update_object(live_trip, row)
+            _apply_live_trip_update(live_trip, update_obj)
             updates.append(update_obj)
-            # bus.set_latest_update(update_obj) Do we need this?
 
         except Exception as e:
             logging.error(
@@ -171,54 +143,10 @@ def get_realtime_updates():
     return updates
 
 
-def _get_or_create_bus(v_id, trip, label=None, scheduled_start_time: str = None):
-    """Get existing bus or create new one."""
-    bus = OBSERVATORY.get_bus("Rome", v_id)
-    status = 1  # Existing
-
-    # Use label for display and logic if available, else ID
-    display_id = label if label else v_id
-
-    if not bus:
-        # Debug: Why not found?
-        # print(f"DEBUG: Bus {v_id} NOT found in city. Creating NEW.")
-        status = 0  # New
-
-        # Vehicle Type Lookup uses LABEL (Fleet is keyed by Label/Visual ID)
-        vehicle_type: t.static_data.VehicleType = OBSERVATORY.get_vehicle_type(
-            display_id
-        )
-
-        if vehicle_type is None:
-            logging.warning(
-                f"No Vehicle corresponding to this ID ({display_id})! usage of N/A values enabled."
-            )
-
-        bus = t.Autobus(id=v_id, vehicle_type=vehicle_type, trip=trip, label=label)
-        OBSERVATORY.create_observer(bus, scheduled_start_time=scheduled_start_time)
-        OBSERVATORY.update_fleet_count(display_id)
-    else:
-        # Debug: Found
-        # print(f"DEBUG: Bus {v_id} FOUND. Trip: {bus.trip.id} vs New: {trip.id}")
-
-        # Check for trip change
-        if bus.trip.id != trip.id:
-            logging.info(
-                f"DETECTED TRIP CHANGE: {display_id}: {bus.trip.id} -> {trip.id}"
-            )
-            observer = bus.get_observer()
-            if observer:
-                observer.start_new_trip(trip, scheduled_start_time=scheduled_start_time)
-            bus.set_trip(trip)
-
-    return bus, status
-
-
-def _create_gps_data(v_id, trip, row):
-    """Create GPSData object from row data."""
-    gps_id = f"{v_id}_{row.get('timestamp')}"
-
-    gps_data = t.GPSData(
+def _create_gps_data(vehicle_id, trip, row):
+    """Create GPSData object from a feed row."""
+    gps_id = f"{vehicle_id}_{row.get('timestamp')}"
+    return t.GPSData(
         id=gps_id,
         trip=trip,
         timestamp=row.get("timestamp"),
@@ -230,129 +158,122 @@ def _create_gps_data(v_id, trip, row):
         current_stop_sequence=row.get("currentStopSequence"),
         current_status=row.get("currentStatus"),
     )
-    return gps_data
 
 
-def _create_update_object(bus, row):
-    """Create Update object."""
+def _create_update_object(live_trip: t.LiveTrip, row):
+    """Create a combined Update object."""
     val = row.get("stopUpdates")
     next_stops = val if isinstance(val, list) else []
-    return t.Update(autobus=bus, next_stops=next_stops)
+    return t.Update(live_trip=live_trip, next_stops=next_stops)
 
 
-def _feed_observers(updates: list[t.Update]):
-    """Feed updates to observers for diary recording."""
+def _apply_live_trip_update(live_trip: t.LiveTrip, update: t.Update):
+    """Compute context for one update and let LiveTrip append its measurement."""
     from application.domain.spatial_utils import get_cardinal_direction
 
-    for update in updates:
-        observer: t.Observer = update.autobus.get_observer()
-        city: t.City = OBSERVATORY.get_city("Rome")
-        hexagon = city.get_hexagon(update.autobus.get_hexagon_id())
+    city: t.City = OBSERVATORY.get_city("Rome")
+    hexagon = city.get_hexagon(live_trip.get_hexagon_id()) if city else None
+    if not hexagon:
+        return
 
-        # Get traffic in the direction the bus is traveling
-        bearing = update.autobus.derived_bearing
-        direction = get_cardinal_direction(bearing) if bearing else None
+    bearing = live_trip.derived_bearing
+    direction = get_cardinal_direction(bearing) if bearing else None
+    speed_ratio = hexagon.get_speed_ratio(direction)
+    current_speed = hexagon.get_current_speed(direction)
+    traffic_pending = hexagon.is_traffic_expired()
+    distance = OBSERVATORY.get_stop_distance(update)
 
-        speed_ratio: float = hexagon.get_speed_ratio(direction)
-        current_speed: float = hexagon.get_current_speed(direction)
+    weather = None
+    try:
+        weather = city.get_weather(live_trip.get_hexagon_id())
+    except Exception:
+        pass
 
-        # Check if traffic data is expired - measurement will need correction
-        traffic_pending = hexagon.is_traffic_expired()
-
-        if observer:
-            distance = OBSERVATORY.get_stop_distance(update)
-            observer.updateDiary(
-                update, distance, speed_ratio, current_speed, traffic_pending
-            )
+    live_trip.apply_update(
+        update,
+        next_stop_distance=distance,
+        speed_ratio=speed_ratio,
+        current_speed=current_speed,
+        traffic_data_pending=traffic_pending,
+        weather=weather,
+    )
 
 
 def print_tracking_summary():
-    """Print table of currently tracked buses."""
-    observers = OBSERVATORY.get_observers()
-    if not observers:
+    """Print table of currently tracked live trips."""
+    live_trips = OBSERVATORY.get_active_live_trips()
+    if not live_trips:
         return
 
     print(
-        f"\n[{t.to_readable_time(time.time())}] --- TRACKING STATUS ({len(observers)} Buses) ---"
+        f"\n[{t.to_readable_time(time.time())}] --- TRACKING STATUS ({len(live_trips)} LiveTrips) ---"
     )
     print(
-        f"{'Bus ID':<10} {'Type':<15} {'Trip ID':<15} {'Route':<10} {'Headsign':<20} {'Location':<25} {'Speed':<8} {'Status':<10} {'Last Seen':<12} {'Weather':<20} {'Samples'}"
+        f"{'Vehicle':<10} {'Type':<15} {'Trip ID':<15} {'Route':<10} {'Headsign':<20} {'Location':<25} {'Speed':<8} {'Status':<10} {'Last Seen':<12} {'Weather':<20} {'Samples'}"
     )
     print("-" * 180)
 
-    sorted_obs = sorted(
-        observers.values(), key=lambda x: x.assignedVehicle.trip.route.id
+    sorted_live_trips = sorted(
+        live_trips.values(), key=lambda x: x.trip.route.id
     )
 
-    for obs in sorted_obs:
-        trip = obs.assignedVehicle.trip
-        diary = obs.current_diary
-        rec_count = len(diary.measurements) if diary else 0
+    for live_trip in sorted_live_trips:
+        trip = live_trip.trip
+        rec_count = len(live_trip.measurements)
         headsign = (
             (trip.direction_name[:18] + "..")
             if trip.direction_name and len(trip.direction_name) > 20
             else trip.direction_name
         )
 
-        last_seen = obs.assignedVehicle.last_seen_timestamp
+        last_seen = live_trip.last_seen_timestamp
         delta_min = int((time.time() - last_seen) / 60)
         last_seen_str = f"{delta_min}m ago" if delta_min > 0 else "Just now"
 
-        # Determine Status
         status_str = "ACTIVE"
-        if OBSERVATORY.is_bus_in_deposit("Rome", obs.assignedVehicle.id):
+        if OBSERVATORY.is_live_trip_in_deposit("Rome", live_trip.id):
             status_str = "DEPOSIT"
 
-        # Get Vehicle Type
         vehicle_type = "Unknown"
-        if obs.assignedVehicle.vehicle_type:
-            vehicle_type = obs.assignedVehicle.vehicle_type.name
+        if live_trip.vehicle_type:
+            vehicle_type = live_trip.vehicle_type.name
             if len(vehicle_type) > 13:
                 vehicle_type = vehicle_type[:11] + ".."
 
-        # Get Location
-        location_name = obs.assignedVehicle.get_location_name() or "Resolving..."
+        location_name = live_trip.get_location_name() or "Resolving..."
         if len(location_name) > 23:
             location_name = location_name[:21] + ".."
 
-        # Get Speed
-        bus = obs.assignedVehicle
-        speed = (
-            bus.GPSData.speed
-            if bus.GPSData and bus.GPSData.speed
-            else bus.derived_speed
-        )
+        gps = live_trip.get_gps_data()
+        speed = gps.speed if gps and gps.speed else live_trip.derived_speed
         speed_str = f"{speed:.1f}km/h"
 
-        # Get Weather Info
         weather_str = "N/A"
         try:
-            if diary:
-                last_meas = diary.get_last_measurement()
-                if last_meas and last_meas.weather:
-                    w = last_meas.weather
-                    weather_str = f"{w.description} ({w.precip_intensity}mm/h)"
+            last_meas = live_trip.get_last_measurement()
+            if last_meas and last_meas.weather:
+                w = last_meas.weather
+                weather_str = f"{w.description} ({w.precip_intensity}mm/h)"
         except Exception:
             pass
 
         print(
-            f"{obs.assignedVehicle.label:<10} {vehicle_type:<15} {trip.id:<15} {trip.route.id:<10} {str(headsign):<20} {location_name:<25} {speed_str:<8} {status_str:<10} {last_seen_str:<12} {weather_str:<20} {rec_count}"
+            f"{live_trip.vehicle.label:<10} {vehicle_type:<15} {trip.id:<15} {trip.route.id:<10} {str(headsign):<20} {location_name:<25} {speed_str:<8} {status_str:<10} {last_seen_str:<12} {weather_str:<20} {rec_count}"
         )
     print("-" * 180)
 
-    # Geocoding stats
     if OBSERVATORY._geocoding:
         resolved = OBSERVATORY._geocoding.get_and_reset_resolved_count()
         pending = OBSERVATORY._geocoding.get_queue_size()
         if resolved > 0 or pending > 0:
             logging.info(
-                f"📍 Geocoding: {resolved} resolved this cycle, {pending} pending"
+                f"Geocoding: {resolved} resolved this cycle, {pending} pending"
             )
 
 
 def run_collection_loop():
     """Background thread function for data collection."""
-    logging.info("Starting Real-time Observer... Press Ctrl+C or type 'quit' to stop.")
+    logging.info("Starting real-time ingestion. Press Ctrl+C or type 'quit' to stop.")
 
     try:
         while not SHUTDOWN_EVENT.is_set() and not STOP_COLLECTION_EVENT.is_set():
@@ -360,12 +281,10 @@ def run_collection_loop():
                 f"[{t.to_readable_time(time.time())}] Fetching and processing live data..."
             )
 
-            updates = get_realtime_updates()
-            _feed_observers(updates)
+            get_realtime_updates()
 
-            # Helper: Prune stale buses
             if OBSERVATORY:
-                OBSERVATORY.prune_stale_buses("Rome", ttl=600)  # 10 minutes TTL
+                OBSERVATORY.prune_stale_live_trips("Rome", ttl=600)
 
             logging.info(f"[{t.to_readable_time(time.time())}] Cycle complete.")
             print_tracking_summary()
@@ -388,114 +307,79 @@ def run_weather_loop(update_time: int = 900):
             logging.info(
                 f"[{t.to_readable_time(time.time())}] Weather update complete."
             )
-            SHUTDOWN_EVENT.wait(update_time)  # Update every fifteen minutes
+            SHUTDOWN_EVENT.wait(update_time)
     except Exception as e:
         logging.error(f"Error in weather loop: {e}")
 
 
 def run_geocoding_loop():
-    """
-    Background thread function for geocoding queue processing.
-
-    Processes one geocoding request per second to respect API rate limits.
-    The actual rate limiting is handled by the RateLimiter in map_info.py,
-    but we add a small sleep to prevent busy-waiting.
-    """
+    """Process async geocoding requests in the background."""
     try:
         while not SHUTDOWN_EVENT.is_set() and not STOP_COLLECTION_EVENT.is_set():
             if OBSERVATORY and OBSERVATORY._geocoding:
                 processed = OBSERVATORY._geocoding.process_one()
-                if processed:
-                    # Small delay after processing (rate limiter handles the real 1s delay)
-                    time.sleep(0.1)
-                else:
-                    # Queue is empty, wait a bit before checking again
-                    time.sleep(1.0)
+                time.sleep(0.1 if processed else 1.0)
             else:
-                # Geocoding not enabled, sleep longer
                 time.sleep(5.0)
     except Exception as e:
         logging.error(f"Error in geocoding loop: {e}")
 
 
-def _on_bus_entered_expired_hex(bus_id: str, hex_id: str):
-    """
-    Callback when a bus enters a hexagon with expired traffic data.
-    Immediately fetches fresh traffic and corrects pending measurements.
-    """
+def _on_live_trip_entered_expired_hex(live_trip_id: str, hex_id: str):
+    """Fetch fresh traffic when a live trip enters an expired hex."""
     if not TRAFFIC_SERVICE:
         return
 
-    label = bus_id
+    label = live_trip_id
     if OBSERVATORY:
-        b = OBSERVATORY.get_bus("Rome", bus_id)
-        if b:
-            label = b.label
+        live_trip = OBSERVATORY.get_live_trip("Rome", live_trip_id)
+        if live_trip:
+            label = live_trip.vehicle.label
 
-    logging.debug(f"  Traffic: Bus {label} entered expired hex {hex_id[:12]}...")
-
-    # 1. Fetch fresh traffic immediately (updates all hexagons in tile)
+    logging.debug(f"  Traffic: LiveTrip {label} entered expired hex {hex_id[:12]}...")
     updated_hex_ids = TRAFFIC_SERVICE.update_traffic_for_hexagon(hex_id)
 
-    # 2. Correct pending measurements for this bus
     if OBSERVATORY and updated_hex_ids:
-        _correct_pending_measurements(bus_id, updated_hex_ids)
+        _correct_pending_measurements(live_trip_id, updated_hex_ids)
 
 
-def _correct_pending_measurements(bus_id: str, updated_hex_ids: list[str]):
-    """Correct measurements that were recorded with outdated traffic data."""
+def _correct_pending_measurements(live_trip_id: str, updated_hex_ids: list[str]):
+    """Correct measurements recorded with outdated traffic data."""
     from application.domain.spatial_utils import get_cardinal_direction
 
-    # Find the observer for this bus
-    bus = OBSERVATORY.get_bus("Rome", bus_id)
-    if not bus:
-        return
-
-    observer = bus.get_observer()
-    if not observer or not observer.current_diary:
+    live_trip = OBSERVATORY.get_live_trip("Rome", live_trip_id)
+    if not live_trip:
         return
 
     city = OBSERVATORY.get_city("Rome")
-    pending = observer.current_diary.get_pending_traffic_measurements()
+    pending = live_trip.get_pending_traffic_measurements()
 
     for measurement in pending:
-        # Get the hexagon for this measurement's location
-        hex_id = measurement.hexagon_id if measurement.hexagon_id else None
+        hex_id = measurement.hexagon_id
         if not hex_id:
-            # Derive from coordinates
             from application.domain import h3_utils
 
             hex_id = h3_utils.get_h3_index(
-                measurement.gpsdata.latitude, measurement.gpsdata.longitude
+                measurement.gpsdata.latitude,
+                measurement.gpsdata.longitude,
             )
 
         if hex_id in updated_hex_ids:
             hexagon = city.get_hexagon(hex_id)
             if hexagon:
-                # Get direction from measurement's bearing
                 bearing = measurement.derived_bearing
                 direction = get_cardinal_direction(bearing) if bearing else None
-
-                # Update ONLY traffic fields
                 measurement.update_traffic_data(
                     hexagon.get_speed_ratio(direction),
                     hexagon.get_current_speed(direction),
                 )
                 logging.debug(
-                    f"  Traffic: Corrected measurement {measurement.id} for bus {bus.label}"
+                    f"  Traffic: Corrected measurement {measurement.id} for {live_trip.vehicle.label}"
                 )
 
 
 def run_traffic_loop(update_interval: int = 300):
-    """
-    Background thread function for traffic updates.
-
-    Fetches TomTom traffic data at regular intervals and updates hexagons.
-    Rate limited to 10 QPS per TomTom API requirements internally.
-
-    Args:
-        update_interval: Seconds between update cycles (default 5 minutes)
-    """
+    """Background thread function for traffic updates."""
     try:
         while not SHUTDOWN_EVENT.is_set() and not STOP_COLLECTION_EVENT.is_set():
             if TRAFFIC_SERVICE:
@@ -510,9 +394,6 @@ def run_traffic_loop(update_interval: int = 300):
                     )
                 except Exception as e:
                     logging.error(f"Error in traffic update: {e}")
-            else:
-                # Traffic service not configured, wait longer
-                pass
             SHUTDOWN_EVENT.wait(update_interval)
     except Exception as e:
         logging.error(f"Error in traffic loop: {e}")

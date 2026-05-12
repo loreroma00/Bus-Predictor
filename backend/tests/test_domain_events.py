@@ -2,7 +2,12 @@
 Tests for DomainEventBus - the internal domain event system.
 """
 
-from application.domain.internal_events import DomainEventBus, domain_events
+from application.domain.internal_events import (
+    DiaryFinishedEvent,
+    DomainEventBus,
+    InternalEvent,
+    domain_events,
+)
 
 
 class TestDomainEventBus:
@@ -73,6 +78,31 @@ class TestDomainEventBus:
         # Should not raise
         bus.emit("test_event")
         assert "ok" in results
+
+    def test_typed_event_emit(self):
+        """Typed internal events should emit their payload dict."""
+        bus = DomainEventBus()
+        received = []
+
+        bus.subscribe(DiaryFinishedEvent, lambda data: received.append(data))
+        bus.emit(
+            DiaryFinishedEvent(
+                diary="diary",
+                route_id="route",
+                observatory="observatory",
+                vehicle_type_name="bus",
+            )
+        )
+
+        assert issubclass(DiaryFinishedEvent, InternalEvent)
+        assert received == [
+            {
+                "diary": "diary",
+                "route_id": "route",
+                "observatory": "observatory",
+                "vehicle_type_name": "bus",
+            }
+        ]
 
 
 class TestGlobalDomainEvents:

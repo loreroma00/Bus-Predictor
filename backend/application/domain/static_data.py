@@ -82,6 +82,62 @@ class VehicleType:
         self.construction_year = construction_year
         self.constructors = constructors        
 
+
+class Vehicle:
+    """Static identity of a physical fleet vehicle.
+
+    Runtime state belongs to ``LiveTrip``. This object only describes the
+    physical vehicle and can lazily ask an injected history loader for past
+    served trips.
+    """
+
+    def __init__(
+        self,
+        id: str,
+        label: str = None,
+        vehicle_type: VehicleType = None,
+        history_loader=None,
+        history_ttl_seconds: int = 300,
+    ):
+        """Store stable vehicle identity and optional lazy history access."""
+        self.id = str(id)
+        self.label = str(label) if label else str(id)
+        self.vehicle_type = vehicle_type
+        self._history_loader = history_loader
+        self._history_ttl_seconds = history_ttl_seconds
+        self._history_cache = None
+        self._history_loaded_at = 0.0
+
+    def get_label(self) -> str:
+        """Return the public fleet label."""
+        return self.label
+
+    def set_vehicle_type(self, vehicle_type: VehicleType):
+        """Set the static vehicle type descriptor."""
+        self.vehicle_type = vehicle_type
+
+    def get_vehicle_type(self) -> VehicleType | None:
+        """Return the static vehicle type descriptor."""
+        return self.vehicle_type
+
+    def bind_history_loader(self, history_loader):
+        """Bind a lazy history provider without coupling Vehicle to persistence."""
+        self._history_loader = history_loader
+
+    def get_history(self, force_refresh: bool = False):
+        """Return cached served-trip history, refreshing lazily when needed."""
+        if self._history_loader is None:
+            return []
+
+        import time
+
+        now = time.time()
+        is_stale = now - self._history_loaded_at > self._history_ttl_seconds
+        if force_refresh or self._history_cache is None or is_stale:
+            self._history_cache = self._history_loader(self.label)
+            self._history_loaded_at = now
+        return self._history_cache
+
 class Route:
     """GTFS route: id, agency, direction, optional shape and trip list."""
     def __init__(self, id, agency=None, direction=None, shape=None, trips=None):

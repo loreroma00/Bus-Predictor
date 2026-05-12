@@ -5,7 +5,7 @@ TopologyLedger:  Static physical network (routes, stops, shapes, trips).
 ScheduleLedger:  Timetable index (route → direction → date → start times).
 HistoricalLedger: Per-measurement observations, backed by database (append-only).
 PredictedLedger:  Model predictions, backed by database (append-only).
-VehicleLedger:   Per-vehicle trip performance, backed by database (append-only).
+VehicleHistoryLedger: Lazy per-vehicle served-trip history, backed by database.
 """
 
 import json
@@ -21,8 +21,7 @@ import pandas as pd
 from .static_data import Route, Shape, Trip
 
 if TYPE_CHECKING:
-    from .live_data import Schedule
-    from .observers import Diary, Measurement
+    from .live_data import LiveTrip, Measurement, Schedule
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +236,7 @@ class HistoricalLedger:
                 self._today_by_trip[tid] = []
             self._today_by_trip[tid].append(row)
 
-        from persistence.ledger_db import write_historical
+        from persistence.database import write_historical
         write_historical(self._conn_str, self._table, rows)
 
     # Keep old method as alias for backward compat
@@ -259,7 +258,7 @@ class HistoricalLedger:
         date_end: float = None,
     ) -> pd.DataFrame:
         """Query historical measurements from DB.  Returns empty DataFrame if no data."""
-        from persistence.ledger_db import read_historical
+        from persistence.database import read_historical
         return read_historical(
             self._conn_str, self._table,
             trip_id=trip_id, route_id=route_id,
@@ -371,7 +370,7 @@ class PredictedLedger:
                 self._today_trips.append(summary)
                 self._today_trip_keys.add(key)
 
-        from persistence.ledger_db import write_predicted
+        from persistence.database import write_predicted
         write_predicted(self._conn_str, self._table, records)
 
     def get_today_predictions(self) -> list[dict]:
@@ -389,7 +388,7 @@ class PredictedLedger:
         trip_date: str = None,       # "DD-MM-YYYY" — converted to ISO for SQL
     ) -> pd.DataFrame:
         """Query predicted arrivals for a route/date from DB."""
-        from persistence.ledger_db import read_predicted
+        from persistence.database import read_predicted
         trip_date_iso = _dd_mm_yyyy_to_iso(trip_date) if trip_date else None
         return read_predicted(
             self._conn_str, self._table,
@@ -404,7 +403,7 @@ class PredictedLedger:
         scheduled_start: str, # "HH:MM"
     ) -> pd.DataFrame:
         """Return all stop predictions for one specific trip, or empty DataFrame."""
-        from persistence.ledger_db import read_predicted
+        from persistence.database import read_predicted
         trip_date_iso = _dd_mm_yyyy_to_iso(trip_date)
         return read_predicted(
             self._conn_str, self._table,
@@ -416,15 +415,14 @@ class PredictedLedger:
 
 
 # ============================================================
-#  Extraction Utility  (diary → measurement records)
+#  Extraction Utility  (LiveTrip -> measurement records)
 # ============================================================
 
-def extract_measurements_from_diary(
-    diary: "Diary",
-    trip: Trip,
-    route_id: str,
+def extract_measurements_from_live_trip(
+    live_trip: "LiveTrip",
+    route_id: str = None,
 ) -> list[MeasurementRecord]:
-    """Convert diary measurements into MeasurementRecords for the historical ledger.
+    """Convert live-trip measurements into MeasurementRecords for the historical ledger.
 
     Each measurement is projected onto the trip's shape to compute
     ``shape_dist_travelled``.  All raw fields are preserved so that
@@ -433,26 +431,21 @@ def extract_measurements_from_diary(
     Returns one MeasurementRecord per ping, or empty list if data is
     insufficient.
     """
-    if not diary.measurements or not trip:
+    trip = live_trip.trip if live_trip else None
+    if not live_trip or not live_trip.measurements or not trip:
         return []
 
     shape = trip.shape
     direction_id = trip.direction_id or 0
-
-    # Extract vehicle ID
-    vehicle_id = ""
-    if hasattr(diary, "observer") and diary.observer:
-        vehicle = getattr(diary.observer, "assignedVehicle", None)
-        if vehicle:
-            vehicle_id = str(getattr(vehicle, "label", "") or "")
-
-    scheduled_start = diary.scheduled_start_time or ""
+    route_id = route_id or (trip.route.id if trip.route else "")
+    vehicle_id = str(live_trip.vehicle.label or live_trip.vehicle.id or "")
+    scheduled_start = live_trip.scheduled_start_time or ""
 
     # Derive actual_start_time: first measurement NOT at stop_sequence 1
     # (i.e. the bus has left the terminus).
-    actual_start_time = diary.actual_start_time or 0.0
+    actual_start_time = live_trip.actual_start_time or 0.0
     if not actual_start_time:
-        for m in diary.measurements:
+        for m in live_trip.measurements:
             seq = (
                 m.gpsdata.current_stop_sequence
                 if hasattr(m.gpsdata, "current_stop_sequence")
@@ -461,11 +454,11 @@ def extract_measurements_from_diary(
             if seq is not None and seq > 1:
                 actual_start_time = m.measurement_time
                 break
-        if not actual_start_time and diary.measurements:
-            actual_start_time = diary.measurements[0].measurement_time
+        if not actual_start_time and live_trip.measurements:
+            actual_start_time = live_trip.measurements[0].measurement_time
 
     records: list[MeasurementRecord] = []
-    for m in diary.measurements:
+    for m in live_trip.measurements:
         # Project GPS position onto shape (if available)
         if shape:
             try:
@@ -490,7 +483,7 @@ def extract_measurements_from_diary(
 
         records.append(
             MeasurementRecord(
-                trip_id=diary.trip_id,
+                trip_id=live_trip.trip_id,
                 route_id=route_id,
                 direction_id=direction_id,
                 vehicle_id=vehicle_id,
@@ -527,15 +520,13 @@ def extract_measurements_from_diary(
     return records
 
 
-# Backward-compat alias
-def project_diary_to_stops(diary: "Diary", trip: Trip) -> list[MeasurementRecord]:
-    """Legacy wrapper — returns measurement records (not stop-projected arrivals)."""
-    route_id = trip.route.id if trip and trip.route else ""
-    return extract_measurements_from_diary(diary, trip, route_id)
+def project_live_trip_to_measurements(live_trip: "LiveTrip") -> list[MeasurementRecord]:
+    """Return measurement records for a completed live trip."""
+    return extract_measurements_from_live_trip(live_trip)
 
 
 # ============================================================
-#  Vehicle Ledger  (parquet-backed, append-only)
+#  Vehicle History Ledger  (database-backed, append-only + lazy cache)
 # ============================================================
 
 @dataclass
@@ -580,11 +571,11 @@ class VehicleTripRecord:
     recorded_at: float      # Unix timestamp
 
 
-class VehicleLedger:
-    """Append-only record of per-vehicle trip performance, backed by database.
+class VehicleHistoryLedger:
+    """Mini-ledger for per-vehicle served-trip history.
 
-    Maintains an in-memory buffer for fast GUI access.
-    DB is used as persistent storage and as a bootstrap source on restart.
+    New completed trips are appended to the DB. Per-vehicle history is loaded
+    lazily and cached to avoid repeated reads for static Vehicle objects.
     """
 
     _FIELDS = [
@@ -604,6 +595,8 @@ class VehicleLedger:
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.VEHICLE_TABLE
         self._today_records: list[dict] = []
+        self._history_cache: dict[str, tuple[float, list[dict]]] = {}
+        self._history_ttl_seconds = 300
 
     def record_trip(self, record: VehicleTripRecord):
         """Append a single vehicle trip record."""
@@ -613,7 +606,7 @@ class VehicleLedger:
         """Append vehicle trip records to the database and in-memory buffer."""
         if not records:
             return
-        from persistence.ledger_db import write_vehicle_trips
+        from persistence.database import write_vehicle_trips
         rows = [{f: getattr(r, f) for f in self._FIELDS} for r in records]
         self._today_records.extend(rows)
         write_vehicle_trips(self._conn_str, self._table, rows)
@@ -621,6 +614,22 @@ class VehicleLedger:
     def get_today_vehicle_trips(self) -> list[dict]:
         """Return all vehicle trip records from in-memory buffer (for GUI table)."""
         return self._today_records
+
+    def get_history(self, vehicle_id: str, force_refresh: bool = False) -> list[dict]:
+        """Return cached served-trip history for one vehicle, refreshing lazily."""
+        now = _time.time()
+        cached = self._history_cache.get(str(vehicle_id))
+        if (
+            cached
+            and not force_refresh
+            and now - cached[0] <= self._history_ttl_seconds
+        ):
+            return cached[1]
+
+        df = self.query(vehicle_id=str(vehicle_id))
+        records = df.to_dict("records") if df is not None and not df.empty else []
+        self._history_cache[str(vehicle_id)] = (now, records)
+        return records
 
     def query(
         self,
@@ -631,7 +640,7 @@ class VehicleLedger:
         date_end: str = None,
     ) -> pd.DataFrame:
         """Query vehicle trip records with optional filters."""
-        from persistence.ledger_db import read_vehicle_trips
+        from persistence.database import read_vehicle_trips
         return read_vehicle_trips(
             self._conn_str, self._table,
             vehicle_id=vehicle_id, route_id=route_id,
@@ -640,27 +649,27 @@ class VehicleLedger:
 
 
 # ============================================================
-#  Projection Utility  (diary → vehicle ledger)
+#  Projection Utility  (LiveTrip -> vehicle history ledger)
 # ============================================================
 
-def summarize_diary_for_vehicle(
-    diary: "Diary",
-    route_id: str,
-    direction_id: int,
+def summarize_live_trip_for_vehicle(
+    live_trip: "LiveTrip",
+    route_id: str = None,
+    direction_id: int = None,
     vehicle_type_name: str = "Unknown",
 ) -> Optional[VehicleTripRecord]:
-    """Summarize a completed diary into a vehicle trip performance record.
+    """Summarize a completed live trip into a vehicle trip performance record.
 
-    Returns None if the diary has no measurements.
+    Returns None if the live trip has no measurements.
     """
-    if not diary.measurements:
+    if not live_trip or not live_trip.measurements:
         return None
 
     # ---- Vehicle identity ----
-    vehicle = getattr(diary.observer, "assignedVehicle", None) if diary.observer else None
+    vehicle = live_trip.vehicle
     vehicle_id = str(getattr(vehicle, "label", "?") or "?")
 
-    vt = getattr(vehicle, "vehicle_type", None) if vehicle else None
+    vt = getattr(vehicle, "vehicle_type", None)
     fuel_type = 0
     euro_class = 0
     capacity_total = 0
@@ -672,17 +681,17 @@ def summarize_diary_for_vehicle(
         capacity_total = getattr(vt, "capacity_total", 0) or 0
 
     # ---- Timing ----
-    first_m = diary.measurements[0]
-    last_m = diary.measurements[-1]
-    actual_start = diary.actual_start_time if diary.actual_start_time else first_m.measurement_time
+    first_m = live_trip.measurements[0]
+    last_m = live_trip.measurements[-1]
+    actual_start = live_trip.actual_start_time if live_trip.actual_start_time else first_m.measurement_time
     trip_end = last_m.measurement_time
     trip_duration = trip_end - actual_start if actual_start else 0.0
     trip_date = datetime.fromtimestamp(actual_start).strftime("%Y-%m-%d") if actual_start else ""
-    scheduled_start = diary.scheduled_start_time or ""
+    scheduled_start = live_trip.scheduled_start_time or ""
 
     # ---- Delay statistics (filter invalid) ----
     valid_delays = [
-        m.schedule_adherence for m in diary.measurements
+        m.schedule_adherence for m in live_trip.measurements
         if m.schedule_adherence is not None
         and m.schedule_adherence != -1000.0
         and abs(m.schedule_adherence) <= 7200
@@ -698,19 +707,25 @@ def summarize_diary_for_vehicle(
 
     # ---- Occupancy ----
     occ_values = [
-        m.occupancy_status for m in diary.measurements
+        m.occupancy_status for m in live_trip.measurements
         if m.occupancy_status is not None
     ]
     mean_occupancy = statistics.mean(occ_values) if occ_values else 0.0
     max_occupancy = max(occ_values) if occ_values else 0
 
     # ---- Preferential ratio ----
-    pref_count = sum(1 for m in diary.measurements if getattr(m, "is_in_preferential", False))
-    preferential_ratio = pref_count / len(diary.measurements)
+    pref_count = sum(1 for m in live_trip.measurements if getattr(m, "is_in_preferential", False))
+    preferential_ratio = pref_count / len(live_trip.measurements)
+
+    trip = live_trip.trip
+    route_id = route_id or (trip.route.id if trip and trip.route else "")
+    direction_id = direction_id if direction_id is not None else (trip.direction_id if trip else 0)
+    if vehicle_type_name == "Unknown" and vt:
+        vehicle_type_name = vt.name
 
     return VehicleTripRecord(
         vehicle_id=vehicle_id,
-        trip_id=diary.trip_id,
+        trip_id=live_trip.trip_id,
         route_id=route_id,
         direction_id=direction_id,
         vehicle_type_name=vehicle_type_name,
@@ -729,7 +744,7 @@ def summarize_diary_for_vehicle(
         std_delay_sec=std_delay,
         mean_occupancy=mean_occupancy,
         max_occupancy=max_occupancy,
-        measurement_count=len(diary.measurements),
+        measurement_count=len(live_trip.measurements),
         preferential_ratio=preferential_ratio,
         recorded_at=_time.time(),
     )

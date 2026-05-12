@@ -2,7 +2,7 @@
 Tests for ConsoleEventBus - the event system for console-initiated events.
 """
 
-from interaction.events import ConsoleEventBus, console_events
+from interaction.events import ConsoleEventBus, ServicesStartEvent, console_events
 
 
 class TestConsoleEventBus:
@@ -118,6 +118,16 @@ class TestConsoleEventBus:
         bus.emit("event_a")
 
         assert results == ["A"]
+
+    def test_typed_console_event_emit(self):
+        """Console bus should support typed events from the shared event module."""
+        bus = ConsoleEventBus()
+        received = []
+
+        bus.subscribe(ServicesStartEvent, lambda data: received.append(data))
+        bus.emit(ServicesStartEvent())
+
+        assert received == [{}]
 
     def test_unsubscribe_not_subscribed(self):
         """Unsubscribing a handler that was never subscribed should not raise."""

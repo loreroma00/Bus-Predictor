@@ -1,0 +1,22 @@
+{
+  "architecture": "lstm",
+  "x1_dense_features": 16,
+  "x2_dense_features": 6,
+  "x1_cat_cards": [
+    157,
+    2,
+    3,
+    3,
+    2
+  ],
+  "x2_cat_cards": [
+    3895,
+    64
+  ],
+  "epochs": 31,
+  "loss_type": "mse",
+  "encoder_hidden_size": 128,
+  "decoder_hidden_size": 128,
+  "num_lstm_layers": 2,
+  "Learning_Rate": 0.001
+}

@@ -1,4 +1,4 @@
-from .live_data import Autobus as Bus
+from .live_data import LiveTrip
 from .weather import Weather
 from . import h3_utils
 from typing import overload, Callable
@@ -140,7 +140,7 @@ class Hexagon:
         self.streets: dict[tuple[float, float], str] = {}  # (lat, lng) -> street name
         self.neighbours = []
         self.mobile_agents = {
-            "buses": {},  # str -> bus
+            "live_trips": {},  # vehicle_id -> LiveTrip
         }
         self.weather = Weather(0, 0, 0, 0, 0, 0, 0)
         self.weather_forecast_by_hour: list[dict[int, Weather]] = []
@@ -156,17 +156,17 @@ class Hexagon:
         """Check if traffic data is expired (default 15 min TTL)."""
         return (time.time() - self.last_traffic_update) > ttl_seconds
 
-    def add_bus(self, bus: Bus):
-        """Add a bus."""
-        self.mobile_agents["buses"][str(bus.id)] = bus
+    def add_live_trip(self, live_trip: LiveTrip):
+        """Add a live trip."""
+        self.mobile_agents["live_trips"][str(live_trip.id)] = live_trip
 
-    def remove_bus(self, bus_id: str) -> Bus | None:
-        """Remove the bus."""
-        return self.mobile_agents["buses"].pop(str(bus_id), None)
+    def remove_live_trip(self, live_trip_id: str) -> LiveTrip | None:
+        """Remove a live trip."""
+        return self.mobile_agents["live_trips"].pop(str(live_trip_id), None)
 
-    def get_bus(self, bus_id: str) -> Bus | None:
-        """Return the bus."""
-        return self.mobile_agents["buses"].get(str(bus_id), None)
+    def get_live_trip(self, live_trip_id: str) -> LiveTrip | None:
+        """Return a live trip."""
+        return self.mobile_agents["live_trips"].get(str(live_trip_id), None)
 
     def add_street(self, lat: float, lng: float, street_name: str):
         """Add street name at coords. Coords are rounded to 5 decimals for consistent cache keys."""
@@ -322,36 +322,34 @@ class City:
         """Initialize the instance."""
         self.name = name
         self.hexagons: dict[str, Hexagon] = {}
-        self.bus_index: dict[str, str] = {}  # BusID -> HexID (O(1) lookup)
-        self.bus_deposit: dict[
-            str, Bus
-        ] = {}  # BusID -> Bus (O(1) lookup); Where buses go "to die".
+        self.live_trip_index: dict[str, str] = {}  # vehicle_id -> HexID
+        self.live_trip_deposit: dict[str, LiveTrip] = {}
         self.static_bus_lanes = static_bus_lanes if static_bus_lanes else {}
         # Weather update strategy (set externally, defaults to greedy)
-        self.weather_strategy = None  # Set by initialize_collection()
+        self.weather_strategy = None  # Set during runtime bootstrap.
         # Injected callback for expired traffic handling (LOW COUPLING)
-        self._on_bus_entered_expired_hex: Callable[[str, str], None] = None
+        self._on_live_trip_entered_expired_hex: Callable[[str, str], None] = None
 
-    def set_on_bus_entered_expired_hex(self, callback: Callable[[str, str], None]):
-        """Inject callback (bus_id, hex_id) for expired traffic handling."""
-        self._on_bus_entered_expired_hex = callback
+    def set_on_live_trip_entered_expired_hex(self, callback: Callable[[str, str], None]):
+        """Inject callback (live_trip_id, hex_id) for expired traffic handling."""
+        self._on_live_trip_entered_expired_hex = callback
 
-    def get_hexagons_with_buses(self) -> list[str]:
-        """Return unique hex IDs that currently contain at least one bus."""
-        return list(set(self.bus_index.values()))
-
-    @overload
-    def add_bus_to_city(self, bus: Bus, lat: float, lng: float):
-                                                                 """Add a bus to city."""
+    def get_hexagons_with_live_trips(self) -> list[str]:
+        """Return unique hex IDs that currently contain at least one live trip."""
+        return list(set(self.live_trip_index.values()))
 
     @overload
-    def add_bus_to_city(self, bus: Bus, hex_id: str):
-                                                      """Add a bus to city."""
+    def add_live_trip_to_city(self, live_trip: LiveTrip, lat: float, lng: float):
+        """Add a live trip to city."""
 
-    def add_bus_to_city(
-        self, bus: Bus, hex_id: str = None, lat: float = None, lng: float = None
+    @overload
+    def add_live_trip_to_city(self, live_trip: LiveTrip, hex_id: str):
+        """Add a live trip to city."""
+
+    def add_live_trip_to_city(
+        self, live_trip: LiveTrip, hex_id: str = None, lat: float = None, lng: float = None
     ):
-        """Registers a bus in the city at a specific hexagon."""
+        """Register a live trip in the city at a specific hexagon."""
         if hex_id is None:
             new_hexagon = Hexagon(h3_utils.get_h3_index(lat, lng))
             self.add_hexagon(new_hexagon)
@@ -361,41 +359,40 @@ class City:
             new_hexagon = Hexagon(hex_id)
             self.add_hexagon(new_hexagon)
 
-        self.hexagons[hex_id].add_bus(bus)
-        bus.set_is_in_preferential(
-            self.hexagons[hex_id].check_alignment(bus.get_bearing())
+        self.hexagons[hex_id].add_live_trip(live_trip)
+        live_trip.set_is_in_preferential(
+            self.hexagons[hex_id].check_alignment(live_trip.get_bearing())
         )
-        self.bus_index[str(bus.id)] = hex_id
+        self.live_trip_index[str(live_trip.id)] = hex_id
 
         # Resurrect if in deposit
-        if str(bus.id) in self.bus_deposit:
-            del self.bus_deposit[str(bus.id)]
+        if str(live_trip.id) in self.live_trip_deposit:
+            del self.live_trip_deposit[str(live_trip.id)]
 
     @overload
-    def move_bus(self, bus_id: str, new_hex_id: str) -> bool:
-                                                              """Move bus."""
+    def move_live_trip(self, live_trip_id: str, new_hex_id: str) -> bool:
+        """Move live trip."""
 
     @overload
-    def move_bus(self, bus_id: str, latitude: float, longitude: float) -> bool:
-                                                                                """Move bus."""
+    def move_live_trip(self, live_trip_id: str, latitude: float, longitude: float) -> bool:
+        """Move live trip."""
 
-    def move_bus(
+    def move_live_trip(
         self,
-        bus_id: str,
+        live_trip_id: str,
         new_hex_id: str = None,
         latitude: float = None,
         longitude: float = None,
     ) -> bool:
         """
-        Atomically moves a bus from its current hexagon to a new one.
-        Returns True if successful, False if bus not found or new hex invalid.
+        Atomically move a live trip from its current hexagon to a new one.
         """
         if new_hex_id is None:
             new_hex_id = h3_utils.get_h3_index(latitude, longitude)
 
-        current_hex_id = self.bus_index.get(str(bus_id))
+        current_hex_id = self.live_trip_index.get(str(live_trip_id))
         if not current_hex_id:
-            return False  # Bus not in city
+            return False
 
         if new_hex_id not in self.hexagons:
             new_hexagon = Hexagon(new_hex_id)
@@ -403,34 +400,34 @@ class City:
 
         if current_hex_id == new_hex_id:
             # Even if staying in the same hex, update preferential status as bearing might change
-            self.hexagons[current_hex_id].get_bus(bus_id).set_is_in_preferential(
+            self.hexagons[current_hex_id].get_live_trip(live_trip_id).set_is_in_preferential(
                 self.hexagons[current_hex_id].check_alignment(
-                    self.hexagons[current_hex_id].get_bus(bus_id).get_bearing()
+                    self.hexagons[current_hex_id].get_live_trip(live_trip_id).get_bearing()
                 )
             )
             return True  # Already there
 
         # 1. Remove from old hex
-        bus: Bus = self.hexagons[current_hex_id].remove_bus(str(bus_id))
+        live_trip: LiveTrip = self.hexagons[current_hex_id].remove_live_trip(str(live_trip_id))
 
-        if bus:
+        if live_trip:
             # 2. Add to new hex
-            self.hexagons[new_hex_id].add_bus(bus)
-            bus.set_is_in_preferential(
-                self.hexagons[new_hex_id].check_alignment(bus.get_bearing())
+            self.hexagons[new_hex_id].add_live_trip(live_trip)
+            live_trip.set_is_in_preferential(
+                self.hexagons[new_hex_id].check_alignment(live_trip.get_bearing())
             )
 
             # 3. Update index
-            self.bus_index[str(bus_id)] = new_hex_id
+            self.live_trip_index[str(live_trip_id)] = new_hex_id
 
             # Safety: Ensure not in deposit
-            if str(bus_id) in self.bus_deposit:
-                del self.bus_deposit[str(bus_id)]
+            if str(live_trip_id) in self.live_trip_deposit:
+                del self.live_trip_deposit[str(live_trip_id)]
 
             # 4. Check if new hexagon has expired traffic data
             if self.hexagons[new_hex_id].is_traffic_expired():
-                if self._on_bus_entered_expired_hex:
-                    self._on_bus_entered_expired_hex(str(bus_id), new_hex_id)
+                if self._on_live_trip_entered_expired_hex:
+                    self._on_live_trip_entered_expired_hex(str(live_trip_id), new_hex_id)
 
             return True
 
@@ -462,35 +459,33 @@ class City:
         """Return the hexagons."""
         return self.hexagons
 
-    def get_bus(self, bus_id: str) -> Bus | None:
-        """Return the bus."""
-        hex_id = self.bus_index.get(bus_id)
+    def get_live_trip(self, live_trip_id: str) -> LiveTrip | None:
+        """Return the active live trip for a vehicle id."""
+        hex_id = self.live_trip_index.get(live_trip_id)
         if hex_id:
-            return self.hexagons[hex_id].mobile_agents["buses"].get(bus_id)
+            return self.hexagons[hex_id].mobile_agents["live_trips"].get(live_trip_id)
         return None
 
-    def remove_bus(self, bus: Bus) -> tuple[Bus | None, str] | None:
-        """Remove the bus."""
-        hex_id = self.bus_index.pop(bus.id, None)
-        removed_bus: Bus = None
+    def remove_live_trip(self, live_trip: LiveTrip) -> tuple[LiveTrip | None, str] | None:
+        """Remove the live trip from the city."""
+        hex_id = self.live_trip_index.pop(live_trip.id, None)
+        removed_live_trip: LiveTrip = None
         if hex_id:
-            removed_bus = self.hexagons[hex_id].remove_bus(bus.id)
-        return (removed_bus, hex_id)
+            removed_live_trip = self.hexagons[hex_id].remove_live_trip(live_trip.id)
+        return (removed_live_trip, hex_id)
 
-    def bus_to_deposit(self, bus_id: str):
-        # Pop returns keys, so get key first, then pop. Or just pop and process.
-        """Bus to deposit."""
-        hex_id = self.bus_index.pop(bus_id, None)  # Remove from index immediately
+    def live_trip_to_deposit(self, live_trip_id: str):
+        """Move a live trip to the inactive deposit."""
+        hex_id = self.live_trip_index.pop(live_trip_id, None)
 
         if hex_id:
-            # Remove from Hex returns the object
-            bus = self.hexagons[hex_id].remove_bus(bus_id)
-            if bus:
-                self.bus_deposit[bus_id] = bus
+            live_trip = self.hexagons[hex_id].remove_live_trip(live_trip_id)
+            if live_trip:
+                self.live_trip_deposit[live_trip_id] = live_trip
 
-    def is_bus_in_deposit(self, bus_id: str) -> bool:
-        """Returns True if the bus is currently in the deposit."""
-        return bus_id in self.bus_deposit
+    def is_live_trip_in_deposit(self, live_trip_id: str) -> bool:
+        """Return True if a live trip is currently inactive/deposited."""
+        return live_trip_id in self.live_trip_deposit
 
     def update_weather(self):
         """Delegates weather fetching to the configured strategy."""

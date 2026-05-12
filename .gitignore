@@ -1,0 +1,37 @@
+# Logs
+*.log
+
+# Modelli ML
+*.pth
+*.pt
+*.onnx
+*.h5
+
+# Dati
+*.parquet
+*.csv
+*.tsv
+
+# Output plot
+*.png
+*.jpg
+*.jpeg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Config con segreti
+config.ini
+!config.ini.example
+.env
+
+#Docs
+*.md
+*.txt
+*~
+!AGENTS.md
+!CLAUDE.md
+!README.md

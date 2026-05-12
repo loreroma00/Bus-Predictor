@@ -5,7 +5,7 @@ Uses Protocol for structural subtyping — implementations don't need to
 inherit from these, they just need to have matching method signatures.
 """
 
-from typing import Protocol, runtime_checkable, Callable, Optional, Dict, List
+from typing import Protocol, runtime_checkable, Callable, Optional, Dict, List, Any
 
 
 @runtime_checkable
@@ -14,11 +14,15 @@ class EventBus(Protocol):
     Interface for Event Bus implementations (Pub/Sub).
     """
 
-    def subscribe(self, event_name: str, handler: Callable):
+    def subscribe(self, event_name: Any, handler: Callable):
         """Subscribe a handler to an event."""
         ...
 
-    def emit(self, event_name: str, data: Optional[dict] = None):
+    def unsubscribe(self, event_name: Any, handler: Callable):
+        """Unsubscribe a handler from an event."""
+        ...
+
+    def emit(self, event_name: Any, data: Optional[dict] = None):
         """Emit an event to subscribers."""
         ...
 

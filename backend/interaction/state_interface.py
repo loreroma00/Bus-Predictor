@@ -48,8 +48,8 @@ class StateInterface:
         return {
             "name": city.name,
             "hexagon_count": len(city.hexagons),
-            "active_buses": len(city.bus_index),
-            "deposit_buses": len(city.bus_deposit),
+            "active_buses": len(city.live_trip_index),
+            "deposit_buses": len(city.live_trip_deposit),
         }
 
     def get_hexagons(self, city_name: str) -> list[dict]:
@@ -63,7 +63,7 @@ class StateInterface:
             hexagons.append(
                 {
                     "hex_id": hex_id,
-                    "bus_count": len(hexagon.mobile_agents["buses"]),
+                    "bus_count": len(hexagon.mobile_agents["live_trips"]),
                     "street_count": len(hexagon.streets),
                     "temperature": hexagon.get_temperature(),
                     "humidity": hexagon.get_humidity(),
@@ -86,10 +86,10 @@ class StateInterface:
         if not hexagon:
             return []
 
-        buses = []
-        for bus_id, bus in hexagon.mobile_agents.items():
-            buses.append(self._bus_to_dict(bus))
-        return buses
+        live_trips = []
+        for _, live_trip in hexagon.mobile_agents["live_trips"].items():
+            live_trips.append(self._live_trip_to_dict(live_trip))
+        return live_trips
 
     def get_hexagon_details(self, city_name: str, hex_id: str) -> Optional[dict]:
         """Get detailed info about a specific hexagon."""
@@ -104,10 +104,10 @@ class StateInterface:
         # Coordinates
         lat, lon = h3_utils.get_coords_from_h3(hex_id)
 
-        # Buses
-        buses_list = []
-        for bus_id, bus in hexagon.mobile_agents["buses"].items():
-            buses_list.append(self._bus_to_dict(bus))
+        # Live trips
+        live_trips_list = []
+        for _, live_trip in hexagon.mobile_agents["live_trips"].items():
+            live_trips_list.append(self._live_trip_to_dict(live_trip))
 
         # Streets
         streets = list(set(hexagon.streets.values()))
@@ -117,7 +117,7 @@ class StateInterface:
             "center": {"lat": lat, "lon": lon},
             "streets": streets,
             "preferentials": hexagon.get_preferentials(),
-            "buses": buses_list,
+            "buses": live_trips_list,
             # Aggregate traffic (averages)
             "current_speed": hexagon.get_current_speed(),
             "flow_speed": hexagon.get_flow_speed(),
@@ -148,12 +148,12 @@ class StateInterface:
         if not city:
             return []
 
-        buses = []
-        for bus_id in city.bus_index:
-            bus = city.get_bus(bus_id)
-            if bus:
-                buses.append(self._bus_to_dict(bus))
-        return buses
+        live_trips = []
+        for live_trip_id in city.live_trip_index:
+            live_trip = city.get_live_trip(live_trip_id)
+            if live_trip:
+                live_trips.append(self._live_trip_to_dict(live_trip))
+        return live_trips
 
     def get_deposit_buses(self, city_name: str) -> list[dict]:
         """Get all buses currently in deposit."""
@@ -162,35 +162,35 @@ class StateInterface:
             return []
 
         buses = []
-        for bus_id, bus in city.bus_deposit.items():
-            data = self._bus_to_dict(bus)
+        for _, live_trip in city.live_trip_deposit.items():
+            data = self._live_trip_to_dict(live_trip)
             data["status"] = "DEPOSIT"
             buses.append(data)
         return buses
 
     def get_bus(self, city_name: str, bus_id: str) -> Optional[dict]:
-        """Get detailed info about a specific bus."""
-        bus = self._observatory.get_bus(city_name, bus_id)
-        if not bus:
+        """Get detailed info about a specific active live trip by vehicle id."""
+        live_trip = self._observatory.get_live_trip(city_name, bus_id)
+        if not live_trip:
             return None
-        return self._bus_to_dict(bus, detailed=True)
+        return self._live_trip_to_dict(live_trip, detailed=True)
 
-    def _bus_to_dict(self, bus, detailed: bool = False) -> dict:
-        """Convert a bus object to a dictionary."""
-        trip = bus.trip
-        gps = bus.GPSData
+    def _live_trip_to_dict(self, live_trip, detailed: bool = False) -> dict:
+        """Convert a live trip object to a dictionary."""
+        trip = live_trip.trip
+        gps = live_trip.gps_data
 
         data = {
-            "id": bus.id,
-            "label": bus.label,
+            "id": live_trip.id,
+            "label": live_trip.label,
             "trip_id": trip.id if trip else None,
             "route_id": trip.route.id if trip and trip.route else None,
             "direction": trip.direction_name if trip else None,
-            "location_name": bus.location_name,
-            "hexagon_id": bus.hexagon_id,
-            "last_seen": bus.last_seen_timestamp,
+            "location_name": live_trip.location_name,
+            "hexagon_id": live_trip.hexagon_id,
+            "last_seen": live_trip.last_seen_timestamp,
             "status": "DEPOSIT"
-            if self._observatory.is_bus_in_deposit("Rome", bus.id)
+            if self._observatory.is_live_trip_in_deposit("Rome", live_trip.id)
             else "ACTIVE",
         }
 
@@ -205,75 +205,58 @@ class StateInterface:
                 "current_stop_sequence": gps.current_stop_sequence,
                 "current_status": gps.current_status,
             }
-            data["derived_speed"] = bus.derived_speed
-            data["derived_bearing"] = bus.derived_bearing
+            data["derived_speed"] = live_trip.derived_speed
+            data["derived_bearing"] = live_trip.derived_bearing
 
         if detailed:
-            data["occupancy_status"] = bus.occupancy_status
-            data["crowding_level"] = bus.get_crowding_level()
-
-            observer = bus.observer
-            if observer:
-                data["observer"] = {
-                    "has_diary": observer.current_diary is not None,
-                    "measurement_count": len(observer.current_diary.measurements)
-                    if observer.current_diary
-                    else 0,
-                    "archived_diary_count": len(observer.diary_history),
-                }
+            data["occupancy_status"] = live_trip.occupancy_status
+            data["crowding_level"] = live_trip.get_crowding_level()
+            data["live_trip"] = {
+                "measurement_count": len(live_trip.measurements),
+                "is_finished": live_trip.is_finished,
+            }
 
         return data
 
     # ============================================================
-    # Observer & Diary Access
+    # LiveTrip & Measurement Access
     # ============================================================
 
     def get_observers(self) -> list[dict]:
-        """Get all observers with summary info."""
-        observers = self._observatory.get_observers()
-        if not observers:
+        """Compatibility surface: return active live trips with summary info."""
+        live_trips = self._observatory.get_active_live_trips()
+        if not live_trips:
             return []
 
         result = []
-        for obs_id, obs in observers.items():
-            bus = obs.assignedVehicle
-            diary = obs.current_diary
+        for live_trip_id, live_trip in live_trips.items():
+            trip = live_trip.trip
             result.append(
                 {
-                    "bus_id": bus.id if bus else None,
-                    "trip_id": bus.trip.id if bus and bus.trip else None,
-                    "route_id": bus.trip.route.id
-                    if bus and bus.trip and bus.trip.route
-                    else None,
-                    "measurement_count": len(diary.measurements) if diary else 0,
-                    "archived_count": len(obs.diary_history),
+                    "bus_id": live_trip.id,
+                    "trip_id": trip.id if trip else None,
+                    "route_id": trip.route.id if trip and trip.route else None,
+                    "measurement_count": len(live_trip.measurements),
+                    "archived_count": len(self._observatory.completed_live_trips),
                 }
             )
         return result
 
     def get_observer_diary(self, bus_id: str) -> Optional[dict]:
-        """Get detailed diary info for a specific observer."""
-        observers = self._observatory.get_observers()
-        if not observers:
+        """Compatibility surface: get measurement info for one live trip."""
+        live_trip = self._observatory.get_active_live_trips().get(bus_id)
+        if not live_trip:
             return None
 
-        for obs_id, obs in observers.items():
-            if obs.assignedVehicle and obs.assignedVehicle.id == bus_id:
-                diary = obs.current_diary
-                if not diary:
-                    return None
-
-                measurements = []
-                for m in diary.measurements[-20:]:  # Last 20 measurements
-                    measurements.append(m.to_dict(diary.trip_id))
-
-                return {
-                    "trip_id": diary.trip_id,
-                    "is_finished": diary.is_finished,
-                    "total_measurements": len(diary.measurements),
-                    "recent_measurements": measurements,
-                }
-        return None
+        measurements = [
+            m.to_dict(live_trip.trip_id) for m in live_trip.measurements[-20:]
+        ]
+        return {
+            "trip_id": live_trip.trip_id,
+            "is_finished": live_trip.is_finished,
+            "total_measurements": len(live_trip.measurements),
+            "recent_measurements": measurements,
+        }
 
     # ============================================================
     # Tracking Summary (Ingestion View)
@@ -281,67 +264,59 @@ class StateInterface:
 
     def get_tracking_summary(self) -> list[dict]:
         """
-        Get a summary of all tracked buses for the ingestion view.
+        Get a summary of all tracked live trips for the ingestion view.
         Similar to print_tracking_summary but returns structured data.
         """
-        observers = self._observatory.get_observers()
-        if not observers:
+        live_trips = self._observatory.get_active_live_trips()
+        if not live_trips:
             return []
 
         rows = []
-        for obs_id, obs in observers.items():
-            bus = obs.assignedVehicle
-            trip = bus.trip if bus else None
-            diary = obs.current_diary
+        for live_trip in live_trips.values():
+            trip = live_trip.trip
 
             # Vehicle Type
             vehicle_type = "Unknown"
-            if bus and bus.vehicle_type:
-                 vehicle_type = bus.vehicle_type.name
+            if live_trip.vehicle_type:
+                 vehicle_type = live_trip.vehicle_type.name
 
             # Basic info
             row = {
-                "bus_id": bus.label if bus else "N/A",
+                "bus_id": live_trip.label,
                 "vehicle_type": vehicle_type,
                 "trip_id": trip.id if trip else "N/A",
                 "route_id": trip.route.id if trip and trip.route else "N/A",
                 "headsign": trip.direction_name[:20]
                 if trip and trip.direction_name
                 else "N/A",
-                "location": bus.get_location_name() or "Resolving..." if bus else "N/A",
-                "samples": len(diary.measurements) if diary else 0,
+                "location": live_trip.get_location_name() or "Resolving...",
+                "samples": len(live_trip.measurements),
             }
 
             # Speed
-            if bus and bus.GPSData and bus.GPSData.speed:
-                row["speed"] = f"{bus.GPSData.speed:.1f}"
-            elif bus and bus.derived_speed:
-                row["speed"] = f"{bus.derived_speed:.1f}"
+            if live_trip.gps_data and live_trip.gps_data.speed:
+                row["speed"] = f"{live_trip.gps_data.speed:.1f}"
+            elif live_trip.derived_speed:
+                row["speed"] = f"{live_trip.derived_speed:.1f}"
             else:
                 row["speed"] = "0.0"
 
             # Status
-            if bus and self._observatory.is_bus_in_deposit("Rome", bus.id):
+            if self._observatory.is_live_trip_in_deposit("Rome", live_trip.id):
                 row["status"] = "DEPOSIT"
             else:
                 row["status"] = "ACTIVE"
 
             # Last seen
-            if bus:
-                delta_min = int((time.time() - bus.last_seen_timestamp) / 60)
-                row["last_seen"] = f"{delta_min}m ago" if delta_min > 0 else "Just now"
-            else:
-                row["last_seen"] = "N/A"
+            delta_min = int((time.time() - live_trip.last_seen_timestamp) / 60)
+            row["last_seen"] = f"{delta_min}m ago" if delta_min > 0 else "Just now"
 
             # Weather
             try:
-                if diary:
-                    last_meas = diary.get_last_measurement()
-                    if last_meas and last_meas.weather:
-                        w = last_meas.weather
-                        row["weather"] = f"{w.description} ({w.precip_intensity}mm/h)"
-                    else:
-                        row["weather"] = "N/A"
+                last_meas = live_trip.get_last_measurement()
+                if last_meas and last_meas.weather:
+                    w = last_meas.weather
+                    row["weather"] = f"{w.description} ({w.precip_intensity}mm/h)"
                 else:
                     row["weather"] = "N/A"
             except Exception:
@@ -374,25 +349,25 @@ class StateInterface:
     def get_feed_timestamp(self) -> float:
         """Get the last feed timestamp.
 
-        Derives from the most recent GPS timestamp across all active buses,
+        Derives from the most recent GPS timestamp across all active live trips,
         falling back to the manually-set value.
         """
         latest = self._last_feed_timestamp
         for city in self._observatory.observed_cities.values():
-            for bus_id, hex_id in city.bus_index.items():
+            for live_trip_id, hex_id in city.live_trip_index.items():
                 hexagon = city.hexagons.get(hex_id)
                 if not hexagon:
                     continue
-                bus = hexagon.get_bus(bus_id)
-                if bus and bus.GPSData and bus.GPSData.timestamp:
-                    ts = float(bus.GPSData.timestamp)
+                live_trip = hexagon.get_live_trip(live_trip_id)
+                if live_trip and live_trip.gps_data and live_trip.gps_data.timestamp:
+                    ts = float(live_trip.gps_data.timestamp)
                     if ts > latest:
                         latest = ts
         return latest
 
     def get_system_stats(self) -> dict:
         """Get overall system statistics."""
-        observers = self._observatory.get_observers() or {}
+        live_trips = self._observatory.get_active_live_trips() or {}
         cities = self._observatory.observed_cities or {}
 
         total_active = 0
@@ -400,12 +375,12 @@ class StateInterface:
         total_hexagons = 0
 
         for city_name, city in cities.items():
-            total_active += len(city.bus_index)
-            total_deposit += len(city.bus_deposit)
+            total_active += len(city.live_trip_index)
+            total_deposit += len(city.live_trip_deposit)
             total_hexagons += len(city.hexagons)
 
         return {
-            "observer_count": len(observers),
+            "observer_count": len(live_trips),
             "active_buses": total_active,
             "deposit_buses": total_deposit,
             "hexagon_count": total_hexagons,
@@ -450,22 +425,22 @@ class StateInterface:
             return []
 
         positions = []
-        for bus_id, hex_id in city.bus_index.items():
+        for live_trip_id, hex_id in city.live_trip_index.items():
             hexagon = city.hexagons.get(hex_id)
             if not hexagon:
                 continue
-            bus = hexagon.get_bus(bus_id)
-            if not bus or not bus.GPSData:
+            live_trip = hexagon.get_live_trip(live_trip_id)
+            if not live_trip or not live_trip.gps_data:
                 continue
 
-            trip = bus.trip
-            speed = bus.GPSData.speed or bus.derived_speed or 0.0
+            trip = live_trip.trip
+            speed = live_trip.gps_data.speed or live_trip.derived_speed or 0.0
 
             positions.append({
-                "id": bus.id,
-                "label": bus.label,
-                "lat": bus.GPSData.latitude,
-                "lon": bus.GPSData.longitude,
+                "id": live_trip.id,
+                "label": live_trip.label,
+                "lat": live_trip.gps_data.latitude,
+                "lon": live_trip.gps_data.longitude,
                 "route_id": trip.route.id if trip and trip.route else "?",
                 "direction": (trip.direction_name or "")[:25] if trip else "",
                 "speed": round(speed, 1),
@@ -494,7 +469,7 @@ class StateInterface:
                 "hex_id": hex_id,
                 "boundary": boundary_coords,
                 "speed_ratio": round(speed_ratio, 3),
-                "bus_count": len(hexagon.mobile_agents["buses"]),
+                "bus_count": len(hexagon.mobile_agents["live_trips"]),
                 "current_speed": round(hexagon.get_current_speed(), 1),
             })
         return result
@@ -554,7 +529,7 @@ class StateInterface:
 
         vehicle_info = {
             "type": "database-backed",
-            "table": obs.vehicle_ledger._table if obs.vehicle_ledger else "N/A",
+            "table": obs.vehicle_history._table if obs.vehicle_history else "N/A",
         }
 
         return {
@@ -585,9 +560,9 @@ class StateInterface:
     def get_recent_vehicle_trips(self) -> list[dict]:
         """Return all vehicle trip records from in-memory buffer (no DB query)."""
         obs = self._observatory
-        if not obs.vehicle_ledger:
+        if not obs.vehicle_history:
             return []
-        return obs.vehicle_ledger.get_today_vehicle_trips()
+        return obs.vehicle_history.get_today_vehicle_trips()
 
     def get_prediction_stops(self, route_id: str, direction_id: int, scheduled_start: str) -> list[dict]:
         """Return per-stop prediction data for a specific trip (for detail popup)."""

@@ -1,19 +1,21 @@
 """Inference wrapper: loads the twin BusLSTM/OccupancyLSTM checkpoints and maps raw trip inputs to per-stop forecasts."""
 
-import os
 import json
+import logging
 import math
 from pathlib import Path
 from datetime import date
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
-import torch
 import numpy as np
 import pandas as pd
 import joblib
 
-from model import BusLSTM, OccupancyLSTM
+try:
+    from .model_loader import LoadedModel, ModelLoader
+except ImportError:  # pragma: no cover - keeps script-style imports working
+    from model_loader import LoadedModel, ModelLoader
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent.parent
@@ -23,7 +25,7 @@ ROUTE_ENCODING_PATH = PARQUET_DIR / "route_encoding.json"
 ROUTE_ENCODER_PKL_PATH = PARQUET_DIR / "route_encoder.pkl"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
 STATIC_MAP_PATH = PARQUET_DIR / "stop_route_map.parquet"
-STOP_ROUTE_CONFIG_PATH = PARQUET_DIR / "stop_route_config.json"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,19 +49,35 @@ class TripForecast:
 
 
 class Predictor:
-    """Dual-model bus-trip predictor (delay + occupancy) backed by the shared static stop map."""
+    """Application-level prediction service backed by a loaded model and ledgers."""
 
     def __init__(
         self,
-        config_path: str,
-        time_weights_path: str,
-        crowd_weights_path: str,
+        loaded_model: LoadedModel | None = None,
+        config_path: str | None = None,
+        time_weights_path: str | None = None,
+        crowd_weights_path: str | None = None,
+        observatory: Any = None,
         route_encoding_path: Optional[str] = None,
         h3_encoding_path: Optional[str] = None,
         static_map_path: Optional[str] = None,
     ):
-        """Load both model checkpoints, route/H3 encoders, static stop map, and model config."""
-        print(f"Loading DUAL models...")
+        """Load encoders/static stop map and bind a low-level LoadedModel."""
+        if loaded_model is None:
+            if not (config_path and time_weights_path and crowd_weights_path):
+                raise ValueError(
+                    "Predictor requires a LoadedModel or config/time/crowd paths"
+                )
+            loaded_model = ModelLoader(Path(time_weights_path).parent).load_from_paths(
+                config_path,
+                time_weights_path,
+                crowd_weights_path,
+            )
+
+        self.loaded_model = loaded_model
+        self.config = loaded_model.config
+        self.max_stops = loaded_model.max_stops
+        self.observatory = observatory
 
         route_path = Path(route_encoding_path) if route_encoding_path else ROUTE_ENCODING_PATH
         route_encoder_pkl_path = ROUTE_ENCODER_PKL_PATH
@@ -91,71 +109,7 @@ class Predictor:
         self.static_map["route_id_norm"] = self.static_map["route_id"].astype(str)
         self.static_map["direction_id_norm"] = self.static_map["direction_id"].astype(str)
 
-        # Load model config
-        with open(config_path, "r", encoding="utf-8") as f:
-            self.config = json.load(f)
-
-        self.max_stops = self.config.get("max_stops")
-        if self.max_stops is None:
-            # Fallback: load from stop_route_config.json
-            fallback_path = STOP_ROUTE_CONFIG_PATH
-            with open(fallback_path, "r") as f:
-                self.max_stops = json.load(f)["max_stops"]
         print(f"MAX_STOPS = {self.max_stops}")
-
-        model_kwargs = {
-            "n_x1_dense_features": self.config["x1_dense_features"],
-            "n_x2_dense_features": self.config["x2_dense_features"],
-            "x1_cat_cardinalities": self.config["x1_cat_cards"],
-            "x2_cat_cardinalities": self.config["x2_cat_cards"],
-            "encoder_hidden_size": self.config["encoder_hidden_size"],
-            "lstm_hidden_size": self.config["decoder_hidden_size"],
-        }
-
-        crowd_kwargs = model_kwargs.copy()
-        crowd_kwargs["num_lstm_layers"] = self.config.get("num_lstm_layers", 2)
-
-        # Initialize the two models
-        self.model_time = BusLSTM(**model_kwargs)
-        self.model_crowd = OccupancyLSTM(**crowd_kwargs)
-
-        # Load weights
-        state_dict_time = torch.load(time_weights_path, map_location=torch.device("cpu"), weights_only=True)
-        state_dict_crowd = torch.load(crowd_weights_path, map_location=torch.device("cpu"), weights_only=True)
-
-        # Clean keys if needed (torch.compile prefix)
-        if any(k.startswith("_orig_mod.") for k in state_dict_time.keys()):
-            state_dict_time = {k.replace("_orig_mod.", ""): v for k, v in state_dict_time.items()}
-        if any(k.startswith("_orig_mod.") for k in state_dict_crowd.keys()):
-            state_dict_crowd = {k.replace("_orig_mod.", ""): v for k, v in state_dict_crowd.items()}
-
-        self.model_time.load_state_dict(state_dict_time)
-        self.model_crowd.load_state_dict(state_dict_crowd)
-
-        self.model_time.eval()
-        self.model_crowd.eval()
-        print(f"Dual models loaded successfully.")
-
-    def _sanitize_categorical_inputs(self, x1_cat_batch: np.ndarray, x2_cat_batch: np.ndarray, context: str = "") -> tuple[np.ndarray, np.ndarray]:
-        """Clamp out-of-range categorical indices to 0 so nn.Embedding lookups cannot fault."""
-        x1_cards = self.config["x1_cat_cards"]
-        x2_cards = self.config["x2_cat_cards"]
-
-        for col_idx, card in enumerate(x1_cards):
-            if card <= 0:
-                continue
-            invalid_mask = (x1_cat_batch[:, col_idx] < 0) | (x1_cat_batch[:, col_idx] >= card)
-            if int(invalid_mask.sum()) > 0:
-                x1_cat_batch[invalid_mask, col_idx] = 0
-
-        for col_idx, card in enumerate(x2_cards):
-            if card <= 0:
-                continue
-            invalid_mask = (x2_cat_batch[:, :, col_idx] < 0) | (x2_cat_batch[:, :, col_idx] >= card)
-            if int(invalid_mask.sum()) > 0:
-                x2_cat_batch[:, :, col_idx][invalid_mask] = 0
-
-        return x1_cat_batch, x2_cat_batch
 
     def has_trip_template(self, route_id: str, direction_id: Any) -> bool:
         """Return True if the static stop map has a trip template for this route/direction."""
@@ -269,39 +223,6 @@ class Predictor:
 
         return x1_cat, x1_dense, x2_cat, x2_dense, t_grid, lengths, num_stops
 
-    def _predict_tensors(self, x1_cat: np.ndarray, x1_dense: np.ndarray,
-                         x2_cat: np.ndarray, x2_dense: np.ndarray,
-                         t_grid: np.ndarray, lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Run inference through both models with lengths/t_grid for variable-length support."""
-        ms = self.max_stops
-
-        x1_cat_np = x1_cat.reshape(1, -1)
-        x2_cat_np = x2_cat.reshape(1, ms, -1)
-        x1_cat_np, x2_cat_np = self._sanitize_categorical_inputs(x1_cat_np, x2_cat_np, context="single_trip")
-
-        x1_cat_tensor = torch.tensor(x1_cat_np, dtype=torch.int64)
-        x1_dense_tensor = torch.tensor(x1_dense.reshape(1, -1), dtype=torch.float32)
-        x2_cat_tensor = torch.tensor(x2_cat_np, dtype=torch.int64)
-        x2_dense_tensor = torch.tensor(x2_dense.reshape(1, ms, -1), dtype=torch.float32)
-        lengths_tensor = torch.tensor(lengths, dtype=torch.int64)
-        t_grid_tensor = torch.tensor(t_grid.reshape(1, ms), dtype=torch.float32)
-
-        with torch.no_grad():
-            pred_time_scaled = self.model_time(
-                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
-                lengths=lengths_tensor, t_grid=t_grid_tensor
-            )
-            pred_crowd_logits = self.model_crowd(
-                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
-                lengths=lengths_tensor
-            )
-
-        # Descale delays (factor 600.0 = 10 minutes)
-        delays = pred_time_scaled.squeeze(0).squeeze(-1).numpy() * 600.0
-        crowd = pred_crowd_logits.argmax(dim=-1).squeeze(0).numpy()
-
-        return delays, crowd
-
     def get_trip_forecast_raw(self, route_id: str, direction_id: int,
                               time_seconds: int, day_type: int,
                               weather_code: int, bus_type: int) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
@@ -317,7 +238,14 @@ class Predictor:
             self._build_trip_tensors(trip_stops, route_id, direction_id,
                                     time_seconds, day_type, weather_code, bus_type)
 
-        delays, crowd = self._predict_tensors(x1_cat, x1_dense, x2_cat, x2_dense, t_grid, lengths)
+        delays, crowd = self.loaded_model.infer_single(
+            x1_cat,
+            x1_dense,
+            x2_cat,
+            x2_dense,
+            t_grid,
+            lengths,
+        )
 
         # Only return predictions for real stops (not padding)
         delays = delays[:num_stops]
@@ -364,37 +292,164 @@ class Predictor:
             scheduled_start=start_time + ":00", stops=stop_predictions,
         )
 
-    def _predict_batch_tensors(self, x1_cat_batch: np.ndarray, x1_dense_batch: np.ndarray,
-                               x2_cat_batch: np.ndarray, x2_dense_batch: np.ndarray,
-                               t_grid_batch: np.ndarray, lengths_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Run batch inference through both models with variable-length support."""
-        x1_cat_batch, x2_cat_batch = self._sanitize_categorical_inputs(
-            x1_cat_batch, x2_cat_batch, context="batch"
+    def attach_observatory(self, observatory: Any):
+        """Bind or replace the observatory used for prediction ledger access."""
+        self.observatory = observatory
+
+    def get_or_create_trip_forecast(
+        self,
+        route_id: str,
+        direction_id: int,
+        start_date: str,
+        start_time: str,
+        weather_code: int,
+        bus_type: int,
+    ) -> TripForecast:
+        """Return a cached prediction if present, otherwise infer and record it."""
+        cached = self.get_cached_trip_forecast(
+            route_id=route_id,
+            direction_id=direction_id,
+            start_date=start_date,
+            start_time=start_time,
+        )
+        if cached is not None:
+            return cached
+
+        forecast = self.get_trip_forecast(
+            route_id,
+            direction_id,
+            start_date,
+            start_time,
+            weather_code,
+            bus_type,
+        )
+        self.record_forecast(forecast)
+        return forecast
+
+    def get_cached_trip_forecast(
+        self,
+        route_id: str,
+        direction_id: int,
+        start_date: str,
+        start_time: str,
+    ) -> TripForecast | None:
+        """Load a previously-recorded forecast from the prediction ledger."""
+        if self.observatory is None:
+            return None
+
+        try:
+            cached = self.observatory.predicted.query_trip(
+                route_id=route_id,
+                direction_id=direction_id,
+                trip_date=start_date,
+                scheduled_start=start_time,
+            )
+        except Exception as exc:
+            logger.debug("Prediction ledger cache lookup failed: %s", exc)
+            return None
+
+        if cached.empty:
+            return None
+
+        topology = self.observatory.get_topology()
+        stops_map = topology.build_stops_map(route_id, direction_id)
+        stop_predictions: list[StopPrediction] = []
+        for _, row in cached.iterrows():
+            seq = int(row["stop_sequence"])
+            stop_info = stops_map.get(seq, {})
+            delay = float(row["predicted_delay_sec"])
+            stop_predictions.append(
+                StopPrediction(
+                    stop_sequence=seq,
+                    distance_m=float(stop_info.get("shape_dist_travelled") or 0.0),
+                    cumulative_delay_sec=delay,
+                    delay_formatted=self._format_delay(delay),
+                    expected_arrival=str(row["predicted_arrival"]),
+                    crowd_level=int(row.get("predicted_crowd_level") or 0),
+                )
+            )
+
+        first = cached.iloc[0]
+        trip_date = first["trip_date"]
+        if hasattr(trip_date, "strftime"):
+            trip_date = trip_date.strftime("%d-%m-%Y")
+        else:
+            trip_date = str(trip_date)
+
+        return TripForecast(
+            route_id=str(first["route_id"]),
+            direction_id=int(first["direction_id"]),
+            trip_date=trip_date,
+            scheduled_start=str(first["scheduled_start"]),
+            stops=stop_predictions,
         )
 
-        x1_cat_tensor = torch.tensor(x1_cat_batch, dtype=torch.int64)
-        x1_dense_tensor = torch.tensor(x1_dense_batch, dtype=torch.float32)
-        x2_cat_tensor = torch.tensor(x2_cat_batch, dtype=torch.int64)
-        x2_dense_tensor = torch.tensor(x2_dense_batch, dtype=torch.float32)
-        lengths_tensor = torch.tensor(lengths_batch, dtype=torch.int64)
-        t_grid_tensor = torch.tensor(t_grid_batch, dtype=torch.float32)
-
-        with torch.no_grad():
-            pred_time_scaled = self.model_time(
-                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
-                lengths=lengths_tensor, t_grid=t_grid_tensor
+    def get_cached_trip_keys(self, trip_date: str) -> set[tuple[str, int, str]]:
+        """Return cached `(route_id, direction_id, HH:MM)` keys for a date."""
+        if self.observatory is None:
+            return set()
+        try:
+            cached = self.observatory.predicted.query(trip_date=trip_date)
+        except Exception:
+            return set()
+        if cached.empty:
+            return set()
+        return {
+            (
+                str(row["route_id"]),
+                int(row["direction_id"]),
+                str(row["scheduled_start"])[:5],
             )
-            pred_crowd_logits = self.model_crowd(
-                x1_cat_tensor, x1_dense_tensor, x2_cat_tensor, x2_dense_tensor,
-                lengths=lengths_tensor
+            for _, row in cached.iterrows()
+        }
+
+    def record_forecasts(self, forecasts: list[TripForecast]):
+        """Record multiple forecasts into the prediction ledger."""
+        for forecast in forecasts:
+            self.record_forecast(forecast)
+
+    def record_forecast(self, forecast: TripForecast):
+        """Record a forecast into the PredictedLedger."""
+        if self.observatory is None:
+            return
+
+        try:
+            import time as _time
+            from application.domain.ledgers import StopPredictionRecord
+
+            topology = self.observatory.get_topology()
+            stops_map = topology.build_stops_map(
+                forecast.route_id,
+                forecast.direction_id,
             )
+            now = _time.time()
+            records = []
+            for sp in forecast.stops:
+                stop_info = stops_map.get(sp.stop_sequence, {})
+                records.append(
+                    StopPredictionRecord(
+                        route_id=forecast.route_id,
+                        direction_id=forecast.direction_id,
+                        trip_date=forecast.trip_date,
+                        scheduled_start=forecast.scheduled_start,
+                        stop_id=stop_info.get("stop_id", ""),
+                        stop_sequence=sp.stop_sequence,
+                        predicted_arrival=sp.expected_arrival,
+                        predicted_delay_sec=sp.cumulative_delay_sec,
+                        predicted_crowd_level=sp.crowd_level,
+                        prediction_timestamp=now,
+                    )
+                )
+            self.observatory.predicted.record_predictions(records)
+        except Exception as exc:
+            logger.warning("Failed to record predictions: %s", exc)
+            return
 
-        delays = pred_time_scaled.squeeze(-1).numpy() * 600.0
-        crowd = pred_crowd_logits.argmax(dim=-1).numpy()
-
-        return delays, crowd
-
-    def get_batch_forecast(self, trips: List[Dict[str, Any]]) -> List[TripForecast]:
+    def get_batch_forecast(
+        self,
+        trips: List[Dict[str, Any]],
+        record: bool = False,
+    ) -> List[TripForecast]:
         """Batch prediction for multiple trips.
 
         Accepts a list of trip dicts with keys: route_id, direction_id,
@@ -447,7 +502,7 @@ class Predictor:
             meta_list.append((route_id, direction_id, start_date, start_time, time_seconds))
 
         # Single batched forward pass through both models
-        delays_batch, crowd_batch = self._predict_batch_tensors(
+        delays_batch, crowd_batch = self.loaded_model.infer_batch(
             np.stack(all_x1_cat),
             np.stack(all_x1_dense),
             np.stack(all_x2_cat),
@@ -482,5 +537,8 @@ class Predictor:
                 scheduled_start=start_time + ":00",
                 stops=stop_predictions,
             ))
+
+        if record:
+            self.record_forecasts(forecasts)
 
         return forecasts

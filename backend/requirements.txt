@@ -39,3 +39,5 @@ torchaudio>=2.5.0
 uvicorn>=0.40.0
 lightgbm>=4.3.0
 torchdiffeq>=0.2.3 
+nicegui
+mapbox_vector_tile

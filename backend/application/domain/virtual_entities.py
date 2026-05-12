@@ -8,14 +8,18 @@ import logging
 import time
 
 from .interfaces import CacheStrategy, GeocodingStrategy
-from .static_data import VehicleType
+from .static_data import Vehicle, VehicleType
 from .static_data_fetcher import StaticDataFetcher
 from .ledger_builder import LedgerBuilder
-from .ledgers import TopologyLedger, ScheduleLedger, HistoricalLedger, PredictedLedger, VehicleLedger
-from .observer_manager import ObserverManager
+from .ledgers import (
+    HistoricalLedger,
+    PredictedLedger,
+    ScheduleLedger,
+    TopologyLedger,
+    VehicleHistoryLedger,
+)
 from .cities import City
-from .live_data import Autobus
-from typing import overload
+from .live_data import LiveTrip
 from application.post_processing.data_cleaning import (
     PredictionPipeline,
     TrafficPipeline,
@@ -56,14 +60,12 @@ class Observatory:
         # Internal components (no external dependencies)
         self._fetcher = StaticDataFetcher()
         self._builder = LedgerBuilder()
-        self._observer_manager = ObserverManager()
-
         # ---- Ledgers ----
         self.topology: TopologyLedger = None
         self.schedule_ledger: ScheduleLedger = None
         self.historical: HistoricalLedger = HistoricalLedger()
         self.predicted: PredictedLedger = PredictedLedger()
-        self.vehicle_ledger: VehicleLedger = VehicleLedger()
+        self.vehicle_history: VehicleHistoryLedger = VehicleHistoryLedger()
 
         # Cache metadata
         self.current_md5: str = None
@@ -72,6 +74,10 @@ class Observatory:
         # Cities & Fleet
         self.observed_cities: dict[str, City] = {}
         self.fleet = load_fleet("vehicles.csv")
+        self.vehicles: dict[str, Vehicle] = {}
+        self.live_trips_by_vehicle_id: dict[str, LiveTrip] = {}
+        self.live_trips_by_trip_id: dict[str, LiveTrip] = {}
+        self.completed_live_trips: list[LiveTrip] = []
 
     def add_city(self, city_name: str, static_bus_lanes: dict = None):
         """Add a city to the observed cities."""
@@ -81,133 +87,94 @@ class Observatory:
         """Get a city instance by name."""
         return self.observed_cities.get(city_name)
 
-    @overload
-    def add_bus_to_city(self, city_name: str, bus: Autobus, hex_id: str):
-        """Overload: place the bus at a pre-resolved H3 hex."""
-        ...
-
-    @overload
-    def add_bus_to_city(
-        self, city_name: str, bus: Autobus, latitude: float, longitude: float
-    ):
-        """Overload: place the bus via latitude/longitude (hex is computed)."""
-        ...
-
-    def add_bus_to_city(
+    def add_live_trip_to_city(
         self,
         city_name: str,
-        bus: Autobus,
+        live_trip: LiveTrip,
         latitude: float = None,
         longitude: float = None,
         hex_id: str = None,
     ):
-        """Add a bus to the city."""
-        # Assign Vehicle Type if not set
-        if bus.vehicle_type is None:
-            # Use the fuzzy lookup method with the label
-            v_type = self.get_vehicle_type(bus.label)
-            if v_type:
-                bus.set_vehicle_type(v_type)
-
+        """Add a live trip to the city."""
         if hex_id is not None:
-            self.observed_cities[city_name].add_bus_to_city(bus, hex_id=hex_id)
-            bus.set_hexagon_id(hex_id)
+            self.observed_cities[city_name].add_live_trip_to_city(live_trip, hex_id=hex_id)
+            live_trip.set_hexagon_id(hex_id)
         else:
-            self.observed_cities[city_name].add_bus_to_city(
-                bus, lat=latitude, lng=longitude
+            self.observed_cities[city_name].add_live_trip_to_city(
+                live_trip, lat=latitude, lng=longitude
             )
             new_hex_id = self.observed_cities[city_name].get_hex_id(latitude, longitude)
-            bus.set_hexagon_id(new_hex_id)
+            live_trip.set_hexagon_id(new_hex_id)
 
             # Trigger geocoding on creation if enabled
             if self._geocoding and latitude is not None:
                 self._geocoding.enqueue(latitude, longitude, new_hex_id)
                 street = self._geocoding.get_street(latitude, longitude)
                 if street:
-                    bus.set_location_name(street)
+                    live_trip.set_location_name(street)
 
-    def remove_bus_from_city(self, city_name: str, bus: Autobus):
-        """Remove a bus from the city."""
-        self.observed_cities[city_name].remove_bus(bus)
+    def remove_live_trip_from_city(self, city_name: str, live_trip: LiveTrip):
+        """Remove a live trip from the city."""
+        self.observed_cities[city_name].remove_live_trip(live_trip)
 
-    def prune_stale_buses(self, city_name: str, ttl: int = 300):
-        """Removes buses that haven't updated in 'ttl' seconds."""
+    def prune_stale_live_trips(self, city_name: str, ttl: int = 300):
+        """Finish live trips that have not updated in ``ttl`` seconds."""
         if city_name not in self.observed_cities:
             return
 
         city = self.observed_cities[city_name]
-        # Iterate over a copy of keys since we might mutate the dict
-        for bus_id in list(city.bus_index.keys()):
-            # We need to retrieve the bus to check its timestamp.
-            # Since bus_index stores HexID, we use our new logic.
-            hex_id = city.bus_index[bus_id]
+        for live_trip_id in list(city.live_trip_index.keys()):
+            hex_id = city.live_trip_index[live_trip_id]
             if hex_id in city.hexagons:
-                bus = city.hexagons[hex_id].get_bus(bus_id)
-                if bus:
-                    # Use GPS timestamp if available (data freshness), else fallback to last_seen (system freshness)
-                    # We want to prune if the DATA is old, even if we just saw it in the feed.
-                    last_active = bus.last_seen_timestamp
-                    if bus.GPSData and bus.GPSData.timestamp:
-                        # timestamp might be int or float
-                        last_active = float(bus.GPSData.timestamp)
+                live_trip = city.hexagons[hex_id].get_live_trip(live_trip_id)
+                if live_trip:
+                    last_active = live_trip.last_seen_timestamp
+                    if live_trip.gps_data and live_trip.gps_data.timestamp:
+                        last_active = float(live_trip.gps_data.timestamp)
 
                     if time.time() - last_active > ttl:
                         logging.info(
-                            f"Pruning stale bus {bus_id} (inactive > {ttl}s)"
+                            f"Finishing stale live trip {live_trip.trip_id} "
+                            f"for vehicle {live_trip.vehicle.label} (inactive > {ttl}s)"
                         )
-                        observer = bus.get_observer()
-                        if observer and observer.current_diary and observer.current_diary.measurements:
-                            observer.archive_current_diary()
-                        city.bus_to_deposit(bus_id)
+                        self.finish_live_trip(live_trip)
 
-    @overload
-    def move_bus(
-        self, city_name: str, bus: Autobus, latitude: float, longitude: float
-    ):
-        """Overload: move the bus using new latitude/longitude (hex recomputed)."""
-        ...
-
-    @overload
-    def move_bus(self, city_name: str, bus: Autobus, new_hex_id: str):
-        """Overload: move the bus to a pre-resolved H3 hex."""
-        ...
-
-    def move_bus(
+    def move_live_trip(
         self,
         city_name: str,
-        bus: Autobus,
+        live_trip: LiveTrip,
         new_hex_id: str = None,
         latitude: float = None,
         longitude: float = None,
     ):
-        """Move a bus in the city."""
+        """Move a live trip in the city."""
         if new_hex_id is not None:
-            self.observed_cities[city_name].move_bus(bus.id, new_hex_id)
-            bus.set_hexagon_id(new_hex_id)
+            self.observed_cities[city_name].move_live_trip(live_trip.id, new_hex_id)
+            live_trip.set_hexagon_id(new_hex_id)
         else:
-            self.observed_cities[city_name].move_bus(
-                bus.id, latitude=latitude, longitude=longitude
+            self.observed_cities[city_name].move_live_trip(
+                live_trip.id, latitude=latitude, longitude=longitude
             )
             new_hex_id = self.observed_cities[city_name].get_hex_id(latitude, longitude)
-            bus.set_hexagon_id(new_hex_id)
+            live_trip.set_hexagon_id(new_hex_id)
 
             # Trigger geocoding if enabled
             if self._geocoding and latitude is not None:
                 self._geocoding.enqueue(latitude, longitude, new_hex_id)
                 street = self._geocoding.get_street(latitude, longitude)
                 if street:
-                    bus.set_location_name(street)
+                    live_trip.set_location_name(street)
 
-    def get_bus(self, city_name: str, bus_id: str) -> Autobus | None:
-        """Get a bus from a city."""
+    def get_live_trip(self, city_name: str, vehicle_id: str) -> LiveTrip | None:
+        """Get active live trip by serving vehicle id."""
         if city_name in self.observed_cities:
-            return self.observed_cities[city_name].get_bus(bus_id)
+            return self.observed_cities[city_name].get_live_trip(vehicle_id)
         return None
 
-    def is_bus_in_deposit(self, city_name: str, bus_id: str) -> bool:
-        """Check if a bus is in the deposit."""
+    def is_live_trip_in_deposit(self, city_name: str, live_trip_id: str) -> bool:
+        """Check if a live trip is in the inactive deposit."""
         if city_name in self.observed_cities:
-            return self.observed_cities[city_name].is_bus_in_deposit(bus_id)
+            return self.observed_cities[city_name].is_live_trip_in_deposit(live_trip_id)
         return False
 
     def update_weather(self, city_name: str):
@@ -296,49 +263,136 @@ class Observatory:
             return self.topology.get_trip(trip_id)
         return None
 
-    # ==================== OBSERVER OPERATIONS (delegated) ====================
+    # ==================== LIVE TRIP OPERATIONS ====================
 
-    def create_observer(
-        self, vehicle, observer_type="strict", scheduled_start_time: str = None
-    ):
-        """Create an observer for a vehicle."""
-        return self._observer_manager.create_observer(
-            vehicle, self, scheduled_start_time
+    def get_or_create_vehicle(self, vehicle_id: str, label: str = None) -> Vehicle:
+        """Return static Vehicle identity, creating it if needed."""
+        vehicle_id = str(vehicle_id)
+        display_id = str(label) if label else vehicle_id
+        vehicle = self.vehicles.get(vehicle_id)
+        if vehicle:
+            return vehicle
+
+        vehicle_type = self.get_vehicle_type(display_id)
+        if vehicle_type is None:
+            logging.warning(
+                "No VehicleType corresponding to ID %s; N/A values enabled.",
+                display_id,
+            )
+
+        vehicle = Vehicle(
+            id=vehicle_id,
+            label=display_id,
+            vehicle_type=vehicle_type,
+            history_loader=self.vehicle_history.get_history,
         )
+        self.vehicles[vehicle_id] = vehicle
+        return vehicle
 
-    def get_observers(self) -> dict:
-        """Get all observers."""
-        return self._observer_manager.get_all_observers()
+    def get_or_create_live_trip(
+        self,
+        vehicle_id: str,
+        trip,
+        label: str = None,
+        scheduled_start_time: str = None,
+    ) -> tuple[LiveTrip, int]:
+        """Return active LiveTrip for a vehicle, finishing old trip on trip change.
 
-    def search_diary(self, trip_id: str):
-        """Search for an active diary by trip ID."""
-        return self._observer_manager.search_diary(trip_id)
+        Status: 0 = newly created, 1 = existing same trip, 2 = trip changed.
+        """
+        vehicle_id = str(vehicle_id)
+        current = self.live_trips_by_vehicle_id.get(vehicle_id)
+        if current and current.trip.id == trip.id:
+            return current, 1
 
-    def search_history(self, trip_id: str):
-        """Search for a diary in history by trip ID."""
-        return self._observer_manager.search_history(trip_id)
+        status = 0
+        if current:
+            status = 2
+            self.finish_live_trip(current)
 
-    def get_completed_diaries(self) -> list:
-        """Get all completed diary data."""
-        return self._observer_manager.get_completed_diaries()
+        vehicle = self.get_or_create_vehicle(vehicle_id, label=label)
+        live_trip = LiveTrip(
+            trip=trip,
+            vehicle=vehicle,
+            scheduled_start_time=scheduled_start_time,
+        )
+        self.live_trips_by_vehicle_id[vehicle_id] = live_trip
+        self.live_trips_by_trip_id[trip.id] = live_trip
+        self.update_fleet_count(vehicle.label)
+        return live_trip, status
 
-    def get_all_current_diaries(self) -> tuple:
-        """Get all current diary data with counts."""
-        return self._observer_manager.get_all_current_diaries()
+    def finish_live_trip(self, live_trip: LiveTrip):
+        """Finish, archive, and unregister a live trip."""
+        if not live_trip:
+            return
+        if not live_trip.is_finished:
+            live_trip.finish()
+        if live_trip not in self.completed_live_trips:
+            self.completed_live_trips.append(live_trip)
+        for city in self.observed_cities.values():
+            try:
+                city.remove_live_trip(live_trip)
+            except Exception:
+                pass
+        self.live_trips_by_vehicle_id.pop(live_trip.vehicle_id, None)
+        if self.live_trips_by_trip_id.get(live_trip.trip_id) is live_trip:
+            self.live_trips_by_trip_id.pop(live_trip.trip_id, None)
 
-    def get_vehicle_diaries(self, vehicle_id: str):
-        """Return every diary (historical + current) tied to a specific vehicle."""
-        return self._observer_manager.get_vehicle_diaries(vehicle_id)
+    def get_active_live_trips(self) -> dict[str, LiveTrip]:
+        """Return active live trips keyed by vehicle id."""
+        return self.live_trips_by_vehicle_id
+
+    def search_live_trip(self, trip_id: str) -> LiveTrip | None:
+        """Search an active live trip by static trip id."""
+        return self.live_trips_by_trip_id.get(trip_id)
+
+    def search_completed_live_trip(self, trip_id: str) -> LiveTrip | None:
+        """Search completed live trips by static trip id."""
+        for live_trip in self.completed_live_trips:
+            if live_trip.trip_id == trip_id:
+                return live_trip
+        return None
+
+    def get_completed_measurements(self) -> list:
+        """Return completed live-trip measurement dictionaries for persistence."""
+        completed = []
+        for live_trip in self.completed_live_trips:
+            completed.extend(live_trip.to_dict_list())
+        return completed
+
+    def get_all_current_measurements(self) -> tuple:
+        """Return active live-trip measurement dicts, count, active trip count."""
+        all_measurements = []
+        for live_trip in self.live_trips_by_vehicle_id.values():
+            if live_trip.measurements:
+                all_measurements.extend(live_trip.to_dict_list())
+        return all_measurements, len(all_measurements), len(self.live_trips_by_vehicle_id)
+
+    def get_vehicle_live_trips(self, vehicle_id: str) -> list[LiveTrip]:
+        """Return completed and active live trips served by one vehicle."""
+        vehicle_id = str(vehicle_id)
+        live_trips = [
+            lt for lt in self.completed_live_trips
+            if lt.vehicle_id == vehicle_id or lt.vehicle.label == vehicle_id
+        ]
+        current = self.live_trips_by_vehicle_id.get(vehicle_id)
+        if current:
+            live_trips.append(current)
+        return live_trips
 
     def get_id_by_label(self, label: str) -> str | None:
-        """Find vehicle ID by label."""
-        return self._observer_manager.get_id_by_label(label)
+        """Find vehicle id by public label."""
+        for vehicle in self.vehicles.values():
+            if vehicle.label == label:
+                return vehicle.id
+        return None
 
     # ==================== UTILITY OPERATIONS ====================
 
     def get_stop_distance(self, update) -> float:
         """Calculate distance to next stop based on shape projection."""
-        trip = self.search_trip(update.get_autobus().get_trip().id)
+        live_trip = update.get_live_trip()
+        trip = self.search_trip(live_trip.trip.id)
         if not trip:
             return None
 
@@ -346,7 +400,7 @@ class Observatory:
         if not shape:
             return None
 
-        gps = update.get_autobus().get_gpsData()
+        gps = live_trip.get_gps_data()
         dist_travelled = shape.project(gps.get_latitude(), gps.get_longitude())
 
         next_stop = update.get_next_stop()
@@ -515,41 +569,28 @@ class Observatory:
         """
         served = set()
 
-        # Iterate all observers
-        for observer in self._observer_manager.observers.values():
-            # Check current diary
-            if observer.current_diary:
-                trip_id = observer.current_diary.trip_id
-                if trip_id in expected_trip_ids:
-                    shape = self.topology.get_shape_for_trip(trip_id) if self.topology else None
-                    if verification_strategy.is_trip_valid(
-                        observer.current_diary, shape
-                    ):
-                        served.add(trip_id)
-
-            # Check diary history
-            for diary in observer.diary_history:
-                trip_id = diary.trip_id
-                if trip_id in expected_trip_ids:
-                    shape = self.topology.get_shape_for_trip(trip_id) if self.topology else None
-                    if verification_strategy.is_trip_valid(diary, shape):
-                        served.add(trip_id)
+        for live_trip in list(self.live_trips_by_vehicle_id.values()) + self.completed_live_trips:
+            trip_id = live_trip.trip_id
+            if trip_id in expected_trip_ids:
+                shape = self.topology.get_shape_for_trip(trip_id) if self.topology else None
+                if verification_strategy.is_trip_valid(live_trip, shape):
+                    served.add(trip_id)
 
         return served
 
     # ==================== VECTORIZATION LOOP ====================
 
-    def process_completed_diary(
+    def process_completed_live_trip(
         self,
-        diary,
+        live_trip,
         route_id: str,
         time_window_minutes: int = 60,
     ) -> list:
         """
-        Process a completed diary: compute served_ratio, clean, vectorize.
+        Process a completed live trip: compute served_ratio, clean, vectorize.
 
         Args:
-            diary: The completed Diary object
+            live_trip: The completed LiveTrip object
             route_id: Route ID for served_ratio calculation
             time_window_minutes: Time window for served_ratio (default: 60 min)
 
@@ -558,8 +599,8 @@ class Observatory:
         """
 
         # 1. Compute served_ratio using scan_trip_adherence
-        if diary.measurements:
-            times = [m.measurement_time for m in diary.measurements]
+        if live_trip.measurements:
+            times = [m.measurement_time for m in live_trip.measurements]
             time_window_start = min(times) - (time_window_minutes * 30)
             time_window_end = max(times) + (time_window_minutes * 30)
         else:
@@ -580,19 +621,19 @@ class Observatory:
             else PredictionPipeline
         )
         pipeline = PipelineClass(
-            diary=diary,
+            diary=live_trip,
             topology=self.topology,
             served_ratio=served_ratio,
             config=self.config,
         )
         return pipeline.clean()
 
-    def process_traffic_diary(self, diary) -> list:
+    def process_traffic_live_trip(self, live_trip) -> list:
         """
-        Process a completed diary for traffic analysis.
+        Process a completed live trip for traffic analysis.
 
         Returns:
             List of traffic vectors.
         """
-        pipeline = TrafficPipeline(diary=diary, config=self.config)
+        pipeline = TrafficPipeline(diary=live_trip, config=self.config)
         return pipeline.clean()

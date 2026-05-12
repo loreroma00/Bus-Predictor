@@ -138,7 +138,7 @@ def saving_loop(
     last_street_count = 0
 
     # Get initial counts
-    diaries = observatory.get_completed_diaries()
+    diaries = observatory.get_completed_measurements()
     last_diary_count = len(diaries) if diaries else 0
 
     city = observatory.get_city("Rome")
@@ -153,7 +153,7 @@ def saving_loop(
 
         try:
             # === DIARIES ===
-            diaries_list = observatory.get_completed_diaries()
+            diaries_list = observatory.get_completed_measurements()
             current_diary_count = len(diaries_list) if diaries_list else 0
 
             if current_diary_count > last_diary_count:
@@ -177,7 +177,7 @@ def saving_loop(
     # Final Save on Exit
     logging.info("Performing final auto-save...")
     try:
-        diaries_list = observatory.get_completed_diaries()
+        diaries_list = observatory.get_completed_measurements()
         if diaries_list:
             save_diaries_incremental(diaries_list)
 

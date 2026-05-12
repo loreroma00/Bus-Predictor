@@ -2,7 +2,7 @@
 Live Validation Session - Real-time validation of predictions against live data.
 
 This module provides continuous monitoring of trip predictions, comparing them
-against ground truth data as diaries are completed.
+against ground truth data as live trips are completed.
 """
 
 import asyncio
@@ -14,13 +14,9 @@ from typing import Optional, List, Dict, Any, Set, Tuple
 
 from fastapi import WebSocket
 
-try:
-    import asyncpg
-except ImportError:
-    asyncpg = None
-
-from application.domain.internal_events import domain_events, DIARY_FINISHED
-from application.domain.observers import Diary
+from application.domain.internal_events import LIVE_TRIP_FINISHED, domain_events
+from application.domain.live_data import LiveTrip
+from persistence.database import fetch_validation_rows_by_trip_ids
 
 MIN_MEASUREMENTS = 7  # discard trips with fewer measurements than this
 
@@ -70,8 +66,8 @@ class LiveValidationSession:
     Lifecycle:
     1. Created with date and dependencies
     2. Loads scheduled trips and runs predictions upfront
-    3. Subscribes to DIARY_FINISHED events
-    4. Validates each completed diary against predictions
+    3. Subscribes to LIVE_TRIP_FINISHED events
+    4. Validates each completed live trip against predictions
     5. Broadcasts updates via WebSocket
     6. Stops at 4AM next day or when all trips validated
     """
@@ -176,11 +172,11 @@ class LiveValidationSession:
             # Resolve past trips: memory first, DB fallback once
             await self._resolve_past_trips()
 
-            # Capture event loop for thread-safe diary event handling
+            # Capture event loop for thread-safe live-trip event handling
             self._loop = asyncio.get_running_loop()
 
             # Subscribe for future trips
-            domain_events.subscribe(DIARY_FINISHED, self._on_diary_finished)
+            domain_events.subscribe(LIVE_TRIP_FINISHED, self._on_live_trip_finished)
 
             self._monitor_task = asyncio.create_task(self._monitor_loop())
 
@@ -204,7 +200,7 @@ class LiveValidationSession:
         self.logger.info("Stopping session...")
         self._stop_event.set()
 
-        domain_events.unsubscribe(DIARY_FINISHED, self._on_diary_finished)
+        domain_events.unsubscribe(LIVE_TRIP_FINISHED, self._on_live_trip_finished)
 
         if self._monitor_task:
             self._monitor_task.cancel()
@@ -367,12 +363,12 @@ class LiveValidationSession:
         resolved_memory = 0
         still_missing = set()
 
-        # 1a. Check observatory in-memory diary history
+        # 1a. Check observatory in-memory completed live trips
         for trip_id in list(self._past_trip_ids):
-            diary = self.observatory.search_history(trip_id)
-            if diary and diary.measurements:
+            live_trip = self.observatory.search_completed_live_trip(trip_id)
+            if live_trip and live_trip.measurements:
                 forecast = self.predicted_trips[trip_id]["forecast"]
-                result = self._compute_validation_result(trip_id, forecast, diary)
+                result = self._compute_validation_result(trip_id, forecast, live_trip)
                 self.validated_trips.append(result)
                 self.pending_trip_ids.discard(trip_id)
                 resolved_memory += 1
@@ -404,61 +400,25 @@ class LiveValidationSession:
 
     async def _resolve_from_db(self, trip_ids: set) -> int:
         """One-shot DB lookup for trips not found in memory. Returns count resolved."""
-        if asyncpg is None:
-            self.logger.warning("asyncpg not available: DB fallback disabled")
-            return 0
-
-        try:
-            from config import Prediction
-
-            vector_table = Prediction.VECTOR_TABLE
-            label_table = Prediction.LABEL_TABLE
-            conn_str = Prediction.VECTOR_DB_CONNECTION
-        except Exception as e:
-            self.logger.warning("DB config not available: skipping DB fallback")
-            self.logger.exception(e)
-            return 0
-
         resolved = 0
-        try:
-            conn = await asyncpg.connect(conn_str, timeout=30)
-            try:
-                query = f"""
-                    SELECT v.trip_id, v.stop_sequence, v.schedule_adherence, l.occupancy_status
-                    FROM {vector_table} v
-                    LEFT JOIN {label_table} l ON v.id = l.id
-                    WHERE v.trip_id = ANY($1)
-                    ORDER BY v.trip_id, v.ts ASC
-                """
-                rows = await conn.fetch(query, list(trip_ids))
+        rows_by_trip = await fetch_validation_rows_by_trip_ids(trip_ids)
 
-                # Group rows by trip_id
-                rows_by_trip = {}
-                for row in rows:
-                    tid = row["trip_id"]
-                    rows_by_trip.setdefault(tid, []).append(row)
+        for trip_id, trip_rows in rows_by_trip.items():
+            if len(trip_rows) < MIN_MEASUREMENTS:
+                continue
 
-                for trip_id, trip_rows in rows_by_trip.items():
-                    if len(trip_rows) < MIN_MEASUREMENTS:
-                        continue
+            prediction = self.predicted_trips.get(trip_id)
+            if not prediction:
+                continue
 
-                    prediction = self.predicted_trips.get(trip_id)
-                    if not prediction:
-                        continue
-
-                    forecast = prediction["forecast"]
-                    result = self._compute_validation_result_from_db_rows(
-                        trip_id, forecast, trip_rows
-                    )
-                    self.validated_trips.append(result)
-                    self.pending_trip_ids.discard(trip_id)
-                    trip_ids.discard(trip_id)
-                    resolved += 1
-            finally:
-                await conn.close()
-        except Exception as e:
-            self.logger.exception("DB fallback query failed")
-            self.logger.exception(e)
+            forecast = prediction["forecast"]
+            result = self._compute_validation_result_from_db_rows(
+                trip_id, forecast, trip_rows
+            )
+            self.validated_trips.append(result)
+            self.pending_trip_ids.discard(trip_id)
+            trip_ids.discard(trip_id)
+            resolved += 1
 
         return resolved
 
@@ -717,9 +677,9 @@ class LiveValidationSession:
 
         return results
 
-    def _on_diary_finished(self, event_data: Dict):
+    def _on_live_trip_finished(self, event_data: Dict):
         """
-        Handle DIARY_FINISHED event.
+        Handle LIVE_TRIP_FINISHED event.
 
         This is called synchronously from the event bus, so we need to
         schedule the async validation work.
@@ -727,23 +687,23 @@ class LiveValidationSession:
         if self.status != "monitoring":
             return
 
-        diary: Diary = event_data.get("diary")
-        if not diary:
+        live_trip: LiveTrip = event_data.get("live_trip")
+        if not live_trip:
             return
 
-        trip_id = diary.trip_id
+        trip_id = live_trip.trip_id
 
         if trip_id not in self.predicted_trips:
-            self.logger.debug(f"Ignoring diary for unknown trip: {trip_id}")
+            self.logger.debug(f"Ignoring live trip for unknown trip: {trip_id}")
             return
 
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._validate_diary(trip_id, diary), self._loop
+                self._validate_live_trip(trip_id, live_trip), self._loop
             )
 
-    async def _validate_diary(self, trip_id: str, diary: Diary):
-        """Validate a completed diary against the prediction."""
+    async def _validate_live_trip(self, trip_id: str, live_trip: LiveTrip):
+        """Validate a completed live trip against the prediction."""
         if trip_id not in self.pending_trip_ids:
             return
 
@@ -754,7 +714,7 @@ class LiveValidationSession:
         forecast = prediction["forecast"]
 
         try:
-            result = self._compute_validation_result(trip_id, forecast, diary)
+            result = self._compute_validation_result(trip_id, forecast, live_trip)
 
             self.validated_trips.append(result)
             self.pending_trip_ids.discard(trip_id)
@@ -768,7 +728,7 @@ class LiveValidationSession:
             self.logger.error(f"Validation failed for {trip_id}: {e}")
 
     def _compute_validation_result(
-        self, trip_id: str, forecast, diary: Diary
+        self, trip_id: str, forecast, live_trip: LiveTrip
     ) -> TripValidationResult:
         """Compute validation metrics for a trip."""
         topology = self.observatory.get_topology()
@@ -790,7 +750,7 @@ class LiveValidationSession:
             "actual_measurements": [],
         }
 
-        for measurement in diary.measurements:
+        for measurement in live_trip.measurements:
             matched_stop = self._match_measurement_to_stop(
                 measurement, forecast.stops, stops_map
             )
@@ -893,7 +853,7 @@ class LiveValidationSession:
 
         self.logger.info("Completing session...")
 
-        domain_events.unsubscribe(DIARY_FINISHED, self._on_diary_finished)
+        domain_events.unsubscribe(LIVE_TRIP_FINISHED, self._on_live_trip_finished)
 
         self._stop_event.set()
 
