@@ -152,7 +152,9 @@ class Vehicle:
 
     def record_trip(self, record):
         """Append a served-trip summary to this vehicle's mini-ledger."""
-        self._get_history_ledger().record_trip(record)
+        ledger = self._get_history_ledger()
+        ledger.record_trip(record)
+        ledger.push_to_db()
         self._history_cache = None
         self._history_loaded_at = 0.0
 

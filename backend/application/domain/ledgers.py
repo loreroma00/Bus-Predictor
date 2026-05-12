@@ -189,11 +189,12 @@ class HistoricalLedger:
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.HISTORICAL_TABLE
         self._today_by_trip: Dict[str, list[dict]] = {}
+        self._pending_db_rows: list[dict] = []
 
     def record_measurements(self, records: list[MeasurementRecord]):
-        """Append a batch of measurement records to the database and in-memory buffer."""
+        """Append a batch of measurement records to the in-memory buffer."""
         if not records:
-            return
+            return []
         rows = [
             {
                 "trip_id": r.trip_id,
@@ -236,8 +237,16 @@ class HistoricalLedger:
                 self._today_by_trip[tid] = []
             self._today_by_trip[tid].append(row)
 
+        self._pending_db_rows.extend(rows)
+        return rows
+
+    def push_to_db(self):
+        """Push pending measurement rows to the database layer."""
+        if not self._pending_db_rows:
+            return
         from persistence.database import write_historical
-        write_historical(self._conn_str, self._table, rows)
+        write_historical(self._conn_str, self._table, self._pending_db_rows)
+        self._pending_db_rows = []
 
     # Keep old method as alias for backward compat
     record_arrivals = record_measurements
@@ -309,15 +318,16 @@ class PredictedLedger:
         self._today_trips: list[dict] = []
         self._today_stops: Dict[str, list[dict]] = {}  # key: "route_dir_start"
         self._today_trip_keys: set = set()  # for dedup
+        self._pending_db_rows: list[dict] = []
 
     def _trip_key(self, route_id, direction_id, scheduled_start):
         """Compose the composite in-memory key used to deduplicate trip summaries."""
         return f"{route_id}_{direction_id}_{scheduled_start}"
 
     def record_predictions(self, predictions: list[StopPredictionRecord]):
-        """Append prediction records to the database and in-memory buffers."""
+        """Append prediction records to the in-memory buffers."""
         if not predictions:
-            return
+            return []
         records = [
             {
                 "route_id": p.route_id,
@@ -370,8 +380,16 @@ class PredictedLedger:
                 self._today_trips.append(summary)
                 self._today_trip_keys.add(key)
 
+        self._pending_db_rows.extend(records)
+        return records
+
+    def push_to_db(self):
+        """Push pending prediction rows to the database layer."""
+        if not self._pending_db_rows:
+            return
         from persistence.database import write_predicted
-        write_predicted(self._conn_str, self._table, records)
+        write_predicted(self._conn_str, self._table, self._pending_db_rows)
+        self._pending_db_rows = []
 
     def get_today_predictions(self) -> list[dict]:
         """Return trip summaries from in-memory buffer (for GUI table)."""
@@ -597,19 +615,28 @@ class VehicleHistoryLedger:
         self._today_records: list[dict] = []
         self._history_cache: dict[str, tuple[float, list[dict]]] = {}
         self._history_ttl_seconds = 300
+        self._pending_db_rows: list[dict] = []
 
     def record_trip(self, record: VehicleTripRecord):
         """Append a single vehicle trip record."""
-        self.record_trips([record])
+        return self.record_trips([record])
 
     def record_trips(self, records: list[VehicleTripRecord]):
-        """Append vehicle trip records to the database and in-memory buffer."""
+        """Append vehicle trip records to the in-memory buffer."""
         if not records:
-            return
-        from persistence.database import write_vehicle_trips
+            return []
         rows = [{f: getattr(r, f) for f in self._FIELDS} for r in records]
         self._today_records.extend(rows)
-        write_vehicle_trips(self._conn_str, self._table, rows)
+        self._pending_db_rows.extend(rows)
+        return rows
+
+    def push_to_db(self):
+        """Push pending vehicle-trip rows to the database layer."""
+        if not self._pending_db_rows:
+            return
+        from persistence.database import write_vehicle_trips
+        write_vehicle_trips(self._conn_str, self._table, self._pending_db_rows)
+        self._pending_db_rows = []
 
     def get_today_vehicle_trips(self) -> list[dict]:
         """Return all vehicle trip records from in-memory buffer (for GUI table)."""

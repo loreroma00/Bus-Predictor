@@ -326,6 +326,7 @@ def _record_historical(event_data: dict):
     try:
         records = extract_measurements_from_live_trip(live_trip, route_id)
         observatory.historical.record_measurements(records)
+        observatory.historical.push_to_db()
         if records:
             logging.info(f"Recorded {len(records)} measurements for trip {live_trip.trip_id}")
     except Exception as e:

@@ -445,6 +445,7 @@ class Predictor:
                     )
                 )
             self.predicted.record_predictions(records)
+            self.predicted.push_to_db()
         except Exception as exc:
             logger.warning("Failed to record predictions: %s", exc)
             return
