@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass, field
+from typing import Any
 from typing import TYPE_CHECKING
 
 from .spatial_utils import derive_bearing, derive_speed
@@ -22,6 +24,29 @@ from .time_utils import (
 if TYPE_CHECKING:
     from .static_data import Trip, Vehicle
     from .weather import Weather
+
+
+@dataclass
+class LiveFeedRecord:
+    """Normalized GTFS-RT input consumed by Observatory."""
+
+    vehicle_id: str
+    trip_id: str
+    latitude: float
+    longitude: float
+    timestamp: float
+    vehicle_label: str | None = None
+    route_id: str | None = None
+    direction_id: int | None = None
+    bearing: float = 0.0
+    speed: float = 0.0
+    scheduled_start_time: str | None = None
+    start_date: str | None = None
+    current_stop_sequence: int | None = None
+    current_status: int | None = None
+    stop_id: str | None = None
+    occupancy_status: int | None = None
+    stop_updates: list[dict[str, Any]] = field(default_factory=list)
 
 
 class GPSData:

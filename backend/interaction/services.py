@@ -6,10 +6,8 @@ Subscribes to events from the event bus for start/stop control.
 
 import logging
 import threading
-import time
 from application.live import data
 from application.domain.internal_events import LIVE_TRIP_FINISHED, domain_events
-from persistence import saving_loop, saving_parquet, log_uptime
 from .events import SERVICES_START, SERVICES_STOP, SHUTDOWN_REQUESTED, console_events
 
 COLLECTION_THREAD = None
@@ -30,23 +28,11 @@ TRAFFIC_UPDATE_TIME = 900  # 15 minutes
 
 # State interface for GUI (set by main.py)
 _state_interface = None
+_runtime_context = None
+_thread_loader = None
 
 
-def uptime_loop(stop_event):
-    """Log a heartbeat once per minute until ``stop_event`` is set."""
-    logging.info(" > Uptime Logger Started.")
-    while not stop_event.is_set():
-        log_uptime()
-        for _ in range(60):
-            if stop_event.is_set():
-                break
-            time.sleep(1)
-    logging.info(" > Uptime Logger Stopped.")
-
-
-
-
-def start_services(observatory=None, config: dict = None):
+def start_services(observatory=None, config: dict = None, context=None):
     """Start all background services."""
     global \
         COLLECTION_THREAD, \
@@ -56,106 +42,34 @@ def start_services(observatory=None, config: dict = None):
         GEOCODING_THREAD, \
         TRAFFIC_THREAD, \
         GUI_THREAD, \
-        _state_interface
+        _state_interface, \
+        _runtime_context, \
+        _thread_loader
 
     logging.info("Starting Services...")
-    data.STOP_COLLECTION_EVENT.clear()
+    if context is not None:
+        _runtime_context = context
+    elif _runtime_context is None:
+        _runtime_context = _build_compat_context(observatory, config)
 
-    config = config or {}
-    timings = config.get("timings", {})
-    services_cfg = config.get("services", {})
+    if _runtime_context is None:
+        logging.error("Cannot start services: runtime context is missing.")
+        return
 
-    update_time = int(timings.get("update_interval", 900))
-    traffic_update_time = int(timings.get("traffic_update_interval", 900))
-    gui_port = int(services_cfg.get("debug_gui_port", 8050))
+    if _state_interface is not None:
+        _runtime_context.state_interface = _state_interface
 
     # Subscribe to domain events
     domain_events.subscribe(LIVE_TRIP_FINISHED, _on_live_trip_finished)
 
-    if COLLECTION_THREAD is None or not COLLECTION_THREAD.is_alive():
-        COLLECTION_THREAD = threading.Thread(
-            target=data.run_collection_loop,
-            daemon=True,
-        )
-        COLLECTION_THREAD.start()
-        logging.info(" > Collection Thread Started.")
-    else:
-        logging.info(" > Collection Thread already running.")
+    from thread_loader import ThreadLoader
 
-    if SAVING_THREAD is None or not SAVING_THREAD.is_alive():
-        SAVING_THREAD = threading.Thread(
-            target=saving_loop,
-            args=(
-                data.OBSERVATORY,
-                saving_parquet(),
-                data.STOP_COLLECTION_EVENT,
-                data.CACHE_STRATEGY,  # Pass cache strategy for city cache saving
-            ),
-        )
-        SAVING_THREAD.start()
-        logging.info(" > Saving Thread Started.")
-    else:
-        logging.info(" > Saving Thread already running.")
+    if _thread_loader is None or _thread_loader.context is not _runtime_context:
+        _thread_loader = ThreadLoader(_runtime_context)
+        _runtime_context.thread_loader = _thread_loader
 
-    if UPTIME_THREAD is None or not UPTIME_THREAD.is_alive():
-        UPTIME_THREAD = threading.Thread(
-            target=uptime_loop, args=(data.STOP_COLLECTION_EVENT,), daemon=True
-        )
-        UPTIME_THREAD.start()
-    else:
-        logging.info(" > Uptime Thread already running.")
-
-    if WEATHER_THREAD is None or not WEATHER_THREAD.is_alive():
-        WEATHER_THREAD = threading.Thread(
-            target=data.run_weather_loop,
-            args=(update_time,),
-            daemon=True,
-        )
-        WEATHER_THREAD.start()
-    else:
-        logging.info(" > Weather Thread already running.")
-
-    # Only start geocoding thread for async mode (rate-limited servers)
-    from application.domain.map_info import AsyncGeocodingService
-
-    if data.OBSERVATORY and isinstance(
-        data.OBSERVATORY._geocoding, AsyncGeocodingService
-    ):
-        if GEOCODING_THREAD is None or not GEOCODING_THREAD.is_alive():
-            GEOCODING_THREAD = threading.Thread(
-                target=data.run_geocoding_loop,
-                daemon=True,
-            )
-            GEOCODING_THREAD.start()
-            logging.info(" > Geocoding Thread Started (async mode).")
-        else:
-            logging.info(" > Geocoding Thread already running.")
-    else:
-        logging.info(" > Geocoding Thread NOT needed (sync mode).")
-
-    # Start traffic thread if traffic service is configured
-    if data.TRAFFIC_SERVICE:
-        if TRAFFIC_THREAD is None or not TRAFFIC_THREAD.is_alive():
-            TRAFFIC_THREAD = threading.Thread(
-                target=data.run_traffic_loop,
-                args=(traffic_update_time,),
-                daemon=True,
-            )
-            TRAFFIC_THREAD.start()
-            logging.info(" > Traffic Thread Started.")
-        else:
-            logging.info(" > Traffic Thread already running.")
-    else:
-        logging.info(" > Traffic Thread NOT started (no API key).")
-
-    # Start Dashboard GUI if state interface is available
-    if _state_interface is not None:
-        if GUI_THREAD is None or not GUI_THREAD.is_alive():
-            from . import debug_gui
-
-            GUI_THREAD = debug_gui.start_gui(_state_interface, port=gui_port)
-        else:
-            logging.info(" > Dashboard GUI already running.")
+    _thread_loader.start()
+    _sync_thread_globals()
 
 
 def set_state_interface(state_interface):
@@ -286,21 +200,64 @@ def get_validation_status():
 
 def stop_services():
     """Stop all background services gracefully."""
+    global _thread_loader
     logging.info("Stopping Services (Collection & Auto-Save)...")
-    data.STOP_COLLECTION_EVENT.set()
 
     # Stop validators
     stop_live_validation()
 
     # Unsubscribe
     domain_events.unsubscribe(LIVE_TRIP_FINISHED, _on_live_trip_finished)
+    if _thread_loader is not None:
+        _thread_loader.stop()
+        _sync_thread_globals()
+    else:
+        data.STOP_COLLECTION_EVENT.set()
 
-    # Stop Dashboard GUI
-    try:
-        from . import debug_gui
-        debug_gui.stop_gui()
-    except Exception:
-        pass
+
+def join_core_threads(timeout: float = 5):
+    """Wait briefly for core service threads."""
+    if _thread_loader is not None:
+        _thread_loader.join_core(timeout=timeout)
+
+
+def _sync_thread_globals():
+    """Mirror context threads into legacy module globals for GUI/status code."""
+    global COLLECTION_THREAD, SAVING_THREAD, UPTIME_THREAD
+    global WEATHER_THREAD, GEOCODING_THREAD, TRAFFIC_THREAD, GUI_THREAD
+    if _runtime_context is None:
+        return
+    threads = _runtime_context.threads
+    COLLECTION_THREAD = threads.get("collection")
+    SAVING_THREAD = threads.get("saving")
+    UPTIME_THREAD = threads.get("uptime")
+    WEATHER_THREAD = threads.get("weather")
+    GEOCODING_THREAD = threads.get("geocoding")
+    TRAFFIC_THREAD = threads.get("traffic")
+    GUI_THREAD = threads.get("gui")
+
+
+def _build_compat_context(observatory=None, config: dict = None):
+    """Build a minimal context for legacy event handlers."""
+    observatory = observatory or data.OBSERVATORY
+    if observatory is None:
+        return None
+
+    from application.runtime import ApplicationContext
+
+    city = observatory.get_city("Rome")
+    return ApplicationContext(
+        config=config or data.CONFIG or {},
+        observatory=observatory,
+        city=city,
+        cache_strategy=data.CACHE_STRATEGY,
+        geocoding_service=getattr(observatory, "_geocoding", None),
+        traffic_service=getattr(city, "traffic_service", None) if city else None,
+        feed_fetcher=data.get_feed_fetcher(),
+        stop_event=data.STOP_COLLECTION_EVENT,
+        shutdown_event=data.SHUTDOWN_EVENT,
+        state_interface=_state_interface,
+    )
 
 
 # ============================================================
@@ -319,7 +276,11 @@ def _record_historical(event_data: dict):
 
     live_trip = event_data.get("live_trip")
     route_id = event_data.get("route_id")
-    observatory = data.OBSERVATORY
+    observatory = (
+        _runtime_context.observatory
+        if _runtime_context is not None
+        else data.OBSERVATORY
+    )
     if not live_trip or not observatory or not route_id:
         return
 
@@ -367,6 +328,8 @@ def _on_services_stop(event_data):
 
 def _on_shutdown(event_data):
     """Handler for shutdown_requested event."""
+    if _runtime_context is not None:
+        _runtime_context.shutdown_event.set()
     data.SHUTDOWN_EVENT.set()
     stop_services()
 

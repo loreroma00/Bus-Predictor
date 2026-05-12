@@ -435,11 +435,9 @@ def create_app(
 
     async def periodic_ledger_check():
         """Refresh static ledgers periodically and rewarm predictions on change."""
-        from application.services.shared_state import check_for_updates
-
         while True:
             await asyncio.sleep(3600)
-            if check_for_updates():
+            if state.observatory and state.observatory.check_and_reload_ledger():
                 print("Ledger updated with new GTFS data")
                 today = datetime.now().strftime("%Y%m%d")
                 asyncio.create_task(generate_daily_predictions(today))

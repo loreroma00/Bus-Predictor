@@ -107,19 +107,19 @@ class debug_traffic(Command):
 
     def execute(self, args):
         """Execute."""
-        from application.live import data as live_data
-
         city = self._obs.get_city("Rome")
         if not city:
             logging.warning("City Rome not found")
             return
 
+        traffic_service = getattr(city, "traffic_service", None)
+
         # Print object IDs for comparison
         logging.info(f"Observatory ID: {id(self._obs)}")
         logging.info(f"City ID: {id(city)}")
-        logging.info(f"data.OBSERVATORY ID: {id(live_data.OBSERVATORY)}")
         logging.info(
-            f"data.TRAFFIC_SERVICE city ID: {id(live_data.TRAFFIC_SERVICE._city) if live_data.TRAFFIC_SERVICE else 'N/A'}"
+            "TrafficService city ID: %s",
+            id(traffic_service._city) if traffic_service else "N/A",
         )
 
         # Find hexagons with traffic data
@@ -459,9 +459,9 @@ class pause_traffic_service(Command):
     """Pause traffic service."""
     command_name = "pause traffic service"
 
-    def __init__(self):
+    def __init__(self, observatory):
         """Initialize the instance."""
-        pass
+        self._obs = observatory
 
     def execute(self, args):
         """Execute."""
@@ -471,10 +471,9 @@ class pause_traffic_service(Command):
             logging.warning("Usage: pause traffic service <seconds>")
             return
 
-        from application.live import data as live_data
-
-        if live_data.TRAFFIC_SERVICE:
-            live_data.TRAFFIC_SERVICE.pause(seconds)
+        city = self._obs.get_city("Rome")
+        if city and getattr(city, "traffic_service", None):
+            city.pause_traffic(seconds)
         else:
             logging.warning("Traffic Service is not active/initialized.")
 

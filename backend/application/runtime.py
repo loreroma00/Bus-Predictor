@@ -4,7 +4,7 @@ This module intentionally holds data only.  Bootstrapping lives in
 ``bootstrapper.py``; domain behavior stays on ``Observatory`` and the ledgers.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -18,7 +18,11 @@ class ApplicationContext:
     cache_strategy: Any = None
     geocoding_service: Any = None
     traffic_service: Any = None
+    feed_fetcher: Any = None
+    stop_event: Any = None
+    shutdown_event: Any = None
+    threads: dict[str, Any] = field(default_factory=dict)
+    thread_loader: Any = None
     state_interface: Any = None
     predictor: Any = None
     bus_type_predictor: Any = None
-

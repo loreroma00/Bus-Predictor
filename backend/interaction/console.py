@@ -39,7 +39,7 @@ def register_commands(observatory, predictor=None, bus_type_predictor=None):
         "stop validation": commands.stop_validation(),
         "validation status": commands.validation_status(),
         "help": commands.command_help(),
-        "pause traffic service": commands.pause_traffic_service(),
+        "pause traffic service": commands.pause_traffic_service(observatory),
         "weather strategy": commands.weather_strategy_cmd(observatory),
         "fotoromanzo": commands.fotoromanzo(observatory, predictor),
         # Validation commands (longer prefix first for correct matching)
@@ -69,8 +69,8 @@ def run_console_loop():
 
             # Find matching command
             matched = False
-            sorted_items = dict(sorted(_command_registry.keys()))
-            for cmd_name, command_instance in sorted_items.items():
+            for cmd_name in sorted(_command_registry.keys(), key=len, reverse=True):
+                command_instance = _command_registry[cmd_name]
                 if cmd.lower().startswith(cmd_name):
                     args = cmd[len(cmd_name) :].strip()
                     command_instance.execute(args)

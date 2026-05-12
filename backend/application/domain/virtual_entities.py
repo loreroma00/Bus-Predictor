@@ -16,7 +16,7 @@ from .interfaces import CacheStrategy, GeocodingStrategy
 from .static_data import Route, Shape, Trip, Vehicle, VehicleType
 from .static_data_fetcher import StaticDataFetcher
 from .cities import City
-from .live_data import LiveTrip
+from .live_data import GPSData, LiveFeedRecord, LiveTrip, Update
 from .fleet_loader import load_fleet
 
 if TYPE_CHECKING:
@@ -426,6 +426,161 @@ class Observatory:
                 street = self._geocoding.get_street(latitude, longitude)
                 if street:
                     live_trip.set_location_name(street)
+
+    def ingest_live_feed(
+        self,
+        records: list[LiveFeedRecord],
+        city_name: str = "Rome",
+    ) -> list[Update]:
+        """Apply normalized GTFS-RT records to active LiveTrip aggregates."""
+        topology = self.get_topology()
+        updates: list[Update] = []
+        processed_vehicles: set[str] = set()
+
+        for record in records:
+            try:
+                vehicle_id = str(record.vehicle_id)
+                if vehicle_id in processed_vehicles:
+                    continue
+                processed_vehicles.add(vehicle_id)
+
+                trip = topology.get_trip(record.trip_id)
+                if not trip and self.check_and_reload_ledger():
+                    topology = self.get_topology()
+                    trip = topology.get_trip(record.trip_id)
+
+                if not trip:
+                    logging.warning(
+                        "Warning: Trip %s not found. Skipping.",
+                        record.trip_id,
+                    )
+                    continue
+
+                live_trip, status = self.get_or_create_live_trip(
+                    vehicle_id=vehicle_id,
+                    trip=trip,
+                    label=record.vehicle_label,
+                    scheduled_start_time=record.scheduled_start_time,
+                )
+                self._log_live_feed_status(record, live_trip, status)
+
+                gps_data = self._create_gps_data(record, trip)
+                live_trip.set_gps_data(gps_data)
+                live_trip.set_occupancy_status(record.occupancy_status)
+                live_trip.derive_speed()
+                live_trip.derive_bearing()
+
+                self._place_live_trip(city_name, live_trip, gps_data, status)
+
+                update = Update(
+                    live_trip=live_trip,
+                    next_stops=record.stop_updates,
+                )
+                self._apply_live_feed_context(city_name, live_trip, update)
+                updates.append(update)
+
+            except Exception as e:
+                label = record.vehicle_label or record.vehicle_id
+                logging.error("Error processing update for %s: %s", label, e)
+                continue
+
+        return updates
+
+    def _log_live_feed_status(
+        self,
+        record: LiveFeedRecord,
+        live_trip: LiveTrip,
+        status: int,
+    ):
+        """Log whether a GTFS-RT record created, changed, or updated a live trip."""
+        display_id = record.vehicle_label or record.vehicle_id
+        trip = live_trip.trip
+        if status == 0:
+            logging.info(
+                "Found NEW LiveTrip: %s - %s %s",
+                display_id,
+                trip.route.id,
+                trip.direction_name,
+            )
+        elif status == 2:
+            logging.info("Detected trip change for %s: now %s", display_id, trip.id)
+        else:
+            logging.debug(
+                "Update for LiveTrip: %s - %s %s",
+                display_id,
+                trip.route.id,
+                trip.direction_name,
+            )
+
+    def _create_gps_data(self, record: LiveFeedRecord, trip) -> GPSData:
+        """Create GPSData from a normalized feed record."""
+        gps_id = f"{record.vehicle_id}_{record.timestamp}"
+        return GPSData(
+            id=gps_id,
+            trip=trip,
+            timestamp=record.timestamp,
+            latitude=record.latitude,
+            longitude=record.longitude,
+            speed=record.speed,
+            heading=record.bearing,
+            next_stop_id=record.stop_id,
+            current_stop_sequence=record.current_stop_sequence,
+            current_status=record.current_status,
+        )
+
+    def _place_live_trip(
+        self,
+        city_name: str,
+        live_trip: LiveTrip,
+        gps_data: GPSData,
+        status: int,
+    ):
+        """Create or move the city placement for a live trip."""
+        if status in (0, 2):
+            self.add_live_trip_to_city(
+                city_name,
+                live_trip,
+                latitude=gps_data.latitude,
+                longitude=gps_data.longitude,
+            )
+        else:
+            self.move_live_trip(
+                city_name,
+                live_trip,
+                latitude=gps_data.latitude,
+                longitude=gps_data.longitude,
+            )
+
+    def _apply_live_feed_context(
+        self,
+        city_name: str,
+        live_trip: LiveTrip,
+        update: Update,
+    ):
+        """Compute city context and let LiveTrip append its measurement."""
+        from application.domain.spatial_utils import get_cardinal_direction
+
+        city = self.get_city(city_name)
+        hexagon = city.get_hexagon(live_trip.get_hexagon_id()) if city else None
+        if not hexagon:
+            return
+
+        bearing = live_trip.derived_bearing
+        direction = get_cardinal_direction(bearing) if bearing else None
+        weather = None
+        try:
+            weather = city.get_weather(live_trip.get_hexagon_id())
+        except Exception:
+            pass
+
+        live_trip.apply_update(
+            update,
+            next_stop_distance=self.get_stop_distance(update),
+            speed_ratio=hexagon.get_speed_ratio(direction),
+            current_speed=hexagon.get_current_speed(direction),
+            traffic_data_pending=hexagon.is_traffic_expired(),
+            weather=weather,
+        )
 
     # ==================== LEDGER OPERATIONS ====================
 

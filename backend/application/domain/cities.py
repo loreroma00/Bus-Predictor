@@ -327,8 +327,13 @@ class City:
         self.static_bus_lanes = static_bus_lanes if static_bus_lanes else {}
         # Weather update strategy (set externally, defaults to greedy)
         self.weather_strategy = None  # Set during runtime bootstrap.
+        self.traffic_service = None
         # Injected callback for expired traffic handling (LOW COUPLING)
         self._on_live_trip_entered_expired_hex: Callable[[str, str], None] = None
+
+    def set_traffic_service(self, traffic_service):
+        """Attach the traffic updater serving this city."""
+        self.traffic_service = traffic_service
 
     def set_on_live_trip_entered_expired_hex(self, callback: Callable[[str, str], None]):
         """Inject callback (live_trip_id, hex_id) for expired traffic handling."""
@@ -426,7 +431,12 @@ class City:
 
             # 4. Check if new hexagon has expired traffic data
             if self.hexagons[new_hex_id].is_traffic_expired():
-                if self._on_live_trip_entered_expired_hex:
+                if self.traffic_service:
+                    self.refresh_traffic_for_hexagon(
+                        new_hex_id,
+                        live_trip_id=str(live_trip_id),
+                    )
+                elif self._on_live_trip_entered_expired_hex:
                     self._on_live_trip_entered_expired_hex(str(live_trip_id), new_hex_id)
 
             return True
@@ -518,6 +528,65 @@ class City:
             from .weather_strategy import GreedyWeatherStrategy
             self.weather_strategy = GreedyWeatherStrategy()
         self.weather_strategy.update(self, WEATHER_URL)
+
+    def refresh_traffic(self) -> int:
+        """Refresh traffic for hexagons containing active live trips."""
+        if not self.traffic_service:
+            return 0
+        return self.traffic_service.update_traffic()
+
+    def refresh_traffic_for_hexagon(
+        self,
+        hex_id: str,
+        live_trip_id: str = None,
+    ) -> list[str]:
+        """Refresh traffic around one hexagon and correct pending measurements."""
+        if not self.traffic_service:
+            return []
+
+        updated_hex_ids = self.traffic_service.update_traffic_for_hexagon(hex_id)
+        if live_trip_id and updated_hex_ids:
+            self._correct_pending_traffic_measurements(live_trip_id, updated_hex_ids)
+        return updated_hex_ids
+
+    def pause_traffic(self, seconds: int):
+        """Pause traffic updates if this city has a traffic service."""
+        if self.traffic_service:
+            self.traffic_service.pause(seconds)
+
+    def _correct_pending_traffic_measurements(
+        self,
+        live_trip_id: str,
+        updated_hex_ids: list[str],
+    ):
+        """Correct measurements recorded while traffic data was stale."""
+        from application.domain.spatial_utils import get_cardinal_direction
+
+        live_trip = self.get_live_trip(live_trip_id)
+        if not live_trip:
+            return
+
+        for measurement in live_trip.get_pending_traffic_measurements():
+            hex_id = measurement.hexagon_id
+            if not hex_id:
+                hex_id = h3_utils.get_h3_index(
+                    measurement.gpsdata.latitude,
+                    measurement.gpsdata.longitude,
+                )
+
+            if hex_id not in updated_hex_ids:
+                continue
+
+            hexagon = self.get_hexagon(hex_id)
+            if not hexagon:
+                continue
+
+            bearing = measurement.derived_bearing
+            direction = get_cardinal_direction(bearing) if bearing else None
+            measurement.update_traffic_data(
+                hexagon.get_speed_ratio(direction),
+                hexagon.get_current_speed(direction),
+            )
 
     def get_weather(self, hex_id: str) -> Weather:
         """Return the weather."""

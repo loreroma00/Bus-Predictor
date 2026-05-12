@@ -6,6 +6,7 @@ state interface, starts/stops collection services, and performs final cleanup.
 """
 
 import logging
+import threading
 from typing import Any
 
 from application import domain
@@ -67,7 +68,6 @@ def build_runtime_context(
 
     logging.info("Creating Observatory...")
     observatory = domain.Observatory(cache_strategy=cache_strategy, config=config)
-    data.initialize(observatory, cache_strategy=cache_strategy, config=config)
 
     get_db_connection(config)
 
@@ -108,8 +108,7 @@ def build_runtime_context(
     tomtom_api_key = config.get("api", {}).get("tomtom_api_key")
     if tomtom_api_key:
         traffic_service = create_traffic_service(city, api_key=tomtom_api_key, zoom=15)
-        data.TRAFFIC_SERVICE = traffic_service
-        data.wire_traffic_callback()
+        city.set_traffic_service(traffic_service)
         logging.info("Traffic service initialized.")
     else:
         logging.warning("TOMTOM_API_KEY not set, traffic updates disabled.")
@@ -117,14 +116,36 @@ def build_runtime_context(
     logging.info("Loading ledger...")
     observatory._ensure_static_data_loaded()
 
-    return ApplicationContext(
+    from application.live.feed_fetcher import LiveFeedFetcher
+
+    urls = config.get("urls", {})
+    feed_fetcher = LiveFeedFetcher(
+        vehicles_url=urls.get("rtgtfs_vehicles"),
+        trips_url=urls.get("rtgtfs_trip_updates"),
+    )
+    stop_event = threading.Event()
+    shutdown_event = threading.Event()
+
+    context = ApplicationContext(
         config=config,
         observatory=observatory,
         city=city,
         cache_strategy=cache_strategy,
         geocoding_service=geocoding_service,
         traffic_service=traffic_service,
+        feed_fetcher=feed_fetcher,
+        stop_event=stop_event,
+        shutdown_event=shutdown_event,
     )
+    data.initialize(
+        observatory,
+        cache_strategy=cache_strategy,
+        config=config,
+        feed_fetcher=feed_fetcher,
+        stop_event=stop_event,
+        shutdown_event=shutdown_event,
+    )
+    return context
 
 
 def wire_state_interface(
@@ -160,7 +181,7 @@ def start_collection_services(context: ApplicationContext):
     """Start collection, persistence, weather, traffic and debug GUI services."""
     from interaction import services
 
-    services.start_services(context.observatory, context.config)
+    services.start_services(context=context)
 
 
 def stop_collection_services(join: bool = False):
@@ -169,10 +190,7 @@ def stop_collection_services(join: bool = False):
 
     services.stop_services()
     if join:
-        if services.COLLECTION_THREAD:
-            services.COLLECTION_THREAD.join(timeout=5)
-        if services.SAVING_THREAD:
-            services.SAVING_THREAD.join(timeout=5)
+        services.join_core_threads(timeout=5)
 
 
 def save_completed_diaries(observatory):

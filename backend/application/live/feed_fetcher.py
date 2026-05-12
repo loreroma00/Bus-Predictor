@@ -7,6 +7,8 @@ import pandas as pd
 from google.transit import gtfs_realtime_pb2 as grt
 import requests as rq
 
+from application.domain.live_data import LiveFeedRecord
+
 
 HEADERS: dict[str, str] = {
     "Referer": "https://romamobilita.it/sistemi-e-tecnologie/open-data/",
@@ -31,7 +33,11 @@ class LiveFeedFetcher:
         if not self.trips_url:
             logging.warning("LiveFeedFetcher initialized without trips_url")
 
-    def fetch(self) -> pd.DataFrame:
+    def fetch(self) -> list[LiveFeedRecord]:
+        """Fetch and normalize GTFS-RT feeds into domain-level records."""
+        return self._records_from_frame(self.fetch_frame())
+
+    def fetch_frame(self) -> pd.DataFrame:
         """
         Fetch vehicle positions and trip updates, merge them.
         Returns merged DataFrame or empty DataFrame on error.
@@ -91,6 +97,79 @@ class LiveFeedFetcher:
             merged = df_vp
 
         return merged
+
+    fetch_dataframe = fetch_frame
+
+    def _records_from_frame(self, frame: pd.DataFrame) -> list[LiveFeedRecord]:
+        """Convert the merged feed DataFrame into LiveFeedRecord objects."""
+        if frame.empty:
+            return []
+
+        records: list[LiveFeedRecord] = []
+        for _, row in frame.iterrows():
+            vehicle_id = self._clean(row.get("vehicleId"))
+            trip_id = self._clean(row.get("tripId"))
+            latitude = self._clean(row.get("latitude"))
+            longitude = self._clean(row.get("longitude"))
+            timestamp = self._clean(row.get("timestamp"))
+
+            if not vehicle_id or not trip_id or latitude is None or longitude is None:
+                continue
+
+            records.append(
+                LiveFeedRecord(
+                    vehicle_id=str(vehicle_id),
+                    vehicle_label=self._clean(row.get("vehicleLabel")),
+                    trip_id=str(trip_id),
+                    route_id=self._clean(row.get("routeId")),
+                    direction_id=self._to_int(row.get("directionId")),
+                    latitude=float(latitude),
+                    longitude=float(longitude),
+                    bearing=float(self._clean(row.get("bearing"), 0.0) or 0.0),
+                    speed=float(self._clean(row.get("speed"), 0.0) or 0.0),
+                    timestamp=float(timestamp or 0),
+                    scheduled_start_time=self._clean(row.get("startTime")),
+                    start_date=self._clean(row.get("startDate")),
+                    current_stop_sequence=self._to_int(
+                        row.get("currentStopSequence")
+                    ),
+                    current_status=self._to_int(row.get("currentStatus")),
+                    stop_id=self._clean(row.get("stopId")),
+                    occupancy_status=self._to_int(row.get("occupancyStatus")),
+                    stop_updates=self._clean_stop_updates(row.get("stopUpdates")),
+                )
+            )
+
+        return records
+
+    @staticmethod
+    def _clean(value, default=None):
+        """Return None/default for pandas missing values without touching lists."""
+        if isinstance(value, list):
+            return value
+        try:
+            if pd.isna(value):
+                return default
+        except (TypeError, ValueError):
+            pass
+        return value
+
+    @classmethod
+    def _to_int(cls, value):
+        """Best-effort integer conversion for optional feed fields."""
+        value = cls._clean(value)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _clean_stop_updates(cls, value) -> list[dict]:
+        """Return stop updates as a list of dictionaries."""
+        value = cls._clean(value, [])
+        return value if isinstance(value, list) else []
 
     def _parse_vehicle_positions(self, feed: grt.FeedMessage) -> pd.DataFrame:
         """Parse vehicle positions from protobuf feed."""
