@@ -1,22 +1,34 @@
 import os
-import pytest
 import pandas as pd
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from application.post_processing import data_cleaning
-from application.domain.observers import Diary, Measurement
-from application.domain.live_data import GPSData
+from application.domain.live_data import GPSData, Measurement
 from application.domain.weather import Weather
+
+
+def create_diary(trip_id: str):
+    """Create a LiveTrip-like object for pipeline tests."""
+    return SimpleNamespace(trip_id=trip_id, measurements=[])
 
 
 # Helper to create a dummy Measurement
 def create_measurement(
-    id, trip_id, lat, lon, time_val, speed=10, next_stop=None, derived_speed=None
+    id,
+    trip_id,
+    lat,
+    lon,
+    time_val,
+    speed=10,
+    next_stop=None,
+    derived_speed=None,
+    speed_ratio=1.0,
+    current_speed=10.0,
 ):
-    # Mock/Stub GPSData
     """Create a measurement."""
+    # Mock/Stub GPSData
     gps = MagicMock(spec=GPSData)
     gps.latitude = lat
     gps.longitude = lon
@@ -31,33 +43,31 @@ def create_measurement(
 
     m = Measurement(
         id=id,
-        autobus_id="bus_123",
+        vehicle_id="bus_123",
         next_stop=next_stop,
         next_stop_distance=100,
         gpsdata=gps,
         trip_id=str(trip_id),
         weather=weather,
         occupancy_status=1,
-        speed_ratio=1.0,
-        current_speed=10.0,
+        speed_ratio=speed_ratio,
+        current_speed=current_speed,
         derived_speed=derived_speed if derived_speed is not None else speed,
         derived_bearing=0,
         is_in_preferential=False,
+        measurement_time=time_val,
     )
-    # Set time manually as __init__ might use current time
-    m.measurement_time = time_val
     return m
 
 
 class TestDataCleaning:
     """Testdatacleaning."""
     def test_check_for_duplicates_diary(self):
-        """Test _check_for_duplicates with a Diary object."""
-        diary = Diary(observer=None, trip_id="trip_1")
+        """Test _check_for_duplicates with a LiveTrip-like object."""
+        diary = create_diary("trip_1")
 
-        # Add 3 measurements, 2 are identical (lat/lon)
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
-        m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1001)  # Duplicate pos
+        m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1000)
         m3 = create_measurement("3", "trip_1", 10.1, 10.1, 1002)
 
         diary.measurements = [m1, m2, m3]
@@ -65,50 +75,35 @@ class TestDataCleaning:
         cleaned_diary = data_cleaning._check_for_duplicates(diary)
 
         assert len(cleaned_diary.measurements) == 2
-        # m1 and m2 share location, usually first one is kept
         assert cleaned_diary.measurements[0].id == "1"
         assert cleaned_diary.measurements[1].id == "3"
 
-    def test_remove_outliers_diary(self):
-        """Test _remove_outliers with a Diary object."""
-        diary = Diary(observer=None, trip_id="trip_1")
+    def test_same_position_different_time_is_not_duplicate(self):
+        """Standing still is valid and must not be collapsed as a duplicate."""
+        diary = create_diary("trip_1")
+        m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
+        m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1010)
 
-        # m1: Normal
-        # m2: Speed outlier (derived_speed=150)
-        # m3: Time gap outlier (gap > 600s)
+        diary.measurements = [m1, m2]
+        cleaned_diary = data_cleaning._check_for_duplicates(diary)
 
-        m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000, derived_speed=50)
-        m2 = create_measurement(
-            "2", "trip_1", 10.0, 10.1, 1060, derived_speed=150
-        )  # Speed outlier
-        m3 = create_measurement(
-            "3", "trip_1", 10.2, 10.2, 2000, derived_speed=50
-        )  # Time gap outlier (1060 -> 2000 is 940s)
+        assert [m.id for m in cleaned_diary.measurements] == ["1", "2"]
 
-        diary.measurements = [m1, m2, m3]
+    def test_integrity_drops_bad_speed_ratio_and_uptime(self):
+        """Integrity keeps only finite positive speed_ratio values seen while online."""
+        good = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
+        zero_ratio = create_measurement(
+            "2", "trip_1", 10.1, 10.1, 1010, speed_ratio=0.0
+        )
+        offline = create_measurement("3", "trip_1", 10.2, 10.2, 2000)
 
-        cleaned_diary = data_cleaning._remove_outliers(
-            diary, max_bus_speed_kmh=120, max_time_gap_seconds=600
+        cleaned = data_cleaning._check_data_integrity(
+            {"trip_1": [good, zero_ratio, offline]},
+            uptime_timestamps=[995, 1005],
+            served_ratio=1.0,
         )
 
-        # m2 should be removed (speed)
-        # m3 should NOT be removed? Wait, logic:
-        # if i > 0 and i < len - 1: check gaps.
-        # m1 (index 0): start
-        # m2 (index 1): speed check -> fail.
-        # m3 (index 2): end.
-
-        # If m2 is removed inside the loop, does it affect m3?
-        # The loop iterates over original sorted list.
-        # m2 fails speed check.
-        # m3 is last, so gap check logic: `if i > 0 and i < len(sorted_m) - 1`
-        # m3 is at index 2, len is 3. 2 < 2 is False. So m3 gap check skipped (it's end of trip).
-
-        # So expected: m1 kept, m2 dropped, m3 kept.
-        ids = [m.id for m in cleaned_diary.measurements]
-        assert "2" not in ids
-        assert "1" in ids
-        assert "3" in ids
+        assert [m.id for m in cleaned["trip_1"]] == ["1"]
 
     def test_process_parquet_file(self):
         """Test _process_parquet_file by creating a real temporary parquet file."""
@@ -177,21 +172,16 @@ class TestDataCleaning:
         m2 = create_measurement("2", "trip_1", 10.1, 10.1, 1010)
         data_dict = {"trip_1": [m1, m2]}
 
-        # _remove_outliers with dict
-        res = data_cleaning._remove_outliers(data_dict)
+        res = data_cleaning._check_data_integrity(
+            data_dict, uptime_timestamps=[], served_ratio=1.0
+        )
         assert isinstance(res, dict)
         assert "trip_1" in res
-
-        # _check_for_runs with dict
-        # Default min is 7, we have 1 -> should be dropped
-        res_runs = data_cleaning._check_for_runs(data_dict, min_measurements_per_run=7)
-        assert isinstance(res_runs, dict)
-        assert len(res_runs) == 0  # Dropped
 
     def test_check_for_duplicates_dict(self):
         """Test _check_for_duplicates with dict input."""
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
-        m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1001)  # Duplicate pos
+        m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1000)
         m3 = create_measurement("3", "trip_1", 10.1, 10.1, 1002)
 
         data_dict = {"trip_1": [m1, m2, m3]}
@@ -212,7 +202,7 @@ class TestDataCleaning:
             VehicleLabel,
         )
 
-        diary = Diary(observer=None, trip_id="trip_1")
+        diary = create_diary("trip_1")
 
         # Create a measurement with bus_type
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
@@ -237,7 +227,6 @@ class TestDataCleaning:
             pipeline = VehiclePipeline(
                 diary=diary,
                 topology=topology,
-                config={"data_cleaning": {"min_measurements_per_run": 1}},
                 vehicle_type_name="DieselBus",
             )
 

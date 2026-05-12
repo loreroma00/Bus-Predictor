@@ -1,11 +1,10 @@
 """
-Data Cleaning Pipeline for post-processing measurements.
+Lightweight post-processing pipelines for measurements.
 
 Provides functions to:
-- Remove duplicate measurements
-- Filter outliers (random bus appearances)
-- Validate runs (terminus checks, measurement counts)
-- Vectorize cleaned measurements
+- Drop structurally invalid measurements
+- Remove exact duplicate measurements
+- Vectorize measurements
 """
 
 import logging
@@ -13,13 +12,12 @@ import pandas as pd
 import csv
 import bisect
 import os
-from datetime import datetime
+import math
 from typing import TYPE_CHECKING, Union, overload
 from types import SimpleNamespace
 
 from ..domain.live_data import GPSData
 from ..domain.weather import Weather
-from ..domain.time_utils import to_unix_time, get_timestamp_components
 from application.domain.interfaces import Pipeline
 from . import vectorization
 
@@ -30,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class PredictionPipeline(Pipeline):
-    """Pipeline for data cleaning and vectorization."""
+    """Pipeline for fast integrity cleaning and prediction vectorization."""
 
     def __init__(
         self,
@@ -43,7 +41,7 @@ class PredictionPipeline(Pipeline):
         Initialize pipeline with diary and static data.
 
         Args:
-            diary: The Diary object containing measurements
+            diary: LiveTrip-like object containing measurements
             topology: TopologyLedger with routes, trips, shapes
             served_ratio: Ratio from scan_trip_adherence
             config: Configuration dictionary
@@ -52,11 +50,7 @@ class PredictionPipeline(Pipeline):
         self.topology = topology
         self.served_ratio = served_ratio
 
-        # Load cleaning parameters from config or defaults
         cleaning_cfg = config.get("data_cleaning", {}) if config else {}
-        self.min_measurements = int(cleaning_cfg.get("min_measurements_per_run", 7))
-        self.max_bus_speed = int(cleaning_cfg.get("max_bus_speed_kmh", 120))
-        self.max_time_gap = int(cleaning_cfg.get("max_time_gap_seconds", 600))
         self.uptime_lookback_seconds = (
             int(cleaning_cfg.get("served_ratio_lookback_minutes", 60)) * 60
         )
@@ -69,7 +63,7 @@ class PredictionPipeline(Pipeline):
         tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
     ]:
         """
-        Clean diary measurements and vectorize them.
+        Clean measurements with universal checks and vectorize them.
 
         Returns:
             List of (Vector, Label, measurement_time) tuples for DB insert.
@@ -82,8 +76,6 @@ class PredictionPipeline(Pipeline):
             f"with {len(self.diary.measurements)} measurements"
         )
 
-        # Step -1: Validate Uptime Coverage for Served Ratio (Configurable lookback)
-        # If served_ratio < 1.0, we must ensure the "missed" trips weren't due to downtime.
         if self.served_ratio < 1.0 and self.uptime_timestamps:
             first_ts = self.diary.measurements[0].measurement_time
             if not _is_uptime_sufficient(
@@ -97,99 +89,29 @@ class PredictionPipeline(Pipeline):
                 )
                 return []
 
-        # Build measurements dict from diary
         trip_key = str(self.diary.trip_id)
         measurements = {trip_key: self.diary.measurements}
-        initial_count = len(self.diary.measurements)
-
-        # Step 0: Data Integrity (Zeros & Uptime)
-        cleaned = _check_data_integrity(
-            measurements, self.uptime_timestamps, self.served_ratio
+        cleaned = _clean_measurements(
+            measurements,
+            uptime_timestamps=self.uptime_timestamps,
+            served_ratio=self.served_ratio,
         )
-        if not cleaned or len(cleaned.get(trip_key, [])) < initial_count:
-            logger.info(
-                f"🚫 Trip {trip_key} discarded: Integrity check failed (faulty measurements)"
-            )
+        if not cleaned or not cleaned.get(trip_key):
             return []
 
-        # Step 1: Remove duplicates
-        cleaned = _check_for_duplicates(cleaned)
-
-        # Step 2: Remove outliers
-        # Update count after duplicates
-        post_dup_count = len(cleaned.get(trip_key, []))
-        cleaned = _remove_outliers(cleaned, self.max_bus_speed, self.max_time_gap)
-        if not cleaned or len(cleaned.get(trip_key, [])) < post_dup_count:
-            logger.info(
-                f"🚫 Trip {trip_key} discarded: Outliers detected"
-            )
-            return []
-
-        # Step 3: Check for valid runs
-        cleaned = _check_for_runs(cleaned, self.topology, self.min_measurements)
-        if not cleaned:
-            return []
-
-        # Step 4: Vectorize with served_ratio
         vectors = _vectorize(cleaned, self.topology, self.served_ratio)
 
-        # Step 5: Check Projection Consistency
-        if _has_projection_errors(vectors):
-            logger.info(f"🚫 Trip {trip_key} discarded: Projection errors detected")
+        if _has_vector_integrity_errors(vectors):
+            logger.info(f"🚫 Trip {trip_key} discarded: Invalid vector data detected")
             return []
 
         return vectors
 
 
-class LenientPipeline(Pipeline):
+class LenientPipeline(PredictionPipeline):
     """
-    A lenient pipeline that only drops data on specific validity failures.
+    Backward-compatible alias for the now-lightweight prediction pipeline.
     """
-
-    def __init__(
-        self,
-        diary: "Diary",
-        topology=None,
-        served_ratio: float = 1.0,
-        config: dict = None,
-    ):
-        """Bind the diary, topology, and served_ratio used by the lenient cleaning rules."""
-        self.diary = diary
-        self.topology = topology
-        self.served_ratio = served_ratio
-        # Config is unused but kept for interface consistency
-
-    def clean(
-        self,
-    ) -> list[
-        tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-    ]:
-        """Vectorize the diary and drop the whole trip on a few hard validity failures."""
-        if not self.diary or not self.diary.measurements:
-            return []
-
-        # Vectorize everything first
-        vectors = _vectorize(self.diary, self.topology, self.served_ratio)
-
-        # Apply lenient filtering rules
-        for vec, label, timestamp in vectors:
-            # 1. Drop if schedule_adherence is -1000.0 (indicates failed projection usually)
-            if vec.schedule_adherence == -1000.0:
-                return []
-
-            # 2. Drop if scheduled start time encoding is missing (both 0)
-            if vec.sch_starting_time_cos == 0.0 and vec.sch_starting_time_sin == 0.0:
-                return []
-
-            # 3. Drop if occupancy_status is 7
-            if label.occupancy_status == 7:
-                return []
-
-        # 4. Check for massive projection errors
-        if _has_projection_errors(vectors):
-            return []
-
-        return vectors
 
 
 class TrafficPipeline(Pipeline):
@@ -200,13 +122,8 @@ class TrafficPipeline(Pipeline):
         diary: "Diary",
         config: dict = None,
     ):
-        """Bind the diary and load the traffic-cleaning thresholds from the config dict."""
+        """Bind the diary. Config is accepted for interface compatibility."""
         self.diary = diary
-
-        # Load cleaning parameters
-        cleaning_cfg = config.get("data_cleaning", {}) if config else {}
-        self.max_bus_speed = int(cleaning_cfg.get("max_bus_speed_kmh", 120))
-        self.max_time_gap = int(cleaning_cfg.get("max_time_gap_seconds", 600))
 
     def clean(
         self,
@@ -220,20 +137,13 @@ class TrafficPipeline(Pipeline):
         logger.info(f"🚗 Starting traffic pipeline for diary {self.diary.trip_id}")
 
         measurements = {str(self.diary.trip_id): self.diary.measurements}
-
-        # Step 0: Data Integrity (Zeros checks only)
-        # We pass empty uptime list to skip uptime checks, and irrelevant served_ratio
-        cleaned = _check_data_integrity(
-            measurements, uptime_timestamps=[], served_ratio=1.0
+        cleaned = _clean_measurements(
+            measurements,
+            uptime_timestamps=[],
+            served_ratio=1.0,
         )
-
-        # Step 1: Remove duplicates (Time-based for traffic)
-        cleaned = _check_for_duplicates(cleaned, keys=["measurement_time"])
-
-        # Step 2: Remove outliers
-        cleaned = _remove_outliers(cleaned, self.max_bus_speed, self.max_time_gap)
-
-        # Step 3: Vectorize (Traffic only)
+        if not cleaned:
+            return []
         vectors = _vectorize_traffic(cleaned)
 
         return vectors
@@ -254,12 +164,6 @@ class VehiclePipeline(Pipeline):
         self.topology = topology
         self.vehicle_type_name = vehicle_type_name
 
-        # Load cleaning parameters
-        cleaning_cfg = config.get("data_cleaning", {}) if config else {}
-        self.min_measurements = int(cleaning_cfg.get("min_measurements_per_run", 7))
-        self.max_bus_speed = int(cleaning_cfg.get("max_bus_speed_kmh", 120))
-        self.max_time_gap = int(cleaning_cfg.get("max_time_gap_seconds", 600))
-        
         self.uptime_timestamps = _load_uptime_data("uptime.csv")
 
     def clean(
@@ -274,22 +178,13 @@ class VehiclePipeline(Pipeline):
         logger.info(f"🚌 Starting vehicle pipeline for diary {self.diary.trip_id}")
 
         measurements = {str(self.diary.trip_id): self.diary.measurements}
-
-        # Step 0: Data Integrity
-        cleaned = _check_data_integrity(
-            measurements, self.uptime_timestamps, served_ratio=1.0
+        cleaned = _clean_measurements(
+            measurements,
+            uptime_timestamps=self.uptime_timestamps,
+            served_ratio=1.0,
         )
-
-        # Step 1: Remove duplicates
-        cleaned = _check_for_duplicates(cleaned)
-
-        # Step 2: Remove outliers
-        cleaned = _remove_outliers(cleaned, self.max_bus_speed, self.max_time_gap)
-
-        # Step 3: Check for valid runs
-        cleaned = _check_for_runs(cleaned, self.topology, self.min_measurements)
-
-        # Step 4: Vectorize (First measurement only)
+        if not cleaned:
+            return []
         vectors = _vectorize_vehicle(cleaned, self.topology, self.vehicle_type_name)
 
         return vectors
@@ -449,6 +344,27 @@ def _is_uptime_sufficient(
         return True  # Fail safe (keep data)
 
 
+def _clean_measurements(
+    data: Union["Diary", dict[str, list["Measurement"]]],
+    uptime_timestamps: list[int],
+    served_ratio: float,
+    duplicate_keys: list[str] = None,
+) -> Union["Diary", dict[str, list["Measurement"]]]:
+    """Apply the lightweight universal cleaning rules used by all pipelines."""
+    cleaned = _check_data_integrity(data, uptime_timestamps, served_ratio)
+    return _check_for_duplicates(cleaned, keys=duplicate_keys)
+
+
+def _is_finite_number(value) -> bool:
+    """Return True for finite int/float values, excluding booleans."""
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 @overload
 def _check_data_integrity(
     data: "Diary", uptime_timestamps: list[int], served_ratio: float
@@ -471,64 +387,40 @@ def _check_data_integrity(
     served_ratio: float,
 ) -> Union["Diary", dict[str, list["Measurement"]]]:
     """
-    Discard measurements with invalid data (zeros) or when bot was offline.
+    Discard measurements with invalid structural data or offline timestamps.
     """
 
     def is_valid(m: "Measurement") -> bool:
-        """Return True if the measurement has non-zero speed fields and the bot was online at its timestamp."""
-        # 1. Zero check
-        # Explicit check for 0.0 (float) or 0 (int)
-        # Note: None is technically allowed here (filtered elsewhere maybe?)
-        # but user said "if ... are 0"
-
-        # Helper to safely check for 0
-        def is_zero(val):
-            """Return True when ``val`` is explicitly 0 or 0.0 (and not None)."""
-            return val is not None and (val == 0 or val == 0.0)
-
-        # Note: current_speed might be from GPS or derived.
-        # m.current_speed is usually the one from traffic/live data
-
-        if is_zero(m.speed_ratio):
+        """Return True if a measurement has the fields required for vectorization."""
+        measurement_time = getattr(m, "measurement_time", None)
+        if not _is_finite_number(measurement_time):
             return False
-        if is_zero(m.current_speed):  # traffic_speed in some contexts
+
+        speed_ratio = getattr(m, "speed_ratio", None)
+        if not _is_finite_number(speed_ratio) or float(speed_ratio) <= 0:
             return False
-        # The user said "current_speed" - in Measurement object:
-        # self.current_speed = current_speed (traffic speed)
-        # self.gpsdata.speed = GPS speed
-        # Assuming they meant the traffic-related fields on the measurement object
 
-        # 2. Uptime check
-        # Only relevant if we are claiming the trip was served (served_ratio > 0)
-        # If we say it was served, we better be sure we were watching.
-        # If uptime check fails, we can't be sure about served_ratio,
-        # but here we are filtering individual measurements.
+        current_speed = getattr(m, "current_speed", None)
+        if not _is_finite_number(current_speed) or float(current_speed) < 0:
+            return False
 
-        # Actually, if the bot wasn't running, we shouldn't have recorded a measurement
-        # UNLESS it's a reconstructed diary or delayed processing.
-        # But if we are processing a diary, and the timestamp says 10:00,
-        # and uptime says we were OFF at 10:00, then this data is suspect?
-        # Or does "served_ratio computed on non-existing data" mean the Trip's
-        # served_ratio is invalid if the bot wasn't up during the trip?
-
-        # The prompt says: "if served_ratio is computed on non-existing data (bot wasn't running...), then the measurement is also not valid"
-        # This implies we drop measurements if the bot wasn't alive at measurement_time.
+        gpsdata = getattr(m, "gpsdata", None)
+        if gpsdata is None:
+            return False
+        if not _is_finite_number(getattr(gpsdata, "latitude", None)):
+            return False
+        if not _is_finite_number(getattr(gpsdata, "longitude", None)):
+            return False
 
         if uptime_timestamps:
-            # Check if there is a ping within 90 seconds
-            idx = bisect.bisect_left(uptime_timestamps, m.measurement_time)
-
-            # Check left and right neighbors
+            idx = bisect.bisect_left(uptime_timestamps, measurement_time)
             closest_dist = float("inf")
-
             if idx < len(uptime_timestamps):
-                closest_dist = abs(uptime_timestamps[idx] - m.measurement_time)
-
+                closest_dist = abs(uptime_timestamps[idx] - measurement_time)
             if idx > 0:
-                dist_prev = abs(uptime_timestamps[idx - 1] - m.measurement_time)
+                dist_prev = abs(uptime_timestamps[idx - 1] - measurement_time)
                 closest_dist = min(closest_dist, dist_prev)
-
-            if closest_dist > 90:  # 90 seconds tolerance
+            if closest_dist > 90:
                 return False
 
         return True
@@ -686,10 +578,10 @@ def _check_for_duplicates(
 ) -> Union["Diary", dict[str, list["Measurement"]]]:
     """
     Remove duplicate measurements based on provided keys.
-    Default keys: ["gpsdata.latitude", "gpsdata.longitude"]
+    Default keys describe a repeated ping, not a vehicle legitimately standing still.
     """
     if keys is None:
-        keys = ["gpsdata.latitude", "gpsdata.longitude"]
+        keys = ["measurement_time", "gpsdata.latitude", "gpsdata.longitude"]
 
     # Helper for list processing
     def process_list(measurements: list["Measurement"]) -> list["Measurement"]:
@@ -743,161 +635,6 @@ def _check_for_duplicates(
 
 
 @overload
-def _remove_outliers(
-    data: "Diary", max_bus_speed_kmh: int = 120, max_time_gap_seconds: int = 600
-) -> "Diary":
-    """Diary overload — see implementation below."""
-    ...
-@overload
-def _remove_outliers(
-    data: dict[str, list["Measurement"]],
-    max_bus_speed_kmh: int = 120,
-    max_time_gap_seconds: int = 600,
-) -> dict[str, list["Measurement"]]:
-    """Dict-of-measurements overload — see implementation below."""
-    ...
-
-
-def _remove_outliers(
-    data: Union["Diary", dict[str, list["Measurement"]]],
-    max_bus_speed_kmh: int = 120,
-    max_time_gap_seconds: int = 600,
-) -> Union["Diary", dict[str, list["Measurement"]]]:
-    """
-    Remove outlier measurements (random appearances/disappearances).
-    """
-
-    # Helper to process a list of measurements
-    def process_list(measurements: list["Measurement"]) -> list["Measurement"]:
-        """Return ``measurements`` with GPS-speed and time-gap outliers removed."""
-        if len(measurements) < 2:
-            return []  # Filter out single measurements
-
-        sorted_m = sorted(measurements, key=lambda m: m.measurement_time)
-        valid_measurements = []
-        for i, m in enumerate(sorted_m):
-            is_valid = True
-            # Speed check
-            if hasattr(m, "derived_speed") and m.derived_speed:
-                if m.derived_speed > max_bus_speed_kmh:
-                    is_valid = False
-
-            # Gap check
-            if i > 0 and i < len(sorted_m) - 1:
-                prev_gap = m.measurement_time - sorted_m[i - 1].measurement_time
-                next_gap = sorted_m[i + 1].measurement_time - m.measurement_time
-                if prev_gap > max_time_gap_seconds and next_gap > max_time_gap_seconds:
-                    is_valid = False
-
-            if is_valid:
-                valid_measurements.append(m)
-        return valid_measurements
-
-    # Handle Diary input
-    if hasattr(data, "trip_id") and hasattr(data, "measurements"):
-        diary: "Diary" = data
-        original_len = len(diary.measurements)
-        diary.measurements = process_list(diary.measurements)
-        if len(diary.measurements) < original_len:
-            logger.debug(
-                f"🧹 Removed {original_len - len(diary.measurements)} outliers from diary {diary.trip_id}"
-            )
-        return diary
-
-    # Handle Dict input
-    measurements_dict: dict[str, list["Measurement"]] = data
-    filtered: dict[str, list["Measurement"]] = {}
-
-    for trip_id, trip_measurements in measurements_dict.items():
-        valid = process_list(trip_measurements)
-        if valid:
-            filtered[trip_id] = valid
-
-    removed = sum(len(v) for v in measurements_dict.values()) - sum(
-        len(v) for v in filtered.values()
-    )
-    if removed > 0:
-        logger.debug(f"🧹 Removed {removed} outlier measurements")
-
-    return filtered
-
-
-@overload
-def _check_for_runs(
-    data: "Diary", topology=None, min_measurements_per_run: int = 7
-) -> "Diary":
-    """Diary overload — see implementation below."""
-    ...
-@overload
-def _check_for_runs(
-    data: dict[str, list["Measurement"]],
-    topology=None,
-    min_measurements_per_run: int = 7,
-) -> dict[str, list["Measurement"]]:
-    """Dict-of-measurements overload — see implementation below."""
-    ...
-
-
-def _check_for_runs(
-    data: Union["Diary", dict[str, list["Measurement"]]],
-    topology=None,
-    min_measurements_per_run: int = 7,
-) -> Union["Diary", dict[str, list["Measurement"]]]:
-    """
-    Validate complete runs and remove ghost runs.
-    """
-
-    def is_valid_run(trip_id: str, measurements: list["Measurement"]) -> bool:
-        """Return True if the run has enough measurements and touches at least one terminus stop."""
-        if len(measurements) < min_measurements_per_run:
-            logger.info(f"🚌 Trip {trip_id} dropped: < min measurements")
-            return False
-
-        if topology and hasattr(topology, "trips"):
-            trip = topology.trips.get(trip_id)
-            if trip and hasattr(trip, "stop_times") and trip.stop_times:
-                first_stop_id = str(trip.stop_times[0].get("stop_id"))
-                last_stop_id = str(trip.stop_times[-1].get("stop_id"))
-
-                sorted_m = sorted(measurements, key=lambda m: m.measurement_time)
-                first_m = sorted_m[0]
-                last_m = sorted_m[-1]
-
-                starts_at_terminus = (
-                    hasattr(first_m, "next_stop")
-                    and str(first_m.next_stop) == first_stop_id
-                )
-                ends_at_terminus = (
-                    hasattr(last_m, "next_stop")
-                    and str(last_m.next_stop) == last_stop_id
-                )
-
-                if not (starts_at_terminus or ends_at_terminus):
-                    logger.info(f"👻 Trip {trip_id} dropped: Ghost run")
-                    return False
-        return True
-
-    # Handle Diary
-    if hasattr(data, "trip_id") and hasattr(data, "measurements"):
-        diary: "Diary" = data
-        if not is_valid_run(str(diary.trip_id), diary.measurements):
-            diary.measurements = []  # Clear invalid run? or return empty diary?
-        return diary
-
-    # Handle Dict
-    filtered: dict[str, list["Measurement"]] = {}
-    for trip_id, trip_measurements in data.items():
-        if is_valid_run(trip_id, trip_measurements):
-            filtered[trip_id] = trip_measurements
-
-    removed_trips = len(data) - len(filtered)
-    if removed_trips > 0:
-        logger.debug(f"🚌 Removed {removed_trips} incomplete runs")
-
-    return filtered
-
-
-@overload
 def _vectorize(
     data: "Diary", topology=None, served_ratio: float = 1.0
 ) -> list[
@@ -939,7 +676,6 @@ def _vectorize(
         return results
 
     trips = topology.trips
-    routes = topology.routes
 
     for trip_id, trip_measurements in filtered_measurements.items():
         trip = trips.get(trip_id)
@@ -959,7 +695,7 @@ def _vectorize(
 
         for m in trip_measurements:
             # Skip if bus info is missing
-            if getattr(m, 'bus_type', 0) == 0:
+            if getattr(m, "bus_type", 0) == 0:
                 # logger.debug(f"Skipping vectorization for measurement {m.id}: Unknown bus type")
                 continue
 
@@ -981,42 +717,15 @@ def _vectorize(
     return results
 
 
-def _has_projection_errors(
+def _has_vector_integrity_errors(
     vectors: list[
         tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
     ],
 ) -> bool:
-    """
-    Check for massive jumps in shape_dist_travelled indicating projection errors.
-    """
-    if not vectors:
-        return False
-
-    # Sort by time just in case
-    sorted_v = sorted(vectors, key=lambda x: x[2])  # x[2] is measurement_time
-
-    for i in range(1, len(sorted_v)):
-        v_curr = sorted_v[i][0]
-        v_prev = sorted_v[i - 1][0]
-
-        # Check for backwards jumps (loop snapping error)
-        # Allow small buffer (e.g. 50m) for GPS jitter
-        delta_dist = v_curr.shape_dist_travelled - v_prev.shape_dist_travelled
-        if delta_dist < -50.0:
-            logger.debug(
-                f"🚫 Projection Error: Backward jump of {delta_dist:.1f}m detected."
-            )
+    """Return True when vectorization produced known invalid sentinel values."""
+    for vector, label, _ in vectors:
+        if getattr(vector, "schedule_adherence", 0.0) == -1000.0:
             return True
-
-        # Check for massive forward jumps (impossible speed)
-        # e.g. > 160 km/h (45 m/s)
-        delta_time = sorted_v[i][2] - sorted_v[i - 1][2]
-        if delta_time > 0:
-            speed = delta_dist / delta_time
-            if speed > 45.0:
-                logger.debug(
-                    f"🚫 Projection Error: Impossible speed {speed*3.6:.1f} km/h detected."
-                )
-                return True
-
+        if getattr(label, "occupancy_status", 0) == 7:
+            return True
     return False
