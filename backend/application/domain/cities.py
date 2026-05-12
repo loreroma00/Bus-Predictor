@@ -487,6 +487,31 @@ class City:
         """Return True if a live trip is currently inactive/deposited."""
         return live_trip_id in self.live_trip_deposit
 
+    def prune_stale_live_trips(self, ttl: int = 300, now: float = None) -> list[LiveTrip]:
+        """Remove and return live trips that have not updated within ``ttl`` seconds."""
+        now = time.time() if now is None else now
+        stale_live_trips: list[LiveTrip] = []
+
+        for live_trip_id, hex_id in list(self.live_trip_index.items()):
+            hexagon = self.hexagons.get(hex_id)
+            live_trip = hexagon.get_live_trip(live_trip_id) if hexagon else None
+
+            if live_trip is None:
+                self.live_trip_index.pop(live_trip_id, None)
+                continue
+
+            last_active = live_trip.last_seen_timestamp
+            if live_trip.gps_data and live_trip.gps_data.timestamp:
+                last_active = float(live_trip.gps_data.timestamp)
+
+            if now - last_active <= ttl:
+                continue
+
+            self.remove_live_trip(live_trip)
+            stale_live_trips.append(live_trip)
+
+        return stale_live_trips
+
     def update_weather(self):
         """Delegates weather fetching to the configured strategy."""
         if self.weather_strategy is None:

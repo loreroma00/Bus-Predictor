@@ -11,20 +11,9 @@ from .interfaces import CacheStrategy, GeocodingStrategy
 from .static_data import Vehicle, VehicleType
 from .static_data_fetcher import StaticDataFetcher
 from .ledger_builder import LedgerBuilder
-from .ledgers import (
-    HistoricalLedger,
-    PredictedLedger,
-    ScheduleLedger,
-    TopologyLedger,
-    VehicleHistoryLedger,
-)
+from .ledgers import HistoricalLedger, ScheduleLedger, TopologyLedger
 from .cities import City
 from .live_data import LiveTrip
-from application.post_processing.data_cleaning import (
-    PredictionPipeline,
-    TrafficPipeline,
-    LenientPipeline,
-)
 from .fleet_loader import load_fleet
 
 
@@ -64,8 +53,6 @@ class Observatory:
         self.topology: TopologyLedger = None
         self.schedule_ledger: ScheduleLedger = None
         self.historical: HistoricalLedger = HistoricalLedger()
-        self.predicted: PredictedLedger = PredictedLedger()
-        self.vehicle_history: VehicleHistoryLedger = VehicleHistoryLedger()
 
         # Cache metadata
         self.current_md5: str = None
@@ -113,32 +100,6 @@ class Observatory:
                 if street:
                     live_trip.set_location_name(street)
 
-    def remove_live_trip_from_city(self, city_name: str, live_trip: LiveTrip):
-        """Remove a live trip from the city."""
-        self.observed_cities[city_name].remove_live_trip(live_trip)
-
-    def prune_stale_live_trips(self, city_name: str, ttl: int = 300):
-        """Finish live trips that have not updated in ``ttl`` seconds."""
-        if city_name not in self.observed_cities:
-            return
-
-        city = self.observed_cities[city_name]
-        for live_trip_id in list(city.live_trip_index.keys()):
-            hex_id = city.live_trip_index[live_trip_id]
-            if hex_id in city.hexagons:
-                live_trip = city.hexagons[hex_id].get_live_trip(live_trip_id)
-                if live_trip:
-                    last_active = live_trip.last_seen_timestamp
-                    if live_trip.gps_data and live_trip.gps_data.timestamp:
-                        last_active = float(live_trip.gps_data.timestamp)
-
-                    if time.time() - last_active > ttl:
-                        logging.info(
-                            f"Finishing stale live trip {live_trip.trip_id} "
-                            f"for vehicle {live_trip.vehicle.label} (inactive > {ttl}s)"
-                        )
-                        self.finish_live_trip(live_trip)
-
     def move_live_trip(
         self,
         city_name: str,
@@ -164,23 +125,6 @@ class Observatory:
                 street = self._geocoding.get_street(latitude, longitude)
                 if street:
                     live_trip.set_location_name(street)
-
-    def get_live_trip(self, city_name: str, vehicle_id: str) -> LiveTrip | None:
-        """Get active live trip by serving vehicle id."""
-        if city_name in self.observed_cities:
-            return self.observed_cities[city_name].get_live_trip(vehicle_id)
-        return None
-
-    def is_live_trip_in_deposit(self, city_name: str, live_trip_id: str) -> bool:
-        """Check if a live trip is in the inactive deposit."""
-        if city_name in self.observed_cities:
-            return self.observed_cities[city_name].is_live_trip_in_deposit(live_trip_id)
-        return False
-
-    def update_weather(self, city_name: str):
-        """Update the weather for a city."""
-        if city_name in self.observed_cities:
-            self.observed_cities[city_name].update_weather()
 
     # ==================== LEDGER OPERATIONS ====================
 
@@ -284,7 +228,6 @@ class Observatory:
             id=vehicle_id,
             label=display_id,
             vehicle_type=vehicle_type,
-            history_loader=self.vehicle_history.get_history,
         )
         self.vehicles[vehicle_id] = vehicle
         return vehicle
@@ -577,63 +520,3 @@ class Observatory:
                     served.add(trip_id)
 
         return served
-
-    # ==================== VECTORIZATION LOOP ====================
-
-    def process_completed_live_trip(
-        self,
-        live_trip,
-        route_id: str,
-        time_window_minutes: int = 60,
-    ) -> list:
-        """
-        Process a completed live trip: compute served_ratio, clean, vectorize.
-
-        Args:
-            live_trip: The completed LiveTrip object
-            route_id: Route ID for served_ratio calculation
-            time_window_minutes: Time window for served_ratio (default: 60 min)
-
-        Returns:
-            List of vectors, or empty list if failed/filtered
-        """
-
-        # 1. Compute served_ratio using scan_trip_adherence
-        if live_trip.measurements:
-            times = [m.measurement_time for m in live_trip.measurements]
-            time_window_start = min(times) - (time_window_minutes * 30)
-            time_window_end = max(times) + (time_window_minutes * 30)
-        else:
-            now = time.time()
-            time_window_start = now - (time_window_minutes * 60)
-            time_window_end = now
-
-        served_ratio = self.scan_trip_adherence(
-            route_id=route_id,
-            time_window_start=time_window_start,
-            time_window_end=time_window_end,
-        )
-
-        # 2. Create pipeline and clean/vectorize
-        PipelineClass = (
-            LenientPipeline
-            if self.config.get("lenient_pipeline")
-            else PredictionPipeline
-        )
-        pipeline = PipelineClass(
-            diary=live_trip,
-            topology=self.topology,
-            served_ratio=served_ratio,
-            config=self.config,
-        )
-        return pipeline.clean()
-
-    def process_traffic_live_trip(self, live_trip) -> list:
-        """
-        Process a completed live trip for traffic analysis.
-
-        Returns:
-            List of traffic vectors.
-        """
-        pipeline = TrafficPipeline(diary=live_trip, config=self.config)
-        return pipeline.clean()

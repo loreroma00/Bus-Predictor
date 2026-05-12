@@ -146,7 +146,7 @@ def wire_state_interface(
         bus_type_predictor=bus_type_predictor,
     )
 
-    state_interface = StateInterface(context.observatory)
+    state_interface = StateInterface(context.observatory, predictor=predictor)
     if predictor is not None and loaded_model_name:
         state_interface.set_predictor_info(loaded_model_name)
     state_interface.set_command_registry(console._command_registry)
@@ -201,4 +201,3 @@ def shutdown_runtime(
 
     logging.info("Closing database connections...")
     shutdown_database()
-

@@ -97,6 +97,7 @@ class Vehicle:
         label: str = None,
         vehicle_type: VehicleType = None,
         history_loader=None,
+        history_ledger=None,
         history_ttl_seconds: int = 300,
     ):
         """Store stable vehicle identity and optional lazy history access."""
@@ -104,6 +105,7 @@ class Vehicle:
         self.label = str(label) if label else str(id)
         self.vehicle_type = vehicle_type
         self._history_loader = history_loader
+        self._history_ledger = history_ledger
         self._history_ttl_seconds = history_ttl_seconds
         self._history_cache = None
         self._history_loaded_at = 0.0
@@ -124,19 +126,41 @@ class Vehicle:
         """Bind a lazy history provider without coupling Vehicle to persistence."""
         self._history_loader = history_loader
 
+    def _get_history_ledger(self):
+        """Return this vehicle's lazy mini-ledger."""
+        if self._history_ledger is None:
+            from .ledgers import VehicleHistoryLedger
+            self._history_ledger = VehicleHistoryLedger()
+        return self._history_ledger
+
     def get_history(self, force_refresh: bool = False):
         """Return cached served-trip history, refreshing lazily when needed."""
-        if self._history_loader is None:
-            return []
-
         import time
 
         now = time.time()
         is_stale = now - self._history_loaded_at > self._history_ttl_seconds
         if force_refresh or self._history_cache is None or is_stale:
-            self._history_cache = self._history_loader(self.label)
+            if self._history_loader is not None:
+                self._history_cache = self._history_loader(self.label)
+            else:
+                self._history_cache = self._get_history_ledger().get_history(
+                    self.label,
+                    force_refresh=force_refresh,
+                )
             self._history_loaded_at = now
         return self._history_cache
+
+    def record_trip(self, record):
+        """Append a served-trip summary to this vehicle's mini-ledger."""
+        self._get_history_ledger().record_trip(record)
+        self._history_cache = None
+        self._history_loaded_at = 0.0
+
+    def get_today_vehicle_trips(self) -> list[dict]:
+        """Return records appended during this process for this vehicle."""
+        if self._history_ledger is None:
+            return []
+        return self._history_ledger.get_today_vehicle_trips()
 
 class Route:
     """GTFS route: id, agency, direction, optional shape and trip list."""

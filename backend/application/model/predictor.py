@@ -16,6 +16,10 @@ try:
     from .model_loader import LoadedModel, ModelLoader
 except ImportError:  # pragma: no cover - keeps script-style imports working
     from model_loader import LoadedModel, ModelLoader
+try:
+    from application.domain.ledgers import PredictedLedger, StopPredictionRecord
+except ImportError:  # pragma: no cover
+    from ..domain.ledgers import PredictedLedger, StopPredictionRecord
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent.parent
@@ -58,6 +62,7 @@ class Predictor:
         time_weights_path: str | None = None,
         crowd_weights_path: str | None = None,
         observatory: Any = None,
+        prediction_ledger: Any = None,
         route_encoding_path: Optional[str] = None,
         h3_encoding_path: Optional[str] = None,
         static_map_path: Optional[str] = None,
@@ -78,6 +83,7 @@ class Predictor:
         self.config = loaded_model.config
         self.max_stops = loaded_model.max_stops
         self.observatory = observatory
+        self.predicted = prediction_ledger or PredictedLedger()
 
         route_path = Path(route_encoding_path) if route_encoding_path else ROUTE_ENCODING_PATH
         route_encoder_pkl_path = ROUTE_ENCODER_PKL_PATH
@@ -338,7 +344,7 @@ class Predictor:
             return None
 
         try:
-            cached = self.observatory.predicted.query_trip(
+            cached = self.predicted.query_trip(
                 route_id=route_id,
                 direction_id=direction_id,
                 trip_date=start_date,
@@ -389,7 +395,7 @@ class Predictor:
         if self.observatory is None:
             return set()
         try:
-            cached = self.observatory.predicted.query(trip_date=trip_date)
+            cached = self.predicted.query(trip_date=trip_date)
         except Exception:
             return set()
         if cached.empty:
@@ -415,8 +421,6 @@ class Predictor:
 
         try:
             import time as _time
-            from application.domain.ledgers import StopPredictionRecord
-
             topology = self.observatory.get_topology()
             stops_map = topology.build_stops_map(
                 forecast.route_id,
@@ -440,7 +444,7 @@ class Predictor:
                         prediction_timestamp=now,
                     )
                 )
-            self.observatory.predicted.record_predictions(records)
+            self.predicted.record_predictions(records)
         except Exception as exc:
             logger.warning("Failed to record predictions: %s", exc)
             return

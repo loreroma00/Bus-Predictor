@@ -231,7 +231,8 @@ def print_tracking_summary():
         last_seen_str = f"{delta_min}m ago" if delta_min > 0 else "Just now"
 
         status_str = "ACTIVE"
-        if OBSERVATORY.is_live_trip_in_deposit("Rome", live_trip.id):
+        city = OBSERVATORY.get_city("Rome") if OBSERVATORY else None
+        if city and city.is_live_trip_in_deposit(live_trip.id):
             status_str = "DEPOSIT"
 
         vehicle_type = "Unknown"
@@ -284,7 +285,14 @@ def run_collection_loop():
             get_realtime_updates()
 
             if OBSERVATORY:
-                OBSERVATORY.prune_stale_live_trips("Rome", ttl=600)
+                city = OBSERVATORY.get_city("Rome")
+                if city:
+                    for live_trip in city.prune_stale_live_trips(ttl=600):
+                        logging.info(
+                            f"Finishing stale live trip {live_trip.trip_id} "
+                            f"for vehicle {live_trip.vehicle.label} (inactive > 600s)"
+                        )
+                        OBSERVATORY.finish_live_trip(live_trip)
 
             logging.info(f"[{t.to_readable_time(time.time())}] Cycle complete.")
             print_tracking_summary()
@@ -303,7 +311,9 @@ def run_weather_loop(update_time: int = 900):
             logging.info(
                 f"[{t.to_readable_time(time.time())}] Fetching weather updates..."
             )
-            OBSERVATORY.update_weather("Rome")
+            city = OBSERVATORY.get_city("Rome") if OBSERVATORY else None
+            if city:
+                city.update_weather()
             logging.info(
                 f"[{t.to_readable_time(time.time())}] Weather update complete."
             )
@@ -332,7 +342,8 @@ def _on_live_trip_entered_expired_hex(live_trip_id: str, hex_id: str):
 
     label = live_trip_id
     if OBSERVATORY:
-        live_trip = OBSERVATORY.get_live_trip("Rome", live_trip_id)
+        city = OBSERVATORY.get_city("Rome")
+        live_trip = city.get_live_trip(live_trip_id) if city else None
         if live_trip:
             label = live_trip.vehicle.label
 
@@ -347,11 +358,11 @@ def _correct_pending_measurements(live_trip_id: str, updated_hex_ids: list[str])
     """Correct measurements recorded with outdated traffic data."""
     from application.domain.spatial_utils import get_cardinal_direction
 
-    live_trip = OBSERVATORY.get_live_trip("Rome", live_trip_id)
+    city = OBSERVATORY.get_city("Rome") if OBSERVATORY else None
+    live_trip = city.get_live_trip(live_trip_id) if city else None
     if not live_trip:
         return
 
-    city = OBSERVATORY.get_city("Rome")
     pending = live_trip.get_pending_traffic_measurements()
 
     for measurement in pending:

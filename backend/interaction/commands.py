@@ -646,9 +646,10 @@ class fotoromanzo(Command):
     """Fotoromanzo."""
     command_name = "fotoromanzo"
 
-    def __init__(self, observatory: "Observatory"):
+    def __init__(self, observatory: "Observatory", predictor=None):
         """Initialize the instance."""
         self._obs = observatory
+        self._predictor = predictor
 
     def execute(self, args):
         """Execute."""
@@ -673,13 +674,18 @@ class fotoromanzo(Command):
         trip_date_dt = datetime.fromtimestamp(float(row['measurement_time']))
         trip_date = trip_date_dt.strftime("%d-%m-%Y")
 
-        # 3. Query predicted delays from PredictedLedger
-        predicted_df = self._obs.predicted.query_trip(
-            route_id=route_id,
-            direction_id=direction_id,
-            trip_date=trip_date,
-            scheduled_start=scheduled_start,
-        )
+        # 3. Query predicted delays from the predictor-owned ledger
+        import pandas as pd
+        prediction_ledger = getattr(self._predictor, "predicted", None)
+        if prediction_ledger:
+            predicted_df = prediction_ledger.query_trip(
+                route_id=route_id,
+                direction_id=direction_id,
+                trip_date=trip_date,
+                scheduled_start=scheduled_start,
+            )
+        else:
+            predicted_df = pd.DataFrame()
         if predicted_df.empty:
             logging.info(f"No predictions found for route {route_id} dir {direction_id} "
                          f"date {trip_date} start {scheduled_start} — plotting actual only")

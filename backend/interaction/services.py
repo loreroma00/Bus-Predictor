@@ -338,9 +338,8 @@ def _record_vehicle_trip(event_data: dict):
 
     live_trip = event_data.get("live_trip")
     route_id = event_data.get("route_id")
-    observatory = data.OBSERVATORY
     vehicle_type_name = event_data.get("vehicle_type_name", "Unknown")
-    if not live_trip or not observatory or not route_id:
+    if not live_trip or not route_id:
         return
 
     try:
@@ -350,7 +349,7 @@ def _record_vehicle_trip(event_data: dict):
             vehicle_type_name=vehicle_type_name,
         )
         if record:
-            observatory.vehicle_history.record_trip(record)
+            live_trip.vehicle.record_trip(record)
     except Exception as e:
         logging.error(f"Failed to record vehicle trip: {e}")
 

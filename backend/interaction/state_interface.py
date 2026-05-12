@@ -20,7 +20,7 @@ class StateInterface:
     without exposing internal implementation details.
     """
 
-    def __init__(self, observatory):
+    def __init__(self, observatory, predictor=None):
         """
         Initialize the state interface with an Observatory instance.
 
@@ -28,6 +28,7 @@ class StateInterface:
             observatory: The main Observatory facade from the application.
         """
         self._observatory = observatory
+        self._predictor = predictor
         self._last_feed_timestamp: float = 0.0
         self._command_registry: dict = {}
         self._last_command_output: str = ""
@@ -170,7 +171,8 @@ class StateInterface:
 
     def get_bus(self, city_name: str, bus_id: str) -> Optional[dict]:
         """Get detailed info about a specific active live trip by vehicle id."""
-        live_trip = self._observatory.get_live_trip(city_name, bus_id)
+        city = self._observatory.get_city(city_name)
+        live_trip = city.get_live_trip(bus_id) if city else None
         if not live_trip:
             return None
         return self._live_trip_to_dict(live_trip, detailed=True)
@@ -179,6 +181,9 @@ class StateInterface:
         """Convert a live trip object to a dictionary."""
         trip = live_trip.trip
         gps = live_trip.gps_data
+
+        city = self._observatory.get_city("Rome")
+        is_deposit = city.is_live_trip_in_deposit(live_trip.id) if city else False
 
         data = {
             "id": live_trip.id,
@@ -189,9 +194,7 @@ class StateInterface:
             "location_name": live_trip.location_name,
             "hexagon_id": live_trip.hexagon_id,
             "last_seen": live_trip.last_seen_timestamp,
-            "status": "DEPOSIT"
-            if self._observatory.is_live_trip_in_deposit("Rome", live_trip.id)
-            else "ACTIVE",
+            "status": "DEPOSIT" if is_deposit else "ACTIVE",
         }
 
         if gps:
@@ -302,7 +305,8 @@ class StateInterface:
                 row["speed"] = "0.0"
 
             # Status
-            if self._observatory.is_live_trip_in_deposit("Rome", live_trip.id):
+            city = self._observatory.get_city("Rome")
+            if city and city.is_live_trip_in_deposit(live_trip.id):
                 row["status"] = "DEPOSIT"
             else:
                 row["status"] = "ACTIVE"
@@ -522,14 +526,23 @@ class StateInterface:
             "table": obs.historical._table if obs.historical else "N/A",
         }
 
+        prediction_ledger = getattr(self._predictor, "predicted", None)
         predicted_info = {
             "type": "database-backed",
-            "table": obs.predicted._table if obs.predicted else "N/A",
+            "owner": "Predictor",
+            "table": prediction_ledger._table if prediction_ledger else "N/A",
         }
 
+        vehicle_table = "N/A"
+        for vehicle in obs.vehicles.values():
+            ledger = getattr(vehicle, "_history_ledger", None)
+            if ledger:
+                vehicle_table = ledger._table
+                break
         vehicle_info = {
             "type": "database-backed",
-            "table": obs.vehicle_history._table if obs.vehicle_history else "N/A",
+            "owner": "Vehicle",
+            "table": vehicle_table,
         }
 
         return {
@@ -552,24 +565,25 @@ class StateInterface:
 
     def get_recent_predictions(self) -> list[dict]:
         """Return all predictions from in-memory buffer (no DB query)."""
-        obs = self._observatory
-        if not obs.predicted:
+        prediction_ledger = getattr(self._predictor, "predicted", None)
+        if not prediction_ledger:
             return []
-        return obs.predicted.get_today_predictions()
+        return prediction_ledger.get_today_predictions()
 
     def get_recent_vehicle_trips(self) -> list[dict]:
         """Return all vehicle trip records from in-memory buffer (no DB query)."""
         obs = self._observatory
-        if not obs.vehicle_history:
-            return []
-        return obs.vehicle_history.get_today_vehicle_trips()
+        records = []
+        for vehicle in obs.vehicles.values():
+            records.extend(vehicle.get_today_vehicle_trips())
+        return records
 
     def get_prediction_stops(self, route_id: str, direction_id: int, scheduled_start: str) -> list[dict]:
         """Return per-stop prediction data for a specific trip (for detail popup)."""
-        obs = self._observatory
-        if not obs.predicted:
+        prediction_ledger = getattr(self._predictor, "predicted", None)
+        if not prediction_ledger:
             return []
-        return obs.predicted.get_trip_stops(route_id, direction_id, scheduled_start)
+        return prediction_ledger.get_trip_stops(route_id, direction_id, scheduled_start)
 
     def get_trip_measurements(self, trip_id: str) -> list[dict]:
         """Return per-measurement data for a specific trip (for detail popup)."""
