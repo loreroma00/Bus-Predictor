@@ -4,7 +4,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
@@ -16,10 +16,6 @@ try:
     from .model_loader import LoadedModel, ModelLoader
 except ImportError:  # pragma: no cover - keeps script-style imports working
     from model_loader import LoadedModel, ModelLoader
-try:
-    from application.domain.ledgers import PredictedLedger, StopPredictionRecord
-except ImportError:  # pragma: no cover
-    from ..domain.ledgers import PredictedLedger, StopPredictionRecord
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent.parent
@@ -30,6 +26,174 @@ ROUTE_ENCODER_PKL_PATH = PARQUET_DIR / "route_encoder.pkl"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
 STATIC_MAP_PATH = PARQUET_DIR / "stop_route_map.parquet"
 logger = logging.getLogger(__name__)
+
+
+def _dd_mm_yyyy_to_iso(date_str: str) -> str:
+    """Convert 'DD-MM-YYYY' to 'YYYY-MM-DD' for SQL DATE comparisons."""
+    return datetime.strptime(date_str, "%d-%m-%Y").strftime("%Y-%m-%d")
+
+
+@dataclass
+class StopPredictionRecord:
+    """A single predicted arrival at a stop."""
+
+    route_id: str
+    direction_id: int
+    trip_date: str
+    scheduled_start: str
+    stop_id: str
+    stop_sequence: int
+    predicted_arrival: str
+    predicted_delay_sec: float
+    predicted_crowd_level: int
+    prediction_timestamp: float
+
+
+class PredictedLedger:
+    """Append-only record of model predictions owned by Predictor."""
+
+    def __init__(self, connection_string: str = None, table_name: str = None):
+        """Bind ledger state to its DB destination configuration."""
+        from config import Ledger
+
+        self._conn_str = connection_string or Ledger.DB_CONNECTION
+        self._table = table_name or Ledger.PREDICTED_TABLE
+        self._today_trips: list[dict] = []
+        self._today_stops: Dict[str, list[dict]] = {}
+        self._today_trip_keys: set = set()
+        self._pending_db_rows: list[dict] = []
+
+    def _trip_key(self, route_id, direction_id, scheduled_start):
+        """Compose the in-memory key used to deduplicate trip summaries."""
+        return f"{route_id}_{direction_id}_{scheduled_start}"
+
+    def record_predictions(self, predictions: list[StopPredictionRecord]):
+        """Append prediction records to in-memory buffers."""
+        if not predictions:
+            return []
+
+        records = [
+            {
+                "route_id": prediction.route_id,
+                "direction_id": prediction.direction_id,
+                "trip_date": prediction.trip_date,
+                "scheduled_start": prediction.scheduled_start,
+                "stop_id": prediction.stop_id,
+                "stop_sequence": prediction.stop_sequence,
+                "predicted_arrival": prediction.predicted_arrival,
+                "predicted_delay_sec": prediction.predicted_delay_sec,
+                "predicted_crowd_level": prediction.predicted_crowd_level,
+                "prediction_timestamp": prediction.prediction_timestamp,
+            }
+            for prediction in predictions
+        ]
+
+        from collections import defaultdict
+
+        grouped = defaultdict(list)
+        for record in records:
+            key = self._trip_key(
+                record["route_id"],
+                record["direction_id"],
+                record["scheduled_start"],
+            )
+            grouped[key].append(record)
+
+        for key, stop_records in grouped.items():
+            self._today_stops[key] = sorted(
+                stop_records,
+                key=lambda record: record["stop_sequence"],
+            )
+
+            delays = [record["predicted_delay_sec"] for record in stop_records]
+            first = stop_records[0]
+            summary = {
+                "route_id": first["route_id"],
+                "direction_id": first["direction_id"],
+                "trip_date": first["trip_date"],
+                "scheduled_start": first["scheduled_start"],
+                "stop_count": len(stop_records),
+                "avg_delay": round(sum(delays) / len(delays), 1) if delays else 0,
+                "max_delay": round(max(delays), 1) if delays else 0,
+                "prediction_timestamp": first["prediction_timestamp"],
+            }
+
+            if key in self._today_trip_keys:
+                for index, trip in enumerate(self._today_trips):
+                    if (
+                        self._trip_key(
+                            trip["route_id"],
+                            trip["direction_id"],
+                            trip["scheduled_start"],
+                        )
+                        == key
+                    ):
+                        self._today_trips[index] = summary
+                        break
+            else:
+                self._today_trips.append(summary)
+                self._today_trip_keys.add(key)
+
+        self._pending_db_rows.extend(records)
+        return records
+
+    def push_to_db(self):
+        """Push pending prediction rows to the database layer."""
+        if not self._pending_db_rows:
+            return
+        from persistence.database import write_predicted
+
+        write_predicted(self._conn_str, self._table, self._pending_db_rows)
+        self._pending_db_rows = []
+
+    def get_today_predictions(self) -> list[dict]:
+        """Return trip summaries from in-memory buffer."""
+        return self._today_trips
+
+    def get_trip_stops(
+        self,
+        route_id: str,
+        direction_id: int,
+        scheduled_start: str,
+    ) -> list[dict]:
+        """Return per-stop prediction records for one trip."""
+        key = self._trip_key(route_id, direction_id, scheduled_start)
+        return self._today_stops.get(key, [])
+
+    def query(
+        self,
+        route_id: str = None,
+        trip_date: str = None,
+    ) -> pd.DataFrame:
+        """Query predicted arrivals for a route/date through the DB layer."""
+        from persistence.database import read_predicted
+
+        trip_date_iso = _dd_mm_yyyy_to_iso(trip_date) if trip_date else None
+        return read_predicted(
+            self._conn_str,
+            self._table,
+            route_id=route_id,
+            trip_date=trip_date_iso,
+        )
+
+    def query_trip(
+        self,
+        route_id: str,
+        direction_id: int,
+        trip_date: str,
+        scheduled_start: str,
+    ) -> pd.DataFrame:
+        """Return all stop predictions for one specific trip."""
+        from persistence.database import read_predicted
+
+        return read_predicted(
+            self._conn_str,
+            self._table,
+            route_id=route_id,
+            direction_id=direction_id,
+            trip_date=_dd_mm_yyyy_to_iso(trip_date),
+            scheduled_start=scheduled_start,
+        )
 
 
 @dataclass

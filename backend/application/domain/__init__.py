@@ -18,30 +18,33 @@ from .internal_events import (
     domain_events,
 )
 from .time_utils import to_unix_time, to_readable_time, get_seconds_since_midnight
-from .static_data import Route, Trip, Stop, Shape, Vehicle
+from .static_data import (
+    Route,
+    Shape,
+    Stop,
+    Trip,
+    Vehicle,
+    VehicleHistoryLedger,
+    VehicleTripRecord,
+    summarize_live_trip_for_vehicle,
+)
 from .live_data import GPSData, LiveTrip, Measurement, Schedule, Update
-from .virtual_entities import Observatory
+from .virtual_entities import (
+    HistoricalLedger,
+    MeasurementRecord,
+    Observatory,
+    ScheduleLedger,
+    StopArrival,
+    TopologyLedger,
+    extract_measurements_from_live_trip,
+    project_live_trip_to_measurements,
+)
 from .cities import City
 from .verification_strategies import (
     TripVerificationStrategy,
     BasicTripVerification,
     ScaledMeasurementVerification,
 )
-from .ledgers import (
-    TopologyLedger,
-    ScheduleLedger,
-    HistoricalLedger,
-    PredictedLedger,
-    VehicleHistoryLedger,
-    MeasurementRecord,
-    StopArrival,           # backward-compat alias for MeasurementRecord
-    StopPredictionRecord,
-    VehicleTripRecord,
-    extract_measurements_from_live_trip,
-    project_live_trip_to_measurements,
-    summarize_live_trip_for_vehicle,
-)
-
 __all__ = [
     # Time utilities
     "to_unix_time",
@@ -71,11 +74,9 @@ __all__ = [
     "TopologyLedger",
     "ScheduleLedger",
     "HistoricalLedger",
-    "PredictedLedger",
     "VehicleHistoryLedger",
     "MeasurementRecord",
     "StopArrival",
-    "StopPredictionRecord",
     "VehicleTripRecord",
     "extract_measurements_from_live_trip",
     "project_live_trip_to_measurements",

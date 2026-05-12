@@ -315,7 +315,7 @@ def _on_live_trip_finished(event_data: dict):
 
 def _record_historical(event_data: dict):
     """Extract measurement records from LiveTrip and store them."""
-    from application.domain.ledgers import extract_measurements_from_live_trip
+    from application.domain.virtual_entities import extract_measurements_from_live_trip
 
     live_trip = event_data.get("live_trip")
     route_id = event_data.get("route_id")
@@ -335,7 +335,7 @@ def _record_historical(event_data: dict):
 
 def _record_vehicle_trip(event_data: dict):
     """Summarize LiveTrip into vehicle history."""
-    from application.domain.ledgers import summarize_live_trip_for_vehicle
+    from application.domain.static_data import summarize_live_trip_for_vehicle
 
     live_trip = event_data.get("live_trip")
     route_id = event_data.get("route_id")

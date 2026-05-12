@@ -4,17 +4,316 @@ Delegates to internal components while presenting a unified interface.
 Uses Dependency Injection for external dependencies (e.g., caching).
 """
 
+import json
 import logging
 import time
+from dataclasses import dataclass, field
+from typing import Dict, Optional, TYPE_CHECKING
+
+import pandas as pd
 
 from .interfaces import CacheStrategy, GeocodingStrategy
-from .static_data import Vehicle, VehicleType
+from .static_data import Route, Shape, Trip, Vehicle, VehicleType
 from .static_data_fetcher import StaticDataFetcher
-from .ledger_builder import LedgerBuilder
-from .ledgers import HistoricalLedger, ScheduleLedger, TopologyLedger
 from .cities import City
 from .live_data import LiveTrip
 from .fleet_loader import load_fleet
+
+if TYPE_CHECKING:
+    from .live_data import Schedule
+
+
+@dataclass
+class TopologyLedger:
+    """Static physical network: routes, stops, shapes, and trips."""
+
+    routes: Dict[str, Route] = field(default_factory=dict)
+    stops: Dict[str, dict] = field(default_factory=dict)
+    shapes: Dict[str, Shape] = field(default_factory=dict)
+    trips: Dict[str, Trip] = field(default_factory=dict)
+    source_md5: Optional[str] = None
+
+    def get_trip(self, trip_id: str) -> Optional[Trip]:
+        """Return the Trip for ``trip_id`` or None."""
+        return self.trips.get(trip_id)
+
+    def get_stop(self, stop_id: str) -> Optional[dict]:
+        """Return the stop metadata dict for ``stop_id`` or None."""
+        return self.stops.get(stop_id)
+
+    def get_route(self, route_id: str) -> Optional[Route]:
+        """Return the Route for ``route_id`` or None."""
+        return self.routes.get(route_id)
+
+    def get_shape_for_trip(self, trip_id: str) -> Optional[Shape]:
+        """Return the Shape attached to ``trip_id``."""
+        trip = self.trips.get(trip_id)
+        return trip.get_shape() if trip else None
+
+    def build_stops_map(self, route_id: str, direction_id) -> Dict[int, dict]:
+        """Build stop_sequence -> stop metadata for one route/direction."""
+        stops_map: dict[int, dict] = {}
+        for trip in list(self.trips.values()):
+            if trip.route.id == route_id and trip.direction_id == direction_id:
+                for st in trip.get_stop_times() or []:
+                    seq = int(st.get("stop_sequence", 0) or 0)
+                    if seq not in stops_map:
+                        stop_id = st.get("stop_id")
+                        stop_info = self.stops.get(stop_id, {})
+                        shape_dist = st.get("shape_dist_traveled") or st.get(
+                            "shape_dist_travelled"
+                        )
+                        stops_map[seq] = {
+                            "stop_id": stop_id or "",
+                            "stop_name": stop_info.get("stop_name", ""),
+                            "stop_lat": float(stop_info.get("stop_lat", 0) or 0),
+                            "stop_lon": float(stop_info.get("stop_lon", 0) or 0),
+                            "shape_dist_travelled": float(shape_dist)
+                            if shape_dist
+                            else None,
+                        }
+                break
+        return stops_map
+
+
+@dataclass
+class ScheduleLedger:
+    """Timetable index: route -> direction -> date -> start times."""
+
+    schedule: "Schedule" = None
+    source_md5: Optional[str] = None
+
+    def get_times(self, route_id: str, direction_id, date_str: str) -> list:
+        """Sorted list of scheduled start times."""
+        if self.schedule is None:
+            return []
+        return self.schedule.get(route_id, direction_id, date_str)
+
+
+@dataclass
+class MeasurementRecord:
+    """A single observed measurement projected for historical persistence."""
+
+    trip_id: str
+    route_id: str
+    direction_id: int
+    vehicle_id: str
+    latitude: float
+    longitude: float
+    hexagon_id: str
+    stop_sequence: int
+    shape_dist_travelled: float
+    distance_to_next_stop: float
+    is_in_preferential: bool
+    measurement_time: float
+    actual_start_time: float
+    schedule_adherence: float
+    scheduled_start_time: str
+    delay_genuine: int
+    current_speed: float
+    speed_ratio: float
+    current_traffic_speed: float
+    temperature: float
+    apparent_temperature: float
+    humidity: float
+    precipitation: float
+    wind_speed: float
+    weather_code: int
+    bus_type: int
+    door_number: int
+    occupancy_status: int
+    deposits: str
+
+
+StopArrival = MeasurementRecord
+
+
+class HistoricalLedger:
+    """Append-only record of per-measurement observations owned by Observatory."""
+
+    def __init__(self, connection_string: str = None, table_name: str = None):
+        """Bind ledger state to its DB destination configuration."""
+        from config import Ledger
+
+        self._conn_str = connection_string or Ledger.DB_CONNECTION
+        self._table = table_name or Ledger.HISTORICAL_TABLE
+        self._today_by_trip: Dict[str, list[dict]] = {}
+        self._pending_db_rows: list[dict] = []
+
+    def record_measurements(self, records: list[MeasurementRecord]):
+        """Append measurement records to the in-memory buffer."""
+        if not records:
+            return []
+        rows = [
+            {
+                "trip_id": r.trip_id,
+                "route_id": r.route_id,
+                "direction_id": r.direction_id,
+                "vehicle_id": r.vehicle_id,
+                "latitude": r.latitude,
+                "longitude": r.longitude,
+                "hexagon_id": r.hexagon_id,
+                "stop_sequence": r.stop_sequence,
+                "shape_dist_travelled": r.shape_dist_travelled,
+                "distance_to_next_stop": r.distance_to_next_stop,
+                "is_in_preferential": r.is_in_preferential,
+                "measurement_time": r.measurement_time,
+                "actual_start_time": r.actual_start_time,
+                "schedule_adherence": r.schedule_adherence,
+                "scheduled_start_time": r.scheduled_start_time,
+                "delay_genuine": r.delay_genuine,
+                "current_speed": r.current_speed,
+                "speed_ratio": r.speed_ratio,
+                "current_traffic_speed": r.current_traffic_speed,
+                "temperature": r.temperature,
+                "apparent_temperature": r.apparent_temperature,
+                "humidity": r.humidity,
+                "precipitation": r.precipitation,
+                "wind_speed": r.wind_speed,
+                "weather_code": r.weather_code,
+                "bus_type": r.bus_type,
+                "door_number": r.door_number,
+                "occupancy_status": r.occupancy_status,
+                "deposits": r.deposits,
+            }
+            for r in records
+        ]
+
+        for row in rows:
+            tid = row["trip_id"]
+            self._today_by_trip.setdefault(tid, []).append(row)
+
+        self._pending_db_rows.extend(rows)
+        return rows
+
+    record_arrivals = record_measurements
+
+    def push_to_db(self):
+        """Push pending measurement rows to the database layer."""
+        if not self._pending_db_rows:
+            return
+        from persistence.database import write_historical
+
+        write_historical(self._conn_str, self._table, self._pending_db_rows)
+        self._pending_db_rows = []
+
+    def get_trip_measurements(self, trip_id: str) -> list[dict]:
+        """Return in-memory measurements for a trip."""
+        return self._today_by_trip.get(trip_id, [])
+
+    def get_today_trip_count(self) -> int:
+        """Return count of trips recorded today in memory."""
+        return len(self._today_by_trip)
+
+    def query(
+        self,
+        trip_id: str = None,
+        route_id: str = None,
+        date_start: float = None,
+        date_end: float = None,
+    ) -> pd.DataFrame:
+        """Query historical measurements through the DB layer."""
+        from persistence.database import read_historical
+
+        return read_historical(
+            self._conn_str,
+            self._table,
+            trip_id=trip_id,
+            route_id=route_id,
+            date_start=date_start,
+            date_end=date_end,
+        )
+
+
+def extract_measurements_from_live_trip(
+    live_trip: "LiveTrip",
+    route_id: str = None,
+) -> list[MeasurementRecord]:
+    """Convert live-trip measurements into historical ledger records."""
+    trip = live_trip.trip if live_trip else None
+    if not live_trip or not live_trip.measurements or not trip:
+        return []
+
+    shape = trip.shape
+    direction_id = trip.direction_id or 0
+    route_id = route_id or (trip.route.id if trip.route else "")
+    vehicle_id = str(live_trip.vehicle.label or live_trip.vehicle.id or "")
+    scheduled_start = live_trip.scheduled_start_time or ""
+
+    actual_start_time = live_trip.actual_start_time or 0.0
+    if not actual_start_time:
+        for measurement in live_trip.measurements:
+            seq = getattr(measurement.gpsdata, "current_stop_sequence", None)
+            if seq is not None and seq > 1:
+                actual_start_time = measurement.measurement_time
+                break
+        if not actual_start_time and live_trip.measurements:
+            actual_start_time = live_trip.measurements[0].measurement_time
+
+    records: list[MeasurementRecord] = []
+    for measurement in live_trip.measurements:
+        if shape:
+            try:
+                shape_dist = shape.project(
+                    measurement.gpsdata.latitude,
+                    measurement.gpsdata.longitude,
+                )
+            except Exception:
+                shape_dist = 0.0
+        else:
+            shape_dist = 0.0
+
+        gps_speed = measurement.gpsdata.speed if measurement.gpsdata else 0.0
+        current_speed = gps_speed if gps_speed else (measurement.derived_speed or 0.0)
+        weather = measurement.weather
+
+        records.append(
+            MeasurementRecord(
+                trip_id=live_trip.trip_id,
+                route_id=route_id,
+                direction_id=direction_id,
+                vehicle_id=vehicle_id,
+                latitude=measurement.gpsdata.latitude,
+                longitude=measurement.gpsdata.longitude,
+                hexagon_id=measurement.hexagon_id or "",
+                stop_sequence=getattr(
+                    measurement.gpsdata,
+                    "current_stop_sequence",
+                    0,
+                )
+                or 0,
+                shape_dist_travelled=shape_dist,
+                distance_to_next_stop=measurement.next_stop_distance or 0.0,
+                is_in_preferential=bool(
+                    getattr(measurement, "is_in_preferential", False)
+                ),
+                measurement_time=measurement.measurement_time,
+                actual_start_time=actual_start_time,
+                schedule_adherence=measurement.schedule_adherence or 0.0,
+                scheduled_start_time=scheduled_start,
+                delay_genuine=getattr(measurement, "delay_genuine", 0),
+                current_speed=current_speed,
+                speed_ratio=measurement.speed_ratio or 1.0,
+                current_traffic_speed=measurement.current_speed or 0.0,
+                temperature=weather.temperature if weather else 0.0,
+                apparent_temperature=weather.apparent_temperature if weather else 0.0,
+                humidity=weather.humidity if weather else 0.0,
+                precipitation=weather.precip_intensity if weather else 0.0,
+                wind_speed=weather.wind_speed if weather else 0.0,
+                weather_code=weather.weather_code if weather else 0,
+                bus_type=getattr(measurement, "bus_type", 0),
+                door_number=getattr(measurement, "door_number", 0),
+                occupancy_status=measurement.occupancy_status or 0,
+                deposits=json.dumps(getattr(measurement, "deposits", []) or []),
+            )
+        )
+
+    return records
+
+
+def project_live_trip_to_measurements(live_trip: "LiveTrip") -> list[MeasurementRecord]:
+    """Return measurement records for a completed live trip."""
+    return extract_measurements_from_live_trip(live_trip)
 
 
 class Observatory:
@@ -47,6 +346,8 @@ class Observatory:
         self.config = config or {}
 
         # Internal components (no external dependencies)
+        from .ledger_builder import LedgerBuilder
+
         self._fetcher = StaticDataFetcher()
         self._builder = LedgerBuilder()
         # ---- Ledgers ----

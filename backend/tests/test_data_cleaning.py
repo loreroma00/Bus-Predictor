@@ -227,7 +227,7 @@ class TestDataCleaning:
         mock_trip = SimpleNamespace(
             id="trip_1", route=mock_route, direction_id=0, direction_name="Outbound"
         )
-        from application.domain.ledgers import TopologyLedger
+        from application.domain.virtual_entities import TopologyLedger
         topology = TopologyLedger(trips={"trip_1": mock_trip})
 
         with patch(

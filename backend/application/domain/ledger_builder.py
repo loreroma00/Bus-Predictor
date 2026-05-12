@@ -7,7 +7,7 @@ import pandas as pd
 
 from .static_data import Route, Trip, Shape
 from .live_data import Schedule
-from .ledgers import TopologyLedger, ScheduleLedger
+from .virtual_entities import ScheduleLedger, TopologyLedger
 
 
 class LedgerBuilder:

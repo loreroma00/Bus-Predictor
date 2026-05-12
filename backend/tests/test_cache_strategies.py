@@ -11,7 +11,7 @@ from persistence import (
     get_cache_strategy,
     get_available_strategies,
 )
-from application.domain.ledgers import TopologyLedger, ScheduleLedger
+from application.domain.virtual_entities import TopologyLedger, ScheduleLedger
 
 
 class TestBaseCacheStrategy:
