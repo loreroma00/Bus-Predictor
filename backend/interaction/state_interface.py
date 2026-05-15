@@ -626,7 +626,7 @@ class StateInterface:
         _ARGS_COMMANDS = {
             "print hex", "print diary", "fetch data", "print diaries vehicle",
             "pause traffic service", "validate", "validate live",
-            "weather strategy", "fotoromanzo",
+            "weather strategy", "trip validation chart",
         }
         commands = []
         for cmd_name, cmd_instance in self._command_registry.items():

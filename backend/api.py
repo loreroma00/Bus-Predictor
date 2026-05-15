@@ -7,7 +7,6 @@ import configparser
 import logging
 import os
 import threading
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -298,7 +297,7 @@ class APIState:
     observatory: object | None = None
     city: object | None = None
     runtime_context: object | None = None
-    current_live_session: object | None = None
+    validation_controller: object | None = None
     bus_type_predictor: object | None = None
 
 
@@ -768,15 +767,13 @@ def create_app(
         if state.observatory is None:
             raise HTTPException(status_code=503, detail="Observatory not loaded")
 
-        from application.services.validator import Validator
-
-        validator = Validator(
-            predictor=predictor,
-            observatory=state.observatory,
-        )
-
         try:
-            report = validator.validate_date(request.date)
+            controller = _validation_controller(state)
+            report = controller.run_historical(
+                request.date,
+                predictor=predictor,
+                observatory=state.observatory,
+            )
             trip_summaries = [
                 TripValidationSummary(
                     trip_id=t.trip_id,
@@ -818,7 +815,9 @@ def create_app(
         if state.observatory is None:
             raise HTTPException(status_code=503, detail="Observatory not loaded")
 
-        if state.current_live_session is not None and state.current_live_session.status in [
+        controller = _validation_controller(state)
+        current_session = controller.get_live_session()
+        if current_session is not None and current_session.status in [
             "predicting",
             "monitoring",
         ]:
@@ -826,14 +825,13 @@ def create_app(
                 status_code=409,
                 detail={
                     "error": "Session already running",
-                    "session_id": state.current_live_session.session_id,
-                    "date": state.current_live_session.target_date,
-                    "status": state.current_live_session.status,
+                    "session_id": current_session.session_id,
+                    "date": current_session.target_date,
+                    "status": current_session.status,
                 },
             )
 
         from application.services.bus_type_predictor import BusTypePredictor
-        from application.services.live_validator import LiveValidationSession
 
         if state.bus_type_predictor is None:
             try:
@@ -841,26 +839,21 @@ def create_app(
             except FileNotFoundError:
                 pass
 
-        session_id = str(uuid.uuid4())
-        session = LiveValidationSession(
-            session_id=session_id,
-            target_date=request.date,
+        session = await controller.start_live_session(
+            date_str=request.date,
             predictor=predictor,
             observatory=state.observatory,
             bus_type_predictor=state.bus_type_predictor,
         )
-
-        success = await session.start()
-        if not success:
+        if session is None:
             raise HTTPException(
                 status_code=500,
                 detail="Failed to start live validation session",
             )
 
-        state.current_live_session = session
         status = session.get_status()
         return LiveValidateScheduleResponse(
-            session_id=session_id,
+            session_id=session.session_id,
             date=request.date,
             total_scheduled=status.total_scheduled,
             total_predicted=status.total_predicted,
@@ -871,23 +864,27 @@ def create_app(
 
     @app.post("/validate/live/stop")
     async def stop_live_validation():
-        if state.current_live_session is None:
+        controller = _validation_controller(state)
+        session = controller.get_live_session()
+        if session is None:
             raise HTTPException(status_code=404, detail="No active session")
 
-        await state.current_live_session.stop()
-        status = state.current_live_session.get_status()
+        await controller.stop_live_session()
+        status = session.get_status()
         return {
-            "session_id": state.current_live_session.session_id,
+            "session_id": session.session_id,
             "status": status.status,
             "total_validated": status.total_validated,
         }
 
     @app.get("/validate/live/status", response_model=LiveValidateStatusResponse)
     async def get_live_validation_status():
-        if state.current_live_session is None:
+        controller = _validation_controller(state)
+        session = controller.get_live_session()
+        if session is None:
             return LiveValidateStatusResponse()
 
-        status = state.current_live_session.get_status()
+        status = session.get_status()
         return LiveValidateStatusResponse(
             session_id=status.session_id,
             date=status.date,
@@ -911,22 +908,21 @@ def create_app(
 
     @app.websocket("/validate/live/ws/{session_id}")
     async def live_validation_websocket(websocket: WebSocket, session_id: str):
-        if (
-            state.current_live_session is None
-            or state.current_live_session.session_id != session_id
-        ):
+        controller = _validation_controller(state)
+        session = controller.get_live_session(session_id)
+        if session is None:
             await websocket.close(code=4004, reason="Session not found")
             return
 
         await websocket.accept()
-        await state.current_live_session.add_websocket(websocket)
+        await session.add_websocket(websocket)
         try:
-            while state.current_live_session.status in ["predicting", "monitoring"]:
+            while session.status in ["predicting", "monitoring"]:
                 await asyncio.sleep(1)
         except WebSocketDisconnect:
             pass
         finally:
-            state.current_live_session.remove_websocket(websocket)
+            session.remove_websocket(websocket)
 
     @app.get("/health")
     async def health():
@@ -1033,6 +1029,25 @@ def _predictor_or_503(state: APIState) -> Predictor:
     if state.predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     return state.predictor
+
+
+def _validation_controller(state: APIState):
+    """Return the API/runtime validation controller."""
+    runtime_context = state.runtime_context
+    if runtime_context is not None:
+        controller = getattr(runtime_context, "validation_controller", None)
+        if controller is not None:
+            state.validation_controller = controller
+            return controller
+
+    if state.validation_controller is None:
+        from application.services.validator import ValidationController
+
+        state.validation_controller = ValidationController()
+        if runtime_context is not None:
+            runtime_context.validation_controller = state.validation_controller
+
+    return state.validation_controller
 
 
 def _find_canonical_trip(topology, route_id: str, direction_id: int):

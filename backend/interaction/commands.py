@@ -641,9 +641,9 @@ class print_all_diaries_vehicle(Command):
         )
 
 
-class fotoromanzo(Command):
-    """Fotoromanzo."""
-    command_name = "fotoromanzo"
+class trip_validation_chart(Command):
+    """Trip validation chart."""
+    command_name = "trip validation chart"
 
     def __init__(self, observatory: "Observatory", predictor=None):
         """Initialize the instance."""
@@ -654,68 +654,29 @@ class fotoromanzo(Command):
         """Execute."""
         trip_id = args.strip()
         if not trip_id:
-            logging.warning("Usage: fotoromanzo <trip_id>")
+            logging.warning("Usage: trip validation chart <trip_id>")
             return
 
-        # 1. Query actual measurements from HistoricalLedger
-        actual_df = self._obs.historical.query(trip_id=trip_id)
-        if actual_df.empty:
-            logging.warning(f"No historical measurements found for trip {trip_id}")
-            return
+        from . import services
 
-        # 2. Extract trip metadata from the first row
-        row = actual_df.iloc[0]
-        route_id = str(row['route_id'])
-        direction_id = int(row['direction_id'])
-        scheduled_start = str(row['scheduled_start_time'])[:5]  # HH:MM
-
-        from datetime import datetime
-        trip_date_dt = datetime.fromtimestamp(float(row['measurement_time']))
-        trip_date = trip_date_dt.strftime("%d-%m-%Y")
-
-        # 3. Query predicted delays from the predictor-owned ledger
-        import pandas as pd
-        prediction_ledger = getattr(self._predictor, "predicted", None)
-        if prediction_ledger:
-            predicted_df = prediction_ledger.query_trip(
-                route_id=route_id,
-                direction_id=direction_id,
-                trip_date=trip_date,
-                scheduled_start=scheduled_start,
-            )
-        else:
-            predicted_df = pd.DataFrame()
-        if predicted_df.empty:
-            logging.info(f"No predictions found for route {route_id} dir {direction_id} "
-                         f"date {trip_date} start {scheduled_start} — plotting actual only")
-
-        # 4. Get stop names from TopologyLedger
-        topology = self._obs.get_topology()
-        stops_map = topology.build_stops_map(route_id, direction_id) if topology else {}
-
-        # 5. Generate chart
-        from pathlib import Path
-        from . import graphics
-
-        results_dir = Path(__file__).resolve().parent.parent / "results"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        safe_id = trip_id.replace("/", "_").replace("\\", "_")[:50]
-        output_path = str(results_dir / f"fotoromanzo_{safe_id}.png")
-
-        graphics.generate_fotoromanzo(
-            predicted_df=predicted_df if not predicted_df.empty else None,
-            actual_df=actual_df,
-            stops_map=stops_map,
-            route_id=route_id,
+        result = services.generate_trip_validation_chart(
             trip_id=trip_id,
-            output_path=output_path,
+            observatory=self._obs,
+            predictor=self._predictor,
         )
-        logging.info(f"Fotoromanzo saved to: {output_path}")
+        if result is None:
+            logging.warning(f"Trip validation chart not generated for trip {trip_id}")
+            return
+        if not result.has_predicted:
+            logging.info(f"No predictions found for trip {trip_id}; plotted actual only")
+        logging.info(f"Trip validation chart saved to: {result.output_path}")
 
     @staticmethod
     def help():
         """Help."""
-        logging.info("fotoromanzo <trip_id>: Generate predicted vs actual delay chart for a trip")
+        logging.info(
+            "trip validation chart <trip_id>: Generate predicted vs actual delay chart for a trip"
+        )
 
 
 class weather_strategy_cmd(Command):

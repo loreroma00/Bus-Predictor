@@ -26,3 +26,4 @@ class ApplicationContext:
     state_interface: Any = None
     predictor: Any = None
     bus_type_predictor: Any = None
+    validation_controller: Any = None

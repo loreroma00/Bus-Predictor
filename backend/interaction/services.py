@@ -5,7 +5,6 @@ Subscribes to events from the event bus for start/stop control.
 """
 
 import logging
-import threading
 from application.live import data
 from application.domain.internal_events import LIVE_TRIP_FINISHED, domain_events
 from .events import SERVICES_START, SERVICES_STOP, SHUTDOWN_REQUESTED, console_events
@@ -18,11 +17,6 @@ GEOCODING_THREAD = None
 TRAFFIC_THREAD = None
 GUI_THREAD = None
 
-# Validator threads
-VALIDATOR_THREAD = None
-LIVE_VALIDATOR_THREAD = None
-LIVE_VALIDATOR_SESSION = None
-
 UPDATE_TIME = 900
 TRAFFIC_UPDATE_TIME = 900  # 15 minutes
 
@@ -30,6 +24,7 @@ TRAFFIC_UPDATE_TIME = 900  # 15 minutes
 _state_interface = None
 _runtime_context = None
 _thread_loader = None
+_validation_controller = None
 
 
 def start_services(observatory=None, config: dict = None, context=None):
@@ -78,124 +73,68 @@ def set_state_interface(state_interface):
     _state_interface = state_interface
 
 
+def _get_validation_controller():
+    """Return the process-wide validation controller."""
+    global _validation_controller
+
+    from application.services.validator import ValidationController
+
+    context = _runtime_context
+    if context is not None:
+        controller = getattr(context, "validation_controller", None)
+        if controller is None:
+            controller = ValidationController()
+            context.validation_controller = controller
+        return controller
+
+    if _validation_controller is None:
+        _validation_controller = ValidationController()
+    return _validation_controller
+
+
 def start_batch_validation(date_str, predictor, observatory):
-    """Start batch validation in a background thread."""
-    global VALIDATOR_THREAD
-
-    if VALIDATOR_THREAD is not None and VALIDATOR_THREAD.is_alive():
-        logging.warning("Batch validation already running.")
-        return
-
-    def _run():
-        """Thread body: construct the Validator and run ``validate_date`` for ``date_str``."""
-        from application.services.validator import Validator
-        try:
-            validator = Validator(predictor, observatory)
-            report = validator.validate_date(date_str)
-            logging.info(
-                f"Batch validation complete: {report.total_trips_validated} trips, "
-                f"median RMSE={report.median_rmse:.2f}s"
-            )
-        except Exception as e:
-            logging.error(f"Batch validation failed: {e}")
-
-    VALIDATOR_THREAD = threading.Thread(target=_run, daemon=True)
-    VALIDATOR_THREAD.start()
-    logging.info(f"Batch validation started for {date_str}")
+    """Start batch validation through the validation controller."""
+    controller = _get_validation_controller()
+    controller.start_historical(date_str, predictor, observatory)
 
 
 def start_live_validation(date_str, predictor, observatory, bus_type_predictor=None):
-    """Start live validation in a background thread with its own event loop."""
-    global LIVE_VALIDATOR_THREAD, LIVE_VALIDATOR_SESSION
-    import asyncio
-    import uuid
-
-    if LIVE_VALIDATOR_THREAD is not None and LIVE_VALIDATOR_THREAD.is_alive():
-        logging.warning("Live validation already running.")
-        return
-
-    from application.services.live_validator import LiveValidationSession
-
-    session_id = str(uuid.uuid4())
-    session = LiveValidationSession(
-        session_id=session_id,
-        target_date=date_str,
-        predictor=predictor,
-        observatory=observatory,
+    """Start live validation through the validation controller."""
+    controller = _get_validation_controller()
+    controller.start_live(
+        date_str,
+        predictor,
+        observatory,
         bus_type_predictor=bus_type_predictor,
     )
-    LIVE_VALIDATOR_SESSION = session
-
-    def _run():
-        """Thread body: spin up a fresh asyncio loop and drive the LiveValidationSession."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            started = loop.run_until_complete(session.start())
-            if started:
-                loop.run_until_complete(_wait_for_session(session))
-            else:
-                logging.warning(f"Live validation session failed to start for {date_str}")
-        except Exception as e:
-            logging.error(f"Live validation error: {e}")
-        finally:
-            loop.close()
-
-    async def _wait_for_session(session):
-        """Wait until the session completes or is stopped."""
-        while session.status in ("predicting", "monitoring"):
-            await asyncio.sleep(1)
-
-    LIVE_VALIDATOR_THREAD = threading.Thread(target=_run, daemon=True)
-    LIVE_VALIDATOR_THREAD.start()
-    logging.info(f"Live validation started for {date_str} (session {session_id[:8]})")
 
 
 def stop_live_validation():
     """Stop the active live validation session."""
-    global LIVE_VALIDATOR_SESSION
-    import asyncio
-
-    if LIVE_VALIDATOR_SESSION is None:
-        logging.info("No live validation session running.")
-        return
-
-    session = LIVE_VALIDATOR_SESSION
-    loop = session._loop
-
-    if loop is not None and not loop.is_closed():
-        future = asyncio.run_coroutine_threadsafe(session.stop(), loop)
-        try:
-            future.result(timeout=10)
-        except Exception as e:
-            logging.error(f"Error stopping live validation: {e}")
-
-    LIVE_VALIDATOR_SESSION = None
-    logging.info("Live validation stopped.")
+    controller = _get_validation_controller()
+    controller.stop_live()
 
 
 def get_validation_status():
     """Return status info for both validators."""
-    status = {}
+    controller = _get_validation_controller()
+    return controller.get_status()
 
-    if VALIDATOR_THREAD is not None and VALIDATOR_THREAD.is_alive():
-        status["batch"] = "running"
-    else:
-        status["batch"] = "idle"
 
-    if LIVE_VALIDATOR_SESSION is not None and LIVE_VALIDATOR_THREAD is not None and LIVE_VALIDATOR_THREAD.is_alive():
-        session = LIVE_VALIDATOR_SESSION
-        status["live"] = session.status
-        status["live_validated"] = len(session.validated_trips)
-        status["live_pending"] = len(session.pending_trip_ids)
-        status["live_predicted"] = len(session.predicted_trips)
-        status["live_discarded"] = len(session.discarded_trip_ids)
-        live_status = session.get_status()
-        status["live_median_rmse"] = live_status.median_rmse
-    else:
-        status["live"] = "idle"
+def generate_trip_validation_chart(trip_id, observatory, predictor=None):
+    """Generate a validation chart for one trip."""
+    controller = _get_validation_controller()
+    return controller.generate_trip_validation_chart(
+        trip_id=trip_id,
+        observatory=observatory,
+        predictor=predictor,
+    )
 
-    return status
+
+def render_training_loss(log_path, output_path=None):
+    """Render a training-loss chart through the validation controller."""
+    controller = _get_validation_controller()
+    return controller.render_training_loss(log_path, output_path)
 
 
 def stop_services():
