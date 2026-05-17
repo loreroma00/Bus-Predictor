@@ -20,7 +20,7 @@ class StateInterface:
     without exposing internal implementation details.
     """
 
-    def __init__(self, observatory, predictor=None):
+    def __init__(self, observatory, predictor=None, context=None):
         """
         Initialize the state interface with an Observatory instance.
 
@@ -29,9 +29,14 @@ class StateInterface:
         """
         self._observatory = observatory
         self._predictor = predictor
+        self._context = context
         self._last_feed_timestamp: float = 0.0
         self._command_registry: dict = {}
         self._last_command_output: str = ""
+
+    def set_context(self, context):
+        """Bind the runtime context used for service status."""
+        self._context = context
 
     # ============================================================
     # City & Hexagon Access
@@ -225,42 +230,6 @@ class StateInterface:
     # LiveTrip & Measurement Access
     # ============================================================
 
-    def get_observers(self) -> list[dict]:
-        """Compatibility surface: return active live trips with summary info."""
-        live_trips = self._observatory.get_active_live_trips()
-        if not live_trips:
-            return []
-
-        result = []
-        for live_trip_id, live_trip in live_trips.items():
-            trip = live_trip.trip
-            result.append(
-                {
-                    "bus_id": live_trip.id,
-                    "trip_id": trip.id if trip else None,
-                    "route_id": trip.route.id if trip and trip.route else None,
-                    "measurement_count": len(live_trip.measurements),
-                    "archived_count": len(self._observatory.completed_live_trips),
-                }
-            )
-        return result
-
-    def get_observer_diary(self, bus_id: str) -> Optional[dict]:
-        """Compatibility surface: get measurement info for one live trip."""
-        live_trip = self._observatory.get_active_live_trips().get(bus_id)
-        if not live_trip:
-            return None
-
-        measurements = [
-            m.to_dict(live_trip.trip_id) for m in live_trip.measurements[-20:]
-        ]
-        return {
-            "trip_id": live_trip.trip_id,
-            "is_finished": live_trip.is_finished,
-            "total_measurements": len(live_trip.measurements),
-            "recent_measurements": measurements,
-        }
-
     # ============================================================
     # Tracking Summary (Ingestion View)
     # ============================================================
@@ -384,7 +353,7 @@ class StateInterface:
             total_hexagons += len(city.hexagons)
 
         return {
-            "observer_count": len(live_trips),
+            "live_trip_count": len(live_trips),
             "active_buses": total_active,
             "deposit_buses": total_deposit,
             "hexagon_count": total_hexagons,
@@ -624,7 +593,7 @@ class StateInterface:
         """Get list of available commands with their help text."""
         # Commands known to need arguments (from their help text patterns)
         _ARGS_COMMANDS = {
-            "print hex", "print diary", "fetch data", "print diaries vehicle",
+            "print hex", "print live trip", "fetch data", "print vehicle trips",
             "pause traffic service", "validate", "validate live",
             "weather strategy", "trip validation chart",
         }
@@ -668,14 +637,15 @@ class StateInterface:
         """Get status of all background service threads."""
         from . import services
 
+        context_threads = self._context.threads if self._context is not None else {}
         threads = {
-            "Collection": services.COLLECTION_THREAD,
-            "Saving": services.SAVING_THREAD,
-            "Weather": services.WEATHER_THREAD,
-            "Traffic": services.TRAFFIC_THREAD,
-            "Geocoding": services.GEOCODING_THREAD,
-            "Uptime": services.UPTIME_THREAD,
-            "GUI": services.GUI_THREAD,
+            "Collection": context_threads.get("collection"),
+            "Saving": context_threads.get("saving"),
+            "Weather": context_threads.get("weather"),
+            "Traffic": context_threads.get("traffic"),
+            "Geocoding": context_threads.get("geocoding"),
+            "Uptime": context_threads.get("uptime"),
+            "GUI": context_threads.get("gui"),
         }
 
         status = {}

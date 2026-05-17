@@ -45,9 +45,9 @@ class TestConsoleCommandRegistry:
         console.register_commands(mock_obs)
 
         expected_commands = [
-            "print diary",
+            "print live trip",
             "fetch data",
-            "print diaries",
+            "print live trips",
             "quit",
             "help",
         ]
@@ -61,7 +61,7 @@ class TestEventDrivenServices:
 
     def test_shutdown_event_sets_flags(self):
         """Shutdown event should set appropriate flags."""
-        from interaction.events import ConsoleEventBus
+        from application.domain.internal_events import ConsoleEventBus
 
         bus = ConsoleEventBus()
         shutdown_called = []
@@ -85,7 +85,6 @@ class TestArchitectureLayers:
 
         domain_files = [
             "application/domain/virtual_entities.py",
-            "application/domain/observers.py",
             "application/domain/interfaces.py",
             "application/domain/time_utils.py",
             "application/domain/live_data.py",
@@ -110,7 +109,6 @@ class TestArchitectureLayers:
 
         domain_files = [
             "application/domain/virtual_entities.py",
-            "application/domain/observers.py",
             "application/domain/interfaces.py",
             "application/domain/live_data.py",
         ]
@@ -151,20 +149,14 @@ class TestProtocolCompliance:
         assert isinstance(strategy, CacheStrategy)
 
 
-class TestDataModuleInitialization:
-    """Test data module initialization pattern."""
+class TestRuntimeContext:
+    """Test explicit runtime context wiring."""
 
-    def test_data_observatory_starts_as_none(self):
-        """data.OBSERVATORY should be None before initialization."""
-        # This test may fail if run after other tests that initialize
-        # Using a fresh import check approach instead
-        pass  # Skip - depends on test order
-
-    def test_initialize_sets_observatory(self):
-        """initialize() should set the OBSERVATORY global."""
-        from application.live import data
+    def test_context_carries_observatory(self):
+        """ApplicationContext should carry runtime dependencies explicitly."""
+        from application.runtime import ApplicationContext
 
         mock_obs = Mock()
-        data.initialize(mock_obs)
+        context = ApplicationContext(config={}, observatory=mock_obs, city=None)
 
-        assert data.OBSERVATORY == mock_obs
+        assert context.observatory == mock_obs

@@ -3,9 +3,9 @@ Tests for DomainEventBus - the internal domain event system.
 """
 
 from application.domain.internal_events import (
-    DiaryFinishedEvent,
     DomainEventBus,
     InternalEvent,
+    LiveTripFinishedEvent,
     domain_events,
 )
 
@@ -84,22 +84,20 @@ class TestDomainEventBus:
         bus = DomainEventBus()
         received = []
 
-        bus.subscribe(DiaryFinishedEvent, lambda data: received.append(data))
+        bus.subscribe(LiveTripFinishedEvent, lambda data: received.append(data))
         bus.emit(
-            DiaryFinishedEvent(
-                diary="diary",
+            LiveTripFinishedEvent(
+                live_trip="live_trip",
                 route_id="route",
-                observatory="observatory",
                 vehicle_type_name="bus",
             )
         )
 
-        assert issubclass(DiaryFinishedEvent, InternalEvent)
+        assert issubclass(LiveTripFinishedEvent, InternalEvent)
         assert received == [
             {
-                "diary": "diary",
+                "live_trip": "live_trip",
                 "route_id": "route",
-                "observatory": "observatory",
                 "vehicle_type_name": "bus",
             }
         ]

@@ -9,7 +9,7 @@ from application.domain.live_data import GPSData, Measurement
 from application.domain.weather import Weather
 
 
-def create_diary(trip_id: str):
+def create_live_trip(trip_id: str):
     """Create a LiveTrip-like object for pipeline tests."""
     return SimpleNamespace(trip_id=trip_id, measurements=[])
 
@@ -62,32 +62,24 @@ def create_measurement(
 
 class TestDataCleaning:
     """Testdatacleaning."""
-    def test_check_for_duplicates_diary(self):
-        """Test _check_for_duplicates with a LiveTrip-like object."""
-        diary = create_diary("trip_1")
-
+    def test_check_for_duplicates(self):
+        """Duplicate check should remove repeated pings."""
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
         m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1000)
         m3 = create_measurement("3", "trip_1", 10.1, 10.1, 1002)
 
-        diary.measurements = [m1, m2, m3]
+        cleaned = data_cleaning._check_for_duplicates({"trip_1": [m1, m2, m3]})
 
-        cleaned_diary = data_cleaning._check_for_duplicates(diary)
-
-        assert len(cleaned_diary.measurements) == 2
-        assert cleaned_diary.measurements[0].id == "1"
-        assert cleaned_diary.measurements[1].id == "3"
+        assert [m.id for m in cleaned["trip_1"]] == ["1", "3"]
 
     def test_same_position_different_time_is_not_duplicate(self):
         """Standing still is valid and must not be collapsed as a duplicate."""
-        diary = create_diary("trip_1")
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
         m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1010)
 
-        diary.measurements = [m1, m2]
-        cleaned_diary = data_cleaning._check_for_duplicates(diary)
+        cleaned = data_cleaning._check_for_duplicates({"trip_1": [m1, m2]})
 
-        assert [m.id for m in cleaned_diary.measurements] == ["1", "2"]
+        assert [m.id for m in cleaned["trip_1"]] == ["1", "2"]
 
     def test_integrity_drops_bad_speed_ratio_and_uptime(self):
         """Integrity keeps only finite positive speed_ratio values seen while online."""
@@ -142,20 +134,20 @@ class TestDataCleaning:
         try:
             df.to_parquet(tmp_path)
 
-            diaries = data_cleaning._process_parquet_file(tmp_path)
+            live_trips = data_cleaning._process_parquet_file(tmp_path)
 
-            assert len(diaries) == 2
+            assert len(live_trips) == 2
             # Sort by trip_id to ensure order
-            diaries.sort(key=lambda d: d.trip_id)
+            live_trips.sort(key=lambda d: d.trip_id)
 
-            d_a = diaries[0]
+            d_a = live_trips[0]
             assert d_a.trip_id == "trip_A"
             assert len(d_a.measurements) == 1
             m_a = d_a.measurements[0]
             assert m_a.id == "1"
             assert m_a.gpsdata.latitude == 10.0
 
-            d_b = diaries[1]
+            d_b = live_trips[1]
             assert d_b.trip_id == "trip_B"
             assert len(d_b.measurements) == 1
             m_b = d_b.measurements[0]
@@ -166,8 +158,8 @@ class TestDataCleaning:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-    def test_overload_behavior(self):
-        """Test that functions accept dicts as well (backward compatibility)."""
+    def test_integrity_returns_trip_mapping(self):
+        """Integrity cleaning returns a trip-to-measurements mapping."""
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
         m2 = create_measurement("2", "trip_1", 10.1, 10.1, 1010)
         data_dict = {"trip_1": [m1, m2]}
@@ -178,8 +170,8 @@ class TestDataCleaning:
         assert isinstance(res, dict)
         assert "trip_1" in res
 
-    def test_check_for_duplicates_dict(self):
-        """Test _check_for_duplicates with dict input."""
+    def test_check_for_duplicates_mapping(self):
+        """Test _check_for_duplicates with mapping input."""
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
         m2 = create_measurement("2", "trip_1", 10.0, 10.0, 1000)
         m3 = create_measurement("3", "trip_1", 10.1, 10.1, 1002)
@@ -195,14 +187,10 @@ class TestDataCleaning:
         assert "3" in ids
 
     def test_vehicle_pipeline(self):
-        """Test VehiclePipeline vectorization."""
+        """VehiclePipeline returns cleaned domain measurements."""
         from application.post_processing.data_cleaning import VehiclePipeline
-        from application.post_processing.vectorization import (
-            VehicleVector,
-            VehicleLabel,
-        )
 
-        diary = create_diary("trip_1")
+        live_trip = create_live_trip("trip_1")
 
         # Create a measurement with bus_type
         m1 = create_measurement("1", "trip_1", 10.0, 10.0, 1000)
@@ -210,7 +198,7 @@ class TestDataCleaning:
         m2 = create_measurement("2", "trip_1", 10.1, 10.1, 1010)
         m2.bus_type = 1
 
-        diary.measurements = [m1, m2]
+        live_trip.measurements = [m1, m2]
 
         # Mock topology with proper route structure
         mock_route = SimpleNamespace(id="route_A")
@@ -225,18 +213,11 @@ class TestDataCleaning:
             return_value=[],
         ):
             pipeline = VehiclePipeline(
-                diary=diary,
+                live_trip=live_trip,
                 topology=topology,
                 vehicle_type_name="DieselBus",
             )
 
-            vectors = pipeline.clean()
+            cleaned = pipeline.clean()
 
-        assert len(vectors) == 1
-        vec, label, ts = vectors[0]
-
-        assert isinstance(vec, VehicleVector)
-        assert isinstance(label, VehicleLabel)
-        assert vec.trip_id == "trip_1"
-        assert vec.route_id == "route_A"
-        assert label.vehicle_type == "DieselBus"
+        assert [m.id for m in cleaned] == ["1", "2"]

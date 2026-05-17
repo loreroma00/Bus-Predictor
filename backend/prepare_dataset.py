@@ -6,8 +6,8 @@ small public surface:
 
 - build_dataset(...)
 - build_canonical_shape_map(...)
-- extract_prediction_rows(...)
-- preprocess_prediction_rows(...)
+- extract_historical_training_rows(...)
+- preprocess_historical_rows(...)
 - build_stop_level_dataset(...)
 - scale_dataset(...)
 - Filter
@@ -20,8 +20,6 @@ import glob
 import hashlib
 import json
 import os
-import random
-import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,12 +36,7 @@ from sklearn.preprocessing import LabelEncoder
 
 from application.domain.static_data_fetcher import StaticDataFetcher
 from config import Ledger
-from persistence.database import (
-    read_historical,
-    read_prediction_training_rows,
-    read_traffic_training_rows,
-    read_vehicle_trips,
-)
+from persistence.gateway import create_persistence_gateway
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -57,6 +50,7 @@ ROUTE_ENCODER_PATH = PARQUET_DIR / "route_encoder.pkl"
 ROUTE_ENCODING_PATH = PARQUET_DIR / "route_encoding.json"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
 GTFS_MD5_PATH = PARQUET_DIR / "gtfs_md5.json"
+PERSISTENCE = create_persistence_gateway()
 
 H3_RESOLUTION = 9
 R_EARTH = 6371000
@@ -508,7 +502,7 @@ def compute_traffic_averages(
     """Compute per-H3/day/hour traffic averages from DB-returned rows."""
     if traffic_rows is None:
         print("Fetching traffic data from database...")
-        traffic_rows = read_traffic_training_rows()
+        traffic_rows = PERSISTENCE.read_traffic_training_rows()
 
     if traffic_rows is None or traffic_rows.empty:
         print("No traffic data found.")
@@ -555,13 +549,66 @@ def get_processed_dates(parquet_dir: Path = PARQUET_DIR) -> set[str]:
     return processed_dates
 
 
-def extract_prediction_rows(start_date: str = None) -> pd.DataFrame:
-    """Read prediction training rows through the database access layer."""
+def extract_historical_training_rows(start_date: str = None) -> pd.DataFrame:
+    """Read historical measurement rows through the persistence facade."""
     print("Executing query and loading data (this may take a while)...")
-    df = read_prediction_training_rows(start_date=start_date)
+    df = PERSISTENCE.read_prediction_training_rows(start_date=start_date)
     if df is None:
-        raise RuntimeError("Prediction database not configured. Check config.ini.")
+        raise RuntimeError("Ledger database not configured. Check config.ini.")
+    df = normalize_historical_training_rows(df)
     print(f"Loaded {len(df)} rows from database.")
+    return df
+
+
+extract_prediction_rows = extract_historical_training_rows
+
+
+def normalize_historical_training_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Format historical ledger rows for dataset preprocessing."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    if "ts" not in df.columns and "measurement_time" in df.columns:
+        df["ts"] = df["measurement_time"]
+    df["ts"] = pd.to_datetime(df["ts"])
+    seconds = (
+        df["ts"].dt.hour * 3600
+        + df["ts"].dt.minute * 60
+        + df["ts"].dt.second
+    )
+    df["time_seconds"] = seconds.astype(int)
+    df["day_type"] = df["ts"].dt.weekday.map(
+        lambda weekday: 1 if weekday == 5 else 2 if weekday == 6 else 0
+    )
+    df["rush_hour_status"] = (
+        ((df["time_seconds"] >= 25200) & (df["time_seconds"] <= 32400))
+        | ((df["time_seconds"] >= 61200) & (df["time_seconds"] <= 70200))
+    ).astype(int)
+    if "distance_to_next_stop" in df.columns:
+        df["far_status"] = (df["distance_to_next_stop"].fillna(0) > 250).astype(int)
+    else:
+        df["far_status"] = 0
+    df["served_ratio"] = df.get("served_ratio", 1.0)
+
+    for column in [
+        "deposit_grottarossa",
+        "deposit_magliana",
+        "deposit_tor_sapienza",
+        "deposit_portonaccio",
+        "deposit_monte_sacro",
+        "deposit_tor_pagnotta",
+        "deposit_tor_cervara",
+        "deposit_maglianella",
+        "deposit_costi",
+        "deposit_trastevere",
+        "deposit_acilia",
+        "deposit_tor_vergata",
+        "deposit_porta_maggiore",
+    ]:
+        if column not in df.columns:
+            df[column] = 0
+
     return df
 
 
@@ -591,7 +638,7 @@ def generate_synthetic_trip_id(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def preprocess_prediction_rows(
+def preprocess_historical_rows(
     df: pd.DataFrame,
     start_date: str = None,
     write_daily_parquets: bool = True,
@@ -616,22 +663,14 @@ def preprocess_prediction_rows(
         if has_trip_id.any():
             print(f"Found {has_trip_id.sum()} rows with existing trip_id.")
             df["trip_id"] = df["trip_id"].astype(object)
-            existing_ids = df.loc[has_trip_id, "trip_id"]
-            df.loc[has_trip_id, "trip_id"] = existing_ids.apply(
-                lambda x: int(re.sub(r"\D", "", str(x)))
-                if re.sub(r"\D", "", str(x))
-                else 0
-            )
+            df.loc[has_trip_id, "trip_id"] = df.loc[has_trip_id, "trip_id"].astype(str)
 
             if (~has_trip_id).any():
                 print(f"Generating synthetic trip_id for {(~has_trip_id).sum()} rows without it...")
                 missing_df = generate_synthetic_trip_id(df[~has_trip_id].copy())
-                random_padding = random.randint(10000, 99999)
-                max_existing = df.loc[has_trip_id, "trip_id"].max()
-                missing_df["trip_id"] = (
-                    missing_df["trip_id"] * 100000 + max_existing + random_padding
+                df.loc[~has_trip_id, "trip_id"] = missing_df["trip_id"].apply(
+                    lambda value: f"synthetic_{value}"
                 )
-                df.loc[~has_trip_id, "trip_id"] = missing_df["trip_id"]
         else:
             df = generate_synthetic_trip_id(df)
     else:
@@ -640,6 +679,9 @@ def preprocess_prediction_rows(
     if write_daily_parquets:
         write_daily_dynamic_parquets(df, parquet_dir=parquet_dir)
     return df
+
+
+preprocess_prediction_rows = preprocess_historical_rows
 
 
 def write_daily_dynamic_parquets(
@@ -1355,10 +1397,10 @@ def build_dataset(
         dynamic_df = load_dynamic_data(start_date=start_date)
     else:
         print("\n" + "=" * 60)
-        print("STAGE 2: Prediction Row Extraction + Preprocessing")
+        print("STAGE 2: Historical Measurement Extraction + Preprocessing")
         print("=" * 60)
-        raw_rows = extract_prediction_rows(start_date=start_date)
-        dynamic_df = preprocess_prediction_rows(raw_rows, start_date=start_date)
+        raw_rows = extract_historical_training_rows(start_date=start_date)
+        dynamic_df = preprocess_historical_rows(raw_rows, start_date=start_date)
 
     print("\n" + "=" * 60)
     print("STAGE 3: Stop-Level Dataset")
@@ -1393,7 +1435,7 @@ def extract_historical(start_date: str = None, end_date: str = None) -> pd.DataF
     """Extract stop-level historical arrival data from the ledger database."""
     date_start = datetime.strptime(start_date, "%Y-%m-%d").timestamp() if start_date else None
     date_end = datetime.strptime(end_date, "%Y-%m-%d").timestamp() if end_date else None
-    df = read_historical(
+    df = PERSISTENCE.read_historical_records(
         Ledger.DB_CONNECTION,
         Ledger.HISTORICAL_TABLE,
         date_start=date_start,
@@ -1409,7 +1451,7 @@ def extract_vehicle_trips(
     route_id: str = None,
 ) -> pd.DataFrame:
     """Extract vehicle-level trip performance data from the ledger database."""
-    df = read_vehicle_trips(
+    df = PERSISTENCE.read_vehicle_trip_records(
         Ledger.DB_CONNECTION,
         Ledger.VEHICLE_TABLE,
         route_id=route_id,
@@ -1428,7 +1470,7 @@ def main():
         epilog="""
 Pipeline stages:
   1. Build canonical stop-route map from GTFS
-  2. Extract and preprocess prediction rows
+  2. Extract and preprocess historical ledger rows
   3. Build stop-level unscaled dataset
   4. Scale final training dataset
         """,

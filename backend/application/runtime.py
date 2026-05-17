@@ -16,6 +16,7 @@ class ApplicationContext:
     observatory: Any
     city: Any
     cache_strategy: Any = None
+    persistence_gateway: Any = None
     geocoding_service: Any = None
     traffic_service: Any = None
     feed_fetcher: Any = None

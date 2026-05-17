@@ -87,7 +87,7 @@ class SyncGeocodingService:
     def enqueue(self, lat: float, lon: float, hex_id: str) -> None:
         """
         Immediately resolve and cache the street name (synchronous).
-        Called 'enqueue' for interface compatibility, but doesn't actually queue.
+        The method name matches the geocoding strategy protocol.
         """
         key = (round(lat, 5), round(lon, 5))
 

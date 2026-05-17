@@ -36,7 +36,7 @@ def load_config(config_path: Path = _CONFIG_PATH) -> dict:
     # Environment variable mappings (Section, Key, EnvVar)
     env_overrides = [
         ("api", "tomtom_api_key", "TOMTOM_API_KEY"),
-        ("database", "timescale_connection_string", "TIMESCALE_CONNECTION_STRING"),
+        ("ledger", "db_connection", "TIMESCALE_CONNECTION_STRING"),
     ]
 
     # Apply environment overrides
@@ -49,7 +49,15 @@ def load_config(config_path: Path = _CONFIG_PATH) -> dict:
             config[section][key] = env_val
 
     # Ensure critical sections exist to avoid KeyErrors downstream
-    required_sections = ["api", "database", "urls", "paths", "timings", "services", "data_cleaning", "prediction", "traffic"]
+    required_sections = [
+        "api",
+        "ledger",
+        "urls",
+        "paths",
+        "timings",
+        "services",
+        "data_cleaning",
+    ]
     for section in required_sections:
         if section not in config:
             config[section] = {}
@@ -194,54 +202,6 @@ class DataCleaning:
 
 
 # ============================================================
-# Prediction Configuration
-# ============================================================
-class Prediction:
-    """Prediction pipeline settings."""
-
-    ENABLED = _get("prediction", "enabled", "true").lower() == "true"
-    VECTOR_DB_CONNECTION = _get(
-        "prediction",
-        "vector_db_connection",
-        "postgresql://user:password@localhost:1515/transit",
-    )
-    VECTOR_TABLE = _get("prediction", "vector_table", "prediction_vectors")
-    LABEL_TABLE = _get("prediction", "label_table", "prediction_label")
-
-
-# ============================================================
-# Traffic Configuration
-# ============================================================
-class Traffic:
-    """Traffic pipeline settings."""
-
-    ENABLED = _get("traffic", "enabled", "true").lower() == "true"
-    VECTOR_DB_CONNECTION = _get(
-        "traffic",
-        "vector_db_connection",
-        "postgresql://user:password@localhost:1515/transit",
-    )
-    VECTOR_TABLE = _get("traffic", "vector_table", "traffic_vectors")
-    LABEL_TABLE = _get("traffic", "label_table", "traffic_label")
-
-
-# ============================================================
-# Vehicle Configuration
-# ============================================================
-class Vehicle:
-    """Vehicle pipeline settings."""
-
-    ENABLED = _get("vehicle", "enabled", "true").lower() == "true"
-    VECTOR_DB_CONNECTION = _get(
-        "vehicle",
-        "vector_db_connection",
-        "postgresql://user:password@localhost:1515/transit",
-    )
-    VECTOR_TABLE = _get("vehicle", "vector_table", "vehicle_vectors")
-    LABEL_TABLE = _get("vehicle", "label_table", "vehicle_label")
-
-
-# ============================================================
 # Ledger Configuration
 # ============================================================
 class Ledger:
@@ -250,7 +210,13 @@ class Ledger:
     DB_CONNECTION = _get(
         "ledger",
         "db_connection",
-        Prediction.VECTOR_DB_CONNECTION,
+        _get(
+            "database",
+            "timescale_connection_string",
+            "postgresql://user:password@localhost:1515/transit",
+            env_var="TIMESCALE_CONNECTION_STRING",
+        ),
+        env_var="TIMESCALE_CONNECTION_STRING",
     )
     HISTORICAL_TABLE = _get("ledger", "historical_table", "historical_measurements")
     PREDICTED_TABLE = _get("ledger", "predicted_table", "predicted_arrivals")
@@ -258,18 +224,8 @@ class Ledger:
 
 
 # ============================================================
-# Database Configuration (Legacy Alias)
-# ============================================================
-class Database:
-    """Legacy Database settings aliased to Prediction."""
-
-    TIMESCALE_CONNECTION_STRING = Prediction.VECTOR_DB_CONNECTION
-    TIMESCALE_TABLE = Prediction.VECTOR_TABLE
-
-
-# ============================================================
 # Convenience Exports
 # ============================================================
 # For backwards compatibility and easy access
 TOMTOM_API_KEY = API.TOMTOM_API_KEY
-TIMESCALE_CONNECTION_STRING = Database.TIMESCALE_CONNECTION_STRING
+TIMESCALE_CONNECTION_STRING = Ledger.DB_CONNECTION

@@ -6,20 +6,28 @@ state interface, starts/stops collection services, and performs final cleanup.
 """
 
 import logging
+import os
 import threading
+from pathlib import Path
 from typing import Any
 
 from application import domain
 from application.domain.map_info import create_geocoding_service
-from application.live import data
 from application.runtime import ApplicationContext
+from application.services.persistence_gateway import (
+    configure_persistence_gateway,
+    get_persistence_gateway,
+)
 from persistence import (
     get_available_strategies,
     get_cache_strategy,
-    get_db_connection,
     load_pickle,
-    save_diaries_incremental,
 )
+from persistence.gateway import create_persistence_gateway
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+PARQUET_DIR = PROJECT_ROOT / "parquets"
 
 
 def configure_logging(debug_mode: bool = False, log_file: str = "backend.log"):
@@ -65,11 +73,16 @@ def build_runtime_context(
     strategy_name = config.get("services", {}).get("cache_strategy", "file")
     logging.info("Using cache strategy: '%s'", strategy_name)
     cache_strategy = get_cache_strategy(strategy_name)
+    persistence_gateway = configure_persistence_gateway(create_persistence_gateway())
 
     logging.info("Creating Observatory...")
-    observatory = domain.Observatory(cache_strategy=cache_strategy, config=config)
+    observatory = domain.Observatory(
+        cache_strategy=cache_strategy,
+        config=config,
+        persistence_gateway=persistence_gateway,
+    )
 
-    get_db_connection(config)
+    persistence_gateway.ensure_database(config)
 
     static_bus_lanes = load_pickle("static_bus_lanes_roma.pkl", default={})
     if static_bus_lanes:
@@ -131,16 +144,9 @@ def build_runtime_context(
         observatory=observatory,
         city=city,
         cache_strategy=cache_strategy,
+        persistence_gateway=persistence_gateway,
         geocoding_service=geocoding_service,
         traffic_service=traffic_service,
-        feed_fetcher=feed_fetcher,
-        stop_event=stop_event,
-        shutdown_event=shutdown_event,
-    )
-    data.initialize(
-        observatory,
-        cache_strategy=cache_strategy,
-        config=config,
         feed_fetcher=feed_fetcher,
         stop_event=stop_event,
         shutdown_event=shutdown_event,
@@ -167,7 +173,11 @@ def wire_state_interface(
         bus_type_predictor=bus_type_predictor,
     )
 
-    state_interface = StateInterface(context.observatory, predictor=predictor)
+    state_interface = StateInterface(
+        context.observatory,
+        predictor=predictor,
+        context=context,
+    )
     if predictor is not None and loaded_model_name:
         state_interface.set_predictor_info(loaded_model_name)
     state_interface.set_command_registry(console._command_registry)
@@ -175,6 +185,125 @@ def wire_state_interface(
 
     context.state_interface = state_interface
     return state_interface
+
+
+def build_serving_runtime(
+    time_model_name: str | None = None,
+    crowd_model_name: str | None = None,
+    lenient_pipeline: bool = False,
+):
+    """Build the full runtime used by ``main.py serve``."""
+    print("\n[1/5] Initializing collection pipeline (Observatory, City, services)...")
+    context = build_runtime_context(lenient_pipeline=lenient_pipeline)
+
+    print("\n[2/5] Generating canonical route map (if needed)...")
+    _ensure_canonical_map()
+
+    print("\n[3/5] Loading ML model...")
+    from application.model.model_loader import ModelLoader
+    from application.model.predictor import Predictor
+    from api_runtime import APIRuntime
+
+    model_loader = ModelLoader()
+    loaded_model = _select_loaded_model(
+        model_loader,
+        time_model_name=time_model_name,
+        crowd_model_name=crowd_model_name,
+    )
+    predictor = Predictor(
+        loaded_model=loaded_model,
+        observatory=context.observatory,
+        persistence_gateway=context.persistence_gateway,
+    )
+
+    runtime = APIRuntime(
+        context=context,
+        predictor=predictor,
+        available_models=_model_cards(model_loader.discover_models()),
+        loaded_model_name=loaded_model.name,
+    )
+
+    print("\n[4/5] Starting data collection services...")
+    wire_state_interface(
+        context,
+        predictor=predictor,
+        bus_type_predictor=runtime.bus_type_predictor,
+        loaded_model_name=loaded_model.name,
+    )
+    start_collection_services(context)
+    return runtime
+
+
+def _ensure_canonical_map():
+    """Build the canonical static map required by the predictor when absent."""
+    if (PARQUET_DIR / "stop_route_map.parquet").exists():
+        return
+
+    print("Generating stop_route_map.parquet...")
+    from prepare_dataset import build_canonical_shape_map
+
+    build_canonical_shape_map()
+
+
+def _model_cards(candidates) -> list[dict[str, str]]:
+    """Return API-facing model cards without exposing ModelLoader types."""
+    return [
+        {
+            "filename": candidate.name,
+            "path": str(candidate.time_path),
+        }
+        for candidate in candidates
+    ]
+
+
+def _select_loaded_model(
+    loader,
+    time_model_name: str | None,
+    crowd_model_name: str | None,
+):
+    """Select and load one complete TIME+CROWD model pair."""
+    available = loader.discover_models()
+    for time_filename, missing in loader.find_incomplete_models():
+        print(f"[WARN] Skipping {time_filename}: missing {', '.join(missing)}")
+
+    if not available:
+        raise RuntimeError(
+            "No trained model pairs found in application/model/. Expected "
+            "bus_model_TIME_*.pth + bus_model_CROWD_*.pth + hyperparameters_DUAL_*.json"
+        )
+
+    cli_time = time_model_name or os.environ.get("TIME_MODEL_NAME")
+    cli_crowd = crowd_model_name or os.environ.get("CROWD_MODEL_NAME")
+    if cli_time and cli_crowd:
+        return loader.load_pair(cli_time, cli_crowd)
+    if cli_time:
+        exp_id = cli_time.replace("bus_model_TIME_", "").replace(".pth", "")
+        return loader.load_by_exp_id(exp_id)
+
+    return _interactive_model_selection(loader, available)
+
+
+def _interactive_model_selection(loader, available_models):
+    """Prompt for a model pair when the CLI did not specify one."""
+    print("\n" + "=" * 50)
+    print("ATAC Bus Delay Prediction - Model Selection")
+    print("=" * 50)
+    print("\nAvailable model pairs:")
+    for idx, model in enumerate(available_models):
+        print(f"  [{idx}] {model.name}")
+        print(f"       TIME:  {model.time_filename}")
+        print(f"       CROWD: {model.crowd_filename}")
+
+    while True:
+        try:
+            choice_idx = int(input("\nSelect model number: ").strip())
+            if 0 <= choice_idx < len(available_models):
+                break
+            print(f"Please enter a number between 0 and {len(available_models) - 1}")
+        except (ValueError, EOFError):
+            print("Invalid input. Please enter a number.")
+
+    return loader.load_by_exp_id(available_models[choice_idx].name)
 
 
 def start_collection_services(context: ApplicationContext):
@@ -193,29 +322,33 @@ def stop_collection_services(join: bool = False):
         services.join_core_threads(timeout=5)
 
 
-def save_completed_diaries(observatory):
-    """Final diary save on exit."""
+def save_completed_measurements(observatory, persistence_gateway=None):
+    """Final completed-measurement save on exit."""
     if observatory is None:
         return
-    diaries = observatory.get_completed_diaries()
-    if diaries:
-        save_diaries_incremental(diaries)
+    measurements = observatory.get_completed_measurements()
+    if measurements:
+        gateway = persistence_gateway or get_persistence_gateway()
+        gateway.save_completed_measurements(measurements)
     logging.info("Goodbye.")
 
 
 def shutdown_runtime(
     context: ApplicationContext | None = None,
-    save_diaries: bool = True,
+    save_measurements: bool = True,
     join_services: bool = False,
 ):
-    """Stop services, save diaries and close database resources."""
-    from persistence.database import shutdown_database
-
+    """Stop services, save completed measurements and close database resources."""
     stop_collection_services(join=join_services)
+    gateway = (
+        context.persistence_gateway
+        if context is not None and context.persistence_gateway is not None
+        else get_persistence_gateway()
+    )
 
-    if save_diaries:
-        observatory = context.observatory if context is not None else data.OBSERVATORY
-        save_completed_diaries(observatory)
+    if save_measurements:
+        observatory = context.observatory if context is not None else None
+        save_completed_measurements(observatory, persistence_gateway=gateway)
 
     logging.info("Closing database connections...")
-    shutdown_database()
+    gateway.shutdown_database()

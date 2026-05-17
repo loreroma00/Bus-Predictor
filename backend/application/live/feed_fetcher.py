@@ -97,9 +97,6 @@ class LiveFeedFetcher:
             merged = df_vp
 
         return merged
-
-    fetch_dataframe = fetch_frame
-
     def _records_from_frame(self, frame: pd.DataFrame) -> list[LiveFeedRecord]:
         """Convert the merged feed DataFrame into LiveFeedRecord objects."""
         if frame.empty:

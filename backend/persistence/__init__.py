@@ -12,7 +12,6 @@ from .strategy import (
     get_available_strategies,
     saving_strategy,
     saving_parquet,
-    saving_database,
     shutdown_db_loop,
 )
 
@@ -30,6 +29,7 @@ from .diaries import (
 )
 
 from .cache import log_uptime, save_pickle, load_pickle
+from .gateway import PersistenceFacade, create_persistence_gateway
 
 from .database import (
     write_historical,
@@ -62,7 +62,6 @@ __all__ = [
     "get_available_strategies",
     "saving_strategy",
     "saving_parquet",
-    "saving_database",
     "shutdown_db_loop",
     # Diaries module
     "DIARIES_PATH",
@@ -79,6 +78,8 @@ __all__ = [
     "log_uptime",
     "save_pickle",
     "load_pickle",
+    "PersistenceFacade",
+    "create_persistence_gateway",
     # Ledger DB module
     "write_historical",
     "write_predicted",

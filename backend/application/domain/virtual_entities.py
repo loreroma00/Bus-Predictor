@@ -18,6 +18,7 @@ from .static_data_fetcher import StaticDataFetcher
 from .cities import City
 from .live_data import GPSData, LiveFeedRecord, LiveTrip, Update
 from .fleet_loader import load_fleet
+from application.services.persistence_gateway import get_persistence_gateway
 
 if TYPE_CHECKING:
     from .live_data import Schedule
@@ -131,12 +132,18 @@ StopArrival = MeasurementRecord
 class HistoricalLedger:
     """Append-only record of per-measurement observations owned by Observatory."""
 
-    def __init__(self, connection_string: str = None, table_name: str = None):
+    def __init__(
+        self,
+        connection_string: str = None,
+        table_name: str = None,
+        persistence_gateway=None,
+    ):
         """Bind ledger state to its DB destination configuration."""
         from config import Ledger
 
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.HISTORICAL_TABLE
+        self._persistence = persistence_gateway or get_persistence_gateway()
         self._today_by_trip: Dict[str, list[dict]] = {}
         self._pending_db_rows: list[dict] = []
 
@@ -192,9 +199,11 @@ class HistoricalLedger:
         """Push pending measurement rows to the database layer."""
         if not self._pending_db_rows:
             return
-        from persistence.database import write_historical
-
-        write_historical(self._conn_str, self._table, self._pending_db_rows)
+        self._persistence.write_historical_records(
+            self._conn_str,
+            self._table,
+            self._pending_db_rows,
+        )
         self._pending_db_rows = []
 
     def get_trip_measurements(self, trip_id: str) -> list[dict]:
@@ -213,9 +222,7 @@ class HistoricalLedger:
         date_end: float = None,
     ) -> pd.DataFrame:
         """Query historical measurements through the DB layer."""
-        from persistence.database import read_historical
-
-        return read_historical(
+        return self._persistence.read_historical_records(
             self._conn_str,
             self._table,
             trip_id=trip_id,
@@ -329,6 +336,7 @@ class Observatory:
         cache_strategy: "CacheStrategy" = None,
         geocoding_strategy: "GeocodingStrategy" = None,
         config: dict = None,
+        persistence_gateway=None,
     ):
         """
         Initialize Observatory with optional injected dependencies.
@@ -343,6 +351,7 @@ class Observatory:
         # Injected dependencies
         self._cache = cache_strategy
         self._geocoding = geocoding_strategy
+        self._persistence = persistence_gateway or get_persistence_gateway()
         self.config = config or {}
 
         # Internal components (no external dependencies)
@@ -353,7 +362,9 @@ class Observatory:
         # ---- Ledgers ----
         self.topology: TopologyLedger = None
         self.schedule_ledger: ScheduleLedger = None
-        self.historical: HistoricalLedger = HistoricalLedger()
+        self.historical: HistoricalLedger = HistoricalLedger(
+            persistence_gateway=self._persistence,
+        )
 
         # Cache metadata
         self.current_md5: str = None
@@ -684,6 +695,7 @@ class Observatory:
             id=vehicle_id,
             label=display_id,
             vehicle_type=vehicle_type,
+            persistence_gateway=self._persistence,
         )
         self.vehicles[vehicle_id] = vehicle
         return vehicle

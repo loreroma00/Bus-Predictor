@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import joblib
 
+from application.services.persistence_gateway import get_persistence_gateway
+
 try:
     from .model_loader import LoadedModel, ModelLoader
 except ImportError:  # pragma: no cover - keeps script-style imports working
@@ -52,12 +54,18 @@ class StopPredictionRecord:
 class PredictedLedger:
     """Append-only record of model predictions owned by Predictor."""
 
-    def __init__(self, connection_string: str = None, table_name: str = None):
+    def __init__(
+        self,
+        connection_string: str = None,
+        table_name: str = None,
+        persistence_gateway=None,
+    ):
         """Bind ledger state to its DB destination configuration."""
         from config import Ledger
 
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.PREDICTED_TABLE
+        self._persistence = persistence_gateway or get_persistence_gateway()
         self._today_trips: list[dict] = []
         self._today_stops: Dict[str, list[dict]] = {}
         self._today_trip_keys: set = set()
@@ -141,9 +149,11 @@ class PredictedLedger:
         """Push pending prediction rows to the database layer."""
         if not self._pending_db_rows:
             return
-        from persistence.database import write_predicted
-
-        write_predicted(self._conn_str, self._table, self._pending_db_rows)
+        self._persistence.write_prediction_records(
+            self._conn_str,
+            self._table,
+            self._pending_db_rows,
+        )
         self._pending_db_rows = []
 
     def get_today_predictions(self) -> list[dict]:
@@ -166,10 +176,8 @@ class PredictedLedger:
         trip_date: str = None,
     ) -> pd.DataFrame:
         """Query predicted arrivals for a route/date through the DB layer."""
-        from persistence.database import read_predicted
-
         trip_date_iso = _dd_mm_yyyy_to_iso(trip_date) if trip_date else None
-        return read_predicted(
+        return self._persistence.read_prediction_records(
             self._conn_str,
             self._table,
             route_id=route_id,
@@ -184,9 +192,7 @@ class PredictedLedger:
         scheduled_start: str,
     ) -> pd.DataFrame:
         """Return all stop predictions for one specific trip."""
-        from persistence.database import read_predicted
-
-        return read_predicted(
+        return self._persistence.read_prediction_records(
             self._conn_str,
             self._table,
             route_id=route_id,
@@ -227,6 +233,7 @@ class Predictor:
         crowd_weights_path: str | None = None,
         observatory: Any = None,
         prediction_ledger: Any = None,
+        persistence_gateway: Any = None,
         route_encoding_path: Optional[str] = None,
         h3_encoding_path: Optional[str] = None,
         static_map_path: Optional[str] = None,
@@ -247,7 +254,10 @@ class Predictor:
         self.config = loaded_model.config
         self.max_stops = loaded_model.max_stops
         self.observatory = observatory
-        self.predicted = prediction_ledger or PredictedLedger()
+        self.persistence = persistence_gateway or get_persistence_gateway()
+        self.predicted = prediction_ledger or PredictedLedger(
+            persistence_gateway=self.persistence,
+        )
 
         route_path = Path(route_encoding_path) if route_encoding_path else ROUTE_ENCODING_PATH
         route_encoder_pkl_path = ROUTE_ENCODER_PKL_PATH

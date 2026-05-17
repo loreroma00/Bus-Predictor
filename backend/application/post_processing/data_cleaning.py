@@ -4,7 +4,6 @@ Lightweight post-processing pipelines for measurements.
 Provides functions to:
 - Drop structurally invalid measurements
 - Remove exact duplicate measurements
-- Vectorize measurements
 """
 
 import logging
@@ -13,13 +12,12 @@ import csv
 import bisect
 import os
 import math
-from typing import TYPE_CHECKING, Union, overload
+from typing import TYPE_CHECKING
 from types import SimpleNamespace
 
 from ..domain.live_data import GPSData
 from ..domain.weather import Weather
 from application.domain.interfaces import Pipeline
-from . import vectorization
 
 if TYPE_CHECKING:
     from ..domain.live_data import LiveTrip, Measurement
@@ -28,25 +26,25 @@ logger = logging.getLogger(__name__)
 
 
 class PredictionPipeline(Pipeline):
-    """Pipeline for fast integrity cleaning and prediction vectorization."""
+    """Pipeline for fast integrity cleaning of prediction measurements."""
 
     def __init__(
         self,
-        diary: "Diary",
+        live_trip: "LiveTrip",
         topology=None,
         served_ratio: float = 1.0,
         config: dict = None,
     ):
         """
-        Initialize pipeline with diary and static data.
+        Initialize pipeline with one completed live trip and static data.
 
         Args:
-            diary: LiveTrip-like object containing measurements
+            live_trip: LiveTrip object containing measurements
             topology: TopologyLedger with routes, trips, shapes
             served_ratio: Ratio from scan_trip_adherence
             config: Configuration dictionary
         """
-        self.diary = diary
+        self.live_trip = live_trip
         self.topology = topology
         self.served_ratio = served_ratio
 
@@ -57,40 +55,36 @@ class PredictionPipeline(Pipeline):
 
         self.uptime_timestamps = _load_uptime_data("uptime.csv")
 
-    def clean(
-        self,
-    ) -> list[
-        tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-    ]:
+    def clean(self) -> list["Measurement"]:
         """
-        Clean measurements with universal checks and vectorize them.
+        Clean measurements with universal integrity checks.
 
         Returns:
-            List of (Vector, Label, measurement_time) tuples for DB insert.
+            Cleaned measurements, still expressed as domain objects.
         """
-        if not self.diary or not self.diary.measurements:
+        if not self.live_trip or not self.live_trip.measurements:
             return []
 
         logger.info(
-            f"🚀 Starting pipeline for diary {self.diary.trip_id} "
-            f"with {len(self.diary.measurements)} measurements"
+            f"🚀 Starting pipeline for live trip {self.live_trip.trip_id} "
+            f"with {len(self.live_trip.measurements)} measurements"
         )
 
         if self.served_ratio < 1.0 and self.uptime_timestamps:
-            first_ts = self.diary.measurements[0].measurement_time
+            first_ts = self.live_trip.measurements[0].measurement_time
             if not _is_uptime_sufficient(
                 first_ts,
                 self.uptime_timestamps,
                 window_seconds=self.uptime_lookback_seconds,
             ):
                 logger.warning(
-                    f"⚠️ Discarding diary {self.diary.trip_id}: served_ratio {self.served_ratio:.2f} "
+                    f"⚠️ Discarding live trip {self.live_trip.trip_id}: served_ratio {self.served_ratio:.2f} "
                     f"but insufficient uptime coverage during the lookback window ({self.uptime_lookback_seconds}s)."
                 )
                 return []
 
-        trip_key = str(self.diary.trip_id)
-        measurements = {trip_key: self.diary.measurements}
+        trip_key = str(self.live_trip.trip_id)
+        measurements = {trip_key: self.live_trip.measurements}
         cleaned = _clean_measurements(
             measurements,
             uptime_timestamps=self.uptime_timestamps,
@@ -99,176 +93,65 @@ class PredictionPipeline(Pipeline):
         if not cleaned or not cleaned.get(trip_key):
             return []
 
-        vectors = _vectorize(cleaned, self.topology, self.served_ratio)
-
-        if _has_vector_integrity_errors(vectors):
-            logger.info(f"🚫 Trip {trip_key} discarded: Invalid vector data detected")
-            return []
-
-        return vectors
-
-
-class LenientPipeline(PredictionPipeline):
-    """
-    Backward-compatible alias for the now-lightweight prediction pipeline.
-    """
+        return cleaned.get(trip_key, [])
 
 
 class TrafficPipeline(Pipeline):
-    """Pipeline for traffic analysis vectorization."""
+    """Pipeline for traffic measurement integrity cleaning."""
 
     def __init__(
         self,
-        diary: "Diary",
-        config: dict = None,
+        live_trip: "LiveTrip",
     ):
-        """Bind the diary. Config is accepted for interface compatibility."""
-        self.diary = diary
+        """Bind the completed live trip."""
+        self.live_trip = live_trip
 
-    def clean(
-        self,
-    ) -> list[tuple[vectorization.TrafficVector, vectorization.TrafficLabel, float]]:
-        """
-        Clean diary measurements and vectorize them for traffic analysis.
-        """
-        if not self.diary or not self.diary.measurements:
+    def clean(self) -> list["Measurement"]:
+        """Clean live-trip measurements for traffic analysis."""
+        if not self.live_trip or not self.live_trip.measurements:
             return []
 
-        logger.info(f"🚗 Starting traffic pipeline for diary {self.diary.trip_id}")
+        logger.info(f"🚗 Starting traffic pipeline for live trip {self.live_trip.trip_id}")
 
-        measurements = {str(self.diary.trip_id): self.diary.measurements}
+        measurements = {str(self.live_trip.trip_id): self.live_trip.measurements}
         cleaned = _clean_measurements(
             measurements,
             uptime_timestamps=[],
             served_ratio=1.0,
         )
-        if not cleaned:
-            return []
-        vectors = _vectorize_traffic(cleaned)
-
-        return vectors
+        return cleaned.get(str(self.live_trip.trip_id), [])
 
 
 class VehiclePipeline(Pipeline):
-    """Pipeline for vehicle classification vectorization."""
+    """Pipeline for vehicle measurement integrity cleaning."""
 
     def __init__(
         self,
-        diary: "Diary",
+        live_trip: "LiveTrip",
         topology=None,
-        config: dict = None,
         vehicle_type_name: str = "Unknown",
     ):
-        """Bind the diary, topology, vehicle-type label, and cleaning thresholds."""
-        self.diary = diary
+        """Bind the live trip, topology, vehicle-type label, and cleaning thresholds."""
+        self.live_trip = live_trip
         self.topology = topology
         self.vehicle_type_name = vehicle_type_name
 
         self.uptime_timestamps = _load_uptime_data("uptime.csv")
 
-    def clean(
-        self,
-    ) -> list[tuple[vectorization.VehicleVector, vectorization.VehicleLabel, float]]:
-        """
-        Clean diary measurements and vectorize the first one for vehicle classification.
-        """
-        if not self.diary or not self.diary.measurements:
+    def clean(self) -> list["Measurement"]:
+        """Clean live-trip measurements for vehicle history."""
+        if not self.live_trip or not self.live_trip.measurements:
             return []
 
-        logger.info(f"🚌 Starting vehicle pipeline for diary {self.diary.trip_id}")
+        logger.info(f"🚌 Starting vehicle pipeline for live trip {self.live_trip.trip_id}")
 
-        measurements = {str(self.diary.trip_id): self.diary.measurements}
+        measurements = {str(self.live_trip.trip_id): self.live_trip.measurements}
         cleaned = _clean_measurements(
             measurements,
             uptime_timestamps=self.uptime_timestamps,
             served_ratio=1.0,
         )
-        if not cleaned:
-            return []
-        vectors = _vectorize_vehicle(cleaned, self.topology, self.vehicle_type_name)
-
-        return vectors
-
-
-def _vectorize_vehicle(
-    data: Union["Diary", dict[str, list["Measurement"]]],
-    topology=None,
-    vehicle_type_name: str = "Unknown",
-) -> list[tuple[vectorization.VehicleVector, vectorization.VehicleLabel, float]]:
-    """
-    Vectorize first measurement using VehicleVectorizer.
-    """
-    if vehicle_type_name == "Unknown":
-        logger.warning("🚌 Skipping vehicle vectorization: Vehicle type is Unknown")
-        return []
-
-    filtered_measurements: dict[str, list["Measurement"]] = {}
-    if hasattr(data, "trip_id") and hasattr(data, "measurements"):
-        filtered_measurements = {str(data.trip_id): data.measurements}
-    else:
-        filtered_measurements = data
-
-    results: list[
-        tuple[vectorization.VehicleVector, vectorization.VehicleLabel, float]
-    ] = []
-
-    trips = topology.trips if topology and hasattr(topology, "trips") else {}
-
-    for trip_id, trip_measurements in filtered_measurements.items():
-        if not trip_measurements:
-            continue
-            
-        trip = trips.get(trip_id)
-        if not trip:
-            logger.warning(f"⚠️ Trip {trip_id} skipped: Not found in topology")
-            continue
-
-        # Use the first measurement
-        m = trip_measurements[0]
-
-        try:
-            vectorizer = vectorization.VehicleVectorizer(
-                measurement=m,
-                trip=trip,
-                vehicle_type_name=vehicle_type_name
-            )
-            vector, label = vectorizer.vectorize()
-            results.append((vector, label, m.measurement_time))
-        except Exception:
-            logger.exception(f"Failed to vectorize vehicle measurement {m.id}")
-            continue
-
-    return results
-
-
-
-def _vectorize_traffic(
-    data: Union["Diary", dict[str, list["Measurement"]]],
-) -> list[tuple[vectorization.TrafficVector, vectorization.TrafficLabel, float]]:
-    """
-    Vectorize measurements using TrafficVectorizer.
-    """
-    filtered_measurements: dict[str, list["Measurement"]] = {}
-    if hasattr(data, "trip_id") and hasattr(data, "measurements"):
-        filtered_measurements = {str(data.trip_id): data.measurements}
-    else:
-        filtered_measurements = data
-
-    results: list[
-        tuple[vectorization.TrafficVector, vectorization.TrafficLabel, float]
-    ] = []
-
-    for _, trip_measurements in filtered_measurements.items():
-        for m in trip_measurements:
-            try:
-                vectorizer = vectorization.TrafficVectorizer(measurement=m)
-                vector, label = vectorizer.vectorize()
-                results.append((vector, label, m.measurement_time))
-            except Exception:
-                logger.exception(f"Failed to vectorize traffic measurement {m.id}")
-                continue
-
-    return results
+        return cleaned.get(str(self.live_trip.trip_id), [])
 
 
 def _load_uptime_data(filepath: str) -> list[int]:
@@ -345,11 +228,11 @@ def _is_uptime_sufficient(
 
 
 def _clean_measurements(
-    data: Union["Diary", dict[str, list["Measurement"]]],
+    data: dict[str, list["Measurement"]],
     uptime_timestamps: list[int],
     served_ratio: float,
     duplicate_keys: list[str] = None,
-) -> Union["Diary", dict[str, list["Measurement"]]]:
+) -> dict[str, list["Measurement"]]:
     """Apply the lightweight universal cleaning rules used by all pipelines."""
     cleaned = _check_data_integrity(data, uptime_timestamps, served_ratio)
     return _check_for_duplicates(cleaned, keys=duplicate_keys)
@@ -365,33 +248,17 @@ def _is_finite_number(value) -> bool:
         return False
 
 
-@overload
-def _check_data_integrity(
-    data: "Diary", uptime_timestamps: list[int], served_ratio: float
-) -> "Diary":
-    """Diary overload — see implementation below."""
-    ...
-@overload
 def _check_data_integrity(
     data: dict[str, list["Measurement"]],
     uptime_timestamps: list[int],
     served_ratio: float,
 ) -> dict[str, list["Measurement"]]:
-    """Dict-of-measurements overload — see implementation below."""
-    ...
-
-
-def _check_data_integrity(
-    data: Union["Diary", dict[str, list["Measurement"]]],
-    uptime_timestamps: list[int],
-    served_ratio: float,
-) -> Union["Diary", dict[str, list["Measurement"]]]:
     """
     Discard measurements with invalid structural data or offline timestamps.
     """
 
     def is_valid(m: "Measurement") -> bool:
-        """Return True if a measurement has the fields required for vectorization."""
+        """Return True if a measurement has the fields required for persistence."""
         measurement_time = getattr(m, "measurement_time", None)
         if not _is_finite_number(measurement_time):
             return False
@@ -425,24 +292,10 @@ def _check_data_integrity(
 
         return True
 
-    # Handle Diary
-    if hasattr(data, "trip_id") and hasattr(data, "measurements"):
-        diary: "Diary" = data
-        initial = len(diary.measurements)
-        diary.measurements = [m for m in diary.measurements if is_valid(m)]
-        dropped = initial - len(diary.measurements)
-        if dropped > 0:
-            logger.debug(
-                f"🛡️ Integrity Check: Dropped {dropped} measurements from diary {diary.trip_id}"
-            )
-        return diary
-
-    # Handle Dict
-    measurements_dict: dict[str, list["Measurement"]] = data
     cleaned_dict: dict[str, list["Measurement"]] = {}
 
     total_dropped = 0
-    for trip_id, measurements in measurements_dict.items():
+    for trip_id, measurements in data.items():
         valid_m = [m for m in measurements if is_valid(m)]
         if valid_m:
             cleaned_dict[trip_id] = valid_m
@@ -561,21 +414,9 @@ def _get_attr_path(obj, path):
         return None
 
 
-@overload
-def _check_for_duplicates(data: "Diary", keys: list[str] = None) -> "Diary":
-    """Diary overload — see implementation below."""
-    ...
-@overload
 def _check_for_duplicates(
     data: dict[str, list["Measurement"]], keys: list[str] = None
 ) -> dict[str, list["Measurement"]]:
-    """Dict-of-measurements overload — see implementation below."""
-    ...
-
-
-def _check_for_duplicates(
-    data: Union["Diary", dict[str, list["Measurement"]]], keys: list[str] = None
-) -> Union["Diary", dict[str, list["Measurement"]]]:
     """
     Remove duplicate measurements based on provided keys.
     Default keys describe a repeated ping, not a vehicle legitimately standing still.
@@ -597,29 +438,12 @@ def _check_for_duplicates(
                 unique.append(m)
         return unique
 
-    # Handle Diary
-    if hasattr(data, "trip_id") and hasattr(data, "measurements"):
-        diary: "Diary" = data
-        initial_count = len(diary.measurements)
-        diary.measurements = process_list(diary.measurements)
-
-        removed = initial_count - len(diary.measurements)
-        if removed > 0:
-            pct = (removed / initial_count) * 100 if initial_count > 0 else 0
-            logger.debug(
-                f"🗑️ Removed {removed} duplicate measurements ({pct:.1f}%) "
-                f"from diary {diary.trip_id} using keys {keys}"
-            )
-        return diary
-
-    # Handle Dict
-    measurements_dict: dict[str, list["Measurement"]] = data
     cleaned_dict: dict[str, list["Measurement"]] = {}
 
     total_removed = 0
     total_initial = 0
 
-    for trip_id, measurements in measurements_dict.items():
+    for trip_id, measurements in data.items():
         total_initial += len(measurements)
         cleaned_list = process_list(measurements)
         cleaned_dict[trip_id] = cleaned_list
@@ -632,100 +456,3 @@ def _check_for_duplicates(
         )
 
     return cleaned_dict
-
-
-@overload
-def _vectorize(
-    data: "Diary", topology=None, served_ratio: float = 1.0
-) -> list[
-    tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-]:
-    """Diary overload — see implementation below."""
-    ...
-@overload
-def _vectorize(
-    data: dict[str, list["Measurement"]], topology=None, served_ratio: float = 1.0
-) -> list[
-    tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-]:
-    """Dict-of-measurements overload — see implementation below."""
-    ...
-
-
-def _vectorize(
-    data: Union["Diary", dict[str, list["Measurement"]]],
-    topology=None,
-    served_ratio: float = 1.0,
-) -> list[tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]]:
-    """
-    Vectorize all measurements using the Vectorizer.
-    """
-    # Normalize input to dict for unified processing
-    filtered_measurements: dict[str, list["Measurement"]] = {}
-    if hasattr(data, "trip_id") and hasattr(data, "measurements"):
-        filtered_measurements = {str(data.trip_id): data.measurements}
-    else:
-        filtered_measurements = data
-
-    results: list[
-        tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-    ] = []
-
-    if not topology:
-        logger.warning("⚠️ No topology provided, cannot vectorize")
-        return results
-
-    trips = topology.trips
-
-    for trip_id, trip_measurements in filtered_measurements.items():
-        trip = trips.get(trip_id)
-        if not trip:
-            logger.warning(f"⚠️ Trip {trip_id} skipped: Not found in topology")
-            continue
-
-        route = trip.route if hasattr(trip, "route") else None
-        if not route:
-            logger.warning(f"⚠️ Trip {trip_id} skipped: Route {trip.route_id} not found")
-            continue
-
-        shape = trip.shape if hasattr(trip, "shape") else None
-        if not shape:
-            logger.warning(f"⚠️ Trip {trip_id} skipped: Shape not found on trip object")
-            continue
-
-        for m in trip_measurements:
-            # Skip if bus info is missing
-            if getattr(m, "bus_type", 0) == 0:
-                # logger.debug(f"Skipping vectorization for measurement {m.id}: Unknown bus type")
-                continue
-
-            try:
-                vectorizer = vectorization.PredictionVectorizer(
-                    measurement=m,
-                    route=route,
-                    shape=shape,
-                    trip=trip,
-                    served_ratio=served_ratio,
-                )
-                vector, label = vectorizer.vectorize()
-                results.append((vector, label, m.measurement_time))
-            except Exception:
-                logger.exception(f"Failed to vectorize measurement {m.id}")
-                continue
-
-    logger.info(f"✅ Vectorized {len(results)} measurements")
-    return results
-
-
-def _has_vector_integrity_errors(
-    vectors: list[
-        tuple[vectorization.PredictionVector, vectorization.PredictionLabel, float]
-    ],
-) -> bool:
-    """Return True when vectorization produced known invalid sentinel values."""
-    for vector, label, _ in vectors:
-        if getattr(vector, "schedule_adherence", 0.0) == -1000.0:
-            return True
-        if getattr(label, "occupancy_status", 0) == 7:
-            return True
-    return False

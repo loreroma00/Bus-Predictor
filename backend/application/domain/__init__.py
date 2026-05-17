@@ -1,5 +1,4 @@
-# Domain Package
-# Re-export all public symbols for backward compatibility
+"""Domain package public API."""
 
 from .internal_events import (
     ConsoleEventBus,

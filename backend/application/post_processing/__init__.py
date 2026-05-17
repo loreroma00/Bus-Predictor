@@ -1,10 +1,9 @@
-# Application Post-Processing Package
-# normalize_diary.py is deprecated - import directly from vectorization module
+"""Post-processing package public API."""
 
-from .vectorization import Vectorizer, Vector, DayType
+from .data_cleaning import PredictionPipeline, TrafficPipeline, VehiclePipeline
 
 __all__ = [
-    "Vectorizer",
-    "Vector",
-    "DayType",
+    "PredictionPipeline",
+    "TrafficPipeline",
+    "VehiclePipeline",
 ]

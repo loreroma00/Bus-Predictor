@@ -2,7 +2,7 @@
 
 ``Vehicle`` is static fleet identity and lives in ``static_data``. ``LiveTrip``
 is the runtime aggregate root: it owns the moving state and the measurement
-list that used to be represented by an observer plus diary pair.
+list for the trip currently present in GTFS-RT.
 """
 
 from __future__ import annotations

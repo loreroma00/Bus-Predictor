@@ -354,7 +354,7 @@ def _register_callbacks(app):
             return dbc.Row([
                 dbc.Col(_stat_card("Active", stats["active_buses"], _GREEN), width="auto"),
                 dbc.Col(_stat_card("Deposit", stats["deposit_buses"], _ORANGE), width="auto"),
-                dbc.Col(_stat_card("Observers", stats["observer_count"], _ACCENT_BLUE), width="auto"),
+                dbc.Col(_stat_card("LiveTrips", stats["live_trip_count"], _ACCENT_BLUE), width="auto"),
                 dbc.Col(_stat_card("Hexagons", traffic["with_traffic"], _ACCENT), width="auto"),
             ], className="g-2")
         except Exception as e:

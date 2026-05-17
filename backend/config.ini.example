@@ -7,14 +7,8 @@ frontend_url = http://localhost:3000
 host = 0.0.0.0
 port = 8000
 
-[prediction]
-# Configuration for the Prediction API model
-enabled = true
-vector_db_connection = postgresql://user:password@localhost:1515/transit
-
 [ledger]
 # Database-backed ledgers (TimescaleDB hypertables)
-# db_connection defaults to prediction.vector_db_connection if omitted
 db_connection = postgresql://user:password@localhost:1515/transit
 historical_table = historical_measurements
 predicted_table = predicted_arrivals

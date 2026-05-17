@@ -26,15 +26,15 @@ def main(debug_mode: bool = False, lenient_pipeline: bool = False):
         start_collection_services(context)
 
         # Start Interactive Console (Main Thread)
-        console.run_console_loop()
+        console.run_console_loop(context.shutdown_event)
     except KeyboardInterrupt:
-        logging.info("\nStopping Observer (User Interrupt)...")
+        logging.info("\nStopping services (user interrupt)...")
     except Exception as e:
         logging.exception(f"Unexpected Error: {e}")
         logging.error("Attempting failsafe save...")
     finally:
-        logging.info("Archiving Diaries...")
-        shutdown_runtime(context, save_diaries=True, join_services=True)
+        logging.info("Archiving completed measurements...")
+        shutdown_runtime(context, save_measurements=True, join_services=True)
 
 
 if __name__ == "__main__":

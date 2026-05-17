@@ -5,10 +5,7 @@ Commands are registered with their dependencies at startup.
 """
 
 import logging
-import traceback
-from application.live import data
 from application import domain
-from persistence import writeParquet
 from . import commands
 
 # ============================================================
@@ -28,14 +25,14 @@ def register_commands(observatory, predictor=None, bus_type_predictor=None):
         # Commands that need observatory
         "debug traffic": commands.debug_traffic(observatory),
         "print hex": commands.print_hex(observatory),
-        "print diary": commands.print_diary(observatory),
+        "print live trip": commands.print_live_trip(observatory),
         "fetch data": commands.fetch_data(observatory, domain.to_readable_time),
-        "print diaries vehicle": commands.print_all_diaries_vehicle(observatory),
-        "print diaries": commands.print_all_diaries(observatory),
+        "print vehicle trips": commands.print_vehicle_live_trips(observatory),
+        "print live trips": commands.print_all_live_trips(observatory),
         # Commands that emit events (no deps)
         "quit": commands.command_quit(),
-        "stop observers": commands.stop_observers(),
-        "start observers": commands.start_observers(),
+        "stop services": commands.stop_services(),
+        "start services": commands.start_services(),
         "stop validation": commands.stop_validation(),
         "validation status": commands.validation_status(),
         "help": commands.command_help(),
@@ -47,21 +44,15 @@ def register_commands(observatory, predictor=None, bus_type_predictor=None):
             predictor, observatory, bus_type_predictor
         ),
         "validate": commands.validate_date(predictor, observatory),
-        # Complex commands
-        "normalize diaries": commands.normalize_diaries(
-            normalizer_fn=None,  # Uses internal import
-            observatory_factory=lambda: domain.Observatory(),
-            parquet_writer=writeParquet,
-        ),
     }
 
 
-def run_console_loop():
+def run_console_loop(shutdown_event=None):
     """Main thread function for user interaction."""
     logging.info("\n--- INTERACTIVE CONSOLE ---")
-    logging.info("Commands: 'print diary <trip_id>', 'fetch data <trip_id>', 'quit'")
+    logging.info("Commands: 'print live trip <trip_id>', 'fetch data <trip_id>', 'quit'")
 
-    while not data.SHUTDOWN_EVENT.is_set():
+    while shutdown_event is None or not shutdown_event.is_set():
         try:
             cmd = input("Command> ").strip()
             if cmd == "":
@@ -81,7 +72,8 @@ def run_console_loop():
                 logging.warning("Unknown command. Type 'help' for available commands.")
 
         except EOFError:
-            data.SHUTDOWN_EVENT.set()
+            if shutdown_event is not None:
+                shutdown_event.set()
             break
         except Exception as e:
             logging.error(f"Console Error: {e}")

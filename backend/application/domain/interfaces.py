@@ -28,34 +28,11 @@ class EventBus(Protocol):
 
 
 @runtime_checkable
-class Vector(Protocol):
-    """Marker interface for Feature Vectors."""
-    id: str
-    ...
-
-
-@runtime_checkable
-class LabelVector(Protocol):
-    """Marker interface for Target/Label Vectors."""
-    id: str
-    ...
-
-
-@runtime_checkable
-class Vectorizer(Protocol):
-    """Interface for converting measurements to vectors."""
-    
-    def vectorize(self) -> tuple[Vector, LabelVector]:
-        """Transform a measurement into a feature vector and a label vector."""
-        ...
-
-
-@runtime_checkable
 class Pipeline(Protocol):
-    """Interface for data cleaning and processing pipelines."""
-    
-    def clean(self) -> List[tuple[Vector, LabelVector, float]]:
-        """Run the pipeline and return (vector, label, timestamp) tuples."""
+    """Interface for data cleaning pipelines."""
+
+    def clean(self) -> List[Any]:
+        """Run the pipeline and return cleaned domain objects."""
         ...
 
 

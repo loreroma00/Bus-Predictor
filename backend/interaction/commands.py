@@ -7,10 +7,9 @@ Control flow uses events (shutdown, start, stop).
 
 import logging
 from abc import ABC, abstractmethod
-import pandas as pd
 import time
 
-from .events import (
+from application.domain.internal_events import (
     ServicesStartEvent,
     ServicesStopEvent,
     ShutdownRequestedEvent,
@@ -148,9 +147,9 @@ class debug_traffic(Command):
         )
 
 
-class print_diary(Command):
-    """Print diary."""
-    command_name = "print diary"
+class print_live_trip(Command):
+    """Print one live trip."""
+    command_name = "print live trip"
 
     def __init__(self, observatory: "Observatory"):
         """Initialize the instance."""
@@ -215,7 +214,7 @@ class print_diary(Command):
     @staticmethod
     def help():
         """Help."""
-        logging.info("print diary <trip_id>: Show recorded stops for a specific trip")
+        logging.info("print live trip <trip_id>: Show recorded stops for a specific trip")
 
 
 class fetch_data(
@@ -277,7 +276,7 @@ class fetch_data(
                 )
 
         if not live_trip and not update:
-            logging.warning("No active diary or live data found for this trip.")
+            logging.warning("No active live trip or update found for this trip.")
 
     @staticmethod
     def help():
@@ -285,9 +284,9 @@ class fetch_data(
         logging.info("fetch data <trip_id>: Show static schedule + live vehicle status")
 
 
-class print_all_diaries(Command):
-    """Print all diaries."""
-    command_name = "print diaries"
+class print_all_live_trips(Command):
+    """Print all active live trips."""
+    command_name = "print live trips"
 
     def __init__(self, observatory):
         """Initialize the instance."""
@@ -304,7 +303,7 @@ class print_all_diaries(Command):
     @staticmethod
     def help():
         """Help."""
-        logging.info("print diaries: Show all active diaries")
+        logging.info("print live trips: Show all active live trips")
 
 
 # ============================================================
@@ -328,12 +327,12 @@ class command_quit(Command):
     @staticmethod
     def help():
         """Help."""
-        logging.info("quit: Stop the observer and save data")
+        logging.info("quit: Stop services and save data")
 
 
-class stop_observers(Command):
-    """Stop observers."""
-    command_name = "stop observers"
+class stop_services(Command):
+    """Stop background services."""
+    command_name = "stop services"
 
     def __init__(self):
         """Initialize the instance."""
@@ -346,14 +345,12 @@ class stop_observers(Command):
     @staticmethod
     def help():
         """Help."""
-        logging.info(
-            "stop observers: Stop collection and auto-save (triggers final save)"
-        )
+        logging.info("stop services: Stop collection and auto-save")
 
 
-class start_observers(Command):
-    """Start observers."""
-    command_name = "start observers"
+class start_services(Command):
+    """Start background services."""
+    command_name = "start services"
 
     def __init__(self):
         """Initialize the instance."""
@@ -366,70 +363,7 @@ class start_observers(Command):
     @staticmethod
     def help():
         """Help."""
-        logging.info("start observers: Start/Restart collection and auto-save loops")
-
-
-# ============================================================
-# Commands that need complex dependencies (normalize)
-# ============================================================
-
-
-class normalize_diaries(Command):
-    """Normalize diaries."""
-    command_name = "normalize diaries"
-
-    def __init__(self, normalizer_fn, observatory_factory, parquet_writer):
-        """
-        Args:
-            normalizer_fn: Function to normalize trip stops
-            observatory_factory: Callable that returns an Observatory
-            parquet_writer: Function to write parquet files
-        """
-        self._normalize = normalizer_fn
-        self._get_observatory = observatory_factory
-        self._write_parquet = parquet_writer
-
-    def execute(self, args):
-        # Import here to avoid circular deps - this is a batch operation
-        """Execute."""
-        from application.post_processing import normalize_diary as nd
-
-        logging.info("=== Diary Normalizer ===")
-
-        diaries = nd.load_all_diaries()
-        if diaries is None:
-            return
-
-        obs = self._get_observatory()
-        topology = obs.get_topology()
-        if topology is None:
-            return
-
-        logging.info(f"Loaded {len(diaries)} raw measurements.")
-
-        normalized_dfs: list[pd.DataFrame] = []
-        grouped = diaries.groupby("trip_id")
-
-        logging.info(f"Processing {len(grouped)} trips...")
-        for trip_id, group_df in grouped:
-            trip = topology.get_trip(trip_id)
-            if trip:
-                norm_df = nd.normalize_trip_stops(group_df, trip)
-                normalized_dfs.append(norm_df)
-
-        final_df = pd.concat(normalized_dfs, ignore_index=True)
-        logging.info(
-            f"Normalization Complete. Records: {len(diaries)} -> {len(final_df)}"
-        )
-
-        logging.info(f"Saving to {nd.OUTPUT_FILE}...")
-        self._write_parquet(final_df, nd.OUTPUT_FILE)
-        logging.info("Done.")
-
-    @staticmethod
-    def help():
-        """Help."""
-        logging.info("normalize diaries: Normalize all diaries")
+        logging.info("start services: Start or restart collection and auto-save loops")
 
 
 class command_help(Command):
@@ -603,9 +537,9 @@ class validation_status(Command):
         logging.info("validation status: Show status of running validators")
 
 
-class print_all_diaries_vehicle(Command):
-    """Print all diaries vehicle."""
-    command_name = "print diaries vehicle"
+class print_vehicle_live_trips(Command):
+    """Print all live trips for one vehicle."""
+    command_name = "print vehicle trips"
 
     def __init__(self, observatory):
         """Initialize the instance."""
@@ -614,7 +548,7 @@ class print_all_diaries_vehicle(Command):
     def execute(self, args):
         """Execute."""
         if not args:
-            logging.warning("Usage: print diaries vehicle <vehicle_label>")
+            logging.warning("Usage: print vehicle trips <vehicle_label>")
             return
         vehicle_label = args.strip()
         
@@ -637,7 +571,7 @@ class print_all_diaries_vehicle(Command):
     def help():
         """Help."""
         logging.info(
-            "print diaries vehicle <vehicle_label>: Show all diaries for a specific vehicle"
+            "print vehicle trips <vehicle_label>: Show all live trips for a specific vehicle"
         )
 
 

@@ -1,213 +1,90 @@
-"""
-Tests for Domain Layer - Observers, Diaries, Measurements.
-"""
+"""Tests for live-domain objects and shared time helpers."""
 
 from unittest.mock import Mock
 import time
 
 
-class TestObserver:
-    """Test Observer class functionality."""
-
-    def test_observer_creation(self):
-        """Observer should be creatable with vehicle and diary."""
-        from application.domain.observers import Observer, Diary
-
-        mock_vehicle = Mock()
-        mock_vehicle.id = "V001"
-
-        diary = Diary(None, "trip_123")
-        observer = Observer(None, mock_vehicle, diary)
-
-        assert observer.assignedVehicle == mock_vehicle
-        assert observer.current_diary == diary
-        assert observer.diary_history == []
-
-    def test_archive_current_diary(self):
-        """Archiving should move diary to history."""
-        from application.domain.observers import Observer, Diary
-
-        mock_vehicle = Mock()
-        mock_vehicle.id = "V001"
-
-        # Mock observatory to prevent crash in archive_current_diary
-        mock_observatory = Mock()
-        mock_observatory.search_trip.return_value = Mock()
-
-        diary = Diary(None, "trip_123")
-        observer = Observer(mock_observatory, mock_vehicle, diary)
-
-        observer.archive_current_diary()
-
-        assert observer.current_diary is None
-        assert len(observer.diary_history) == 1
-        assert observer.diary_history[0].is_finished is True
-
-    def test_get_bus_returns_vehicle(self):
-        """get_bus should return assigned vehicle."""
-        from application.domain.observers import Observer, Diary
-
-        mock_vehicle = Mock()
-        diary = Diary(None, "trip_123")
-        observer = Observer(None, mock_vehicle, diary)
-
-        assert observer.get_bus() == mock_vehicle
+def _mock_trip():
+    """Create the smallest Trip-like object required by LiveTrip/GPSData."""
+    route = Mock()
+    route.id = "R1"
+    trip = Mock()
+    trip.id = "trip_123"
+    trip.route = route
+    trip.direction_name = "Test Direction"
+    return trip
 
 
-class TestDiary:
-    """Test Diary class functionality."""
+def _mock_vehicle():
+    """Create the smallest Vehicle-like object required by LiveTrip."""
+    vehicle = Mock()
+    vehicle.id = "vehicle_123"
+    vehicle.label = "bus_123"
+    vehicle.vehicle_type = None
+    return vehicle
 
-    def test_diary_creation(self):
-        """Diary should be creatable with observer and trip_id."""
-        from application.domain.observers import Diary
 
-        mock_observer = Mock()
-        diary = Diary(mock_observer, "trip_123")
+def _mock_gps():
+    """Create a GPSData instance for measurement tests."""
+    from application.domain.live_data import GPSData
 
-        assert diary.trip_id == "trip_123"
-        assert diary.observer == mock_observer
-        assert diary.measurements == []
-        assert diary.is_finished is False
+    return GPSData(
+        id="gps_1",
+        trip=_mock_trip(),
+        timestamp=time.time(),
+        latitude=41.9,
+        longitude=12.5,
+        speed=30,
+        heading=180,
+    )
 
-    def test_add_measurement(self):
-        """Should be able to add measurements."""
-        from application.domain.observers import Diary, Measurement
 
-        diary = Diary(None, "trip_123")
+class TestLiveTrip:
+    """Test LiveTrip aggregate behavior."""
 
-        mock_gps = Mock()
-        mock_gps.latitude = 41.9
-        mock_gps.longitude = 12.5
-        mock_gps.speed = 30
-        mock_gps.heading = 180
-        mock_gps.occupancy_status = 1
+    def test_live_trip_creation(self):
+        """LiveTrip should bind one static vehicle to one running trip."""
+        from application.domain.live_data import LiveTrip
 
-        measurement = Measurement(
-            id=1,
-            autobus_id="bus_123",
-            next_stop="stop_1",
-            next_stop_distance=100.0,
-            gpsdata=mock_gps,
-            trip_id="trip_123",
-            weather=None,
-            occupancy_status=1,
-            speed_ratio=1.0,
-            current_speed=30.0,
-            derived_speed=30.0,
-            derived_bearing=180,
-            is_in_preferential=False,
-        )
-        diary.add_measurement(measurement)
+        trip = _mock_trip()
+        vehicle = _mock_vehicle()
 
-        assert len(diary.measurements) == 1
-        assert diary.measurements[0] == measurement
+        live_trip = LiveTrip(trip, vehicle)
 
-    def test_get_measurements_amount(self):
-        """Should return correct count of measurements."""
-        from application.domain.observers import Diary, Measurement
+        assert live_trip.trip == trip
+        assert live_trip.vehicle == vehicle
+        assert live_trip.trip_id == "trip_123"
+        assert live_trip.vehicle_id == "vehicle_123"
+        assert live_trip.measurements == []
+        assert live_trip.is_finished is False
 
-        diary = Diary(None, "trip_123")
+    def test_set_gps_data_updates_current_state(self):
+        """LiveTrip should keep the latest GPS ping."""
+        from application.domain.live_data import LiveTrip
 
-        mock_gps = Mock()
-        mock_gps.latitude = 41.9
-        mock_gps.longitude = 12.5
-        mock_gps.speed = 30
-        mock_gps.heading = 180
-        mock_gps.occupancy_status = 1
+        live_trip = LiveTrip(_mock_trip(), _mock_vehicle())
+        gps = _mock_gps()
 
-        m1 = Measurement(
-            id=1,
-            autobus_id="bus_123",
-            next_stop="stop_1",
-            next_stop_distance=100.0,
-            gpsdata=mock_gps,
-            trip_id="trip_123",
-            weather=None,
-            occupancy_status=1,
-            speed_ratio=1.0,
-            current_speed=30.0,
-            derived_speed=30.0,
-            derived_bearing=180,
-            is_in_preferential=False,
-        )
-        m2 = Measurement(
-            id=2,
-            autobus_id="bus_123",
-            next_stop="stop_2",
-            next_stop_distance=200.0,
-            gpsdata=mock_gps,
-            trip_id="trip_123",
-            weather=None,
-            occupancy_status=1,
-            speed_ratio=1.0,
-            current_speed=30.0,
-            derived_speed=30.0,
-            derived_bearing=180,
-            is_in_preferential=False,
-        )
+        live_trip.set_gps_data(gps)
 
-        diary.add_measurement(m1)
-        diary.add_measurement(m2)
-
-        assert diary.get_measurements_amount() == 2
-
-    def test_to_dict_list(self):
-        """Should convert measurements to list of dicts."""
-        from application.domain.observers import Diary, Measurement
-
-        diary = Diary(None, "trip_123")
-
-        mock_gps = Mock()
-        mock_gps.latitude = 41.9
-        mock_gps.longitude = 12.5
-        mock_gps.speed = 30
-        mock_gps.heading = 180
-        mock_gps.occupancy_status = 1
-
-        m = Measurement(
-            id=1,
-            autobus_id="bus_123",
-            next_stop="stop_1",
-            next_stop_distance=100.0,
-            gpsdata=mock_gps,
-            trip_id="trip_123",
-            weather=None,
-            occupancy_status=1,
-            speed_ratio=1.0,
-            current_speed=30.0,
-            derived_speed=30.0,
-            derived_bearing=180,
-            is_in_preferential=False,
-        )
-        diary.add_measurement(m)
-
-        dict_list = diary.to_dict_list()
-
-        assert len(dict_list) == 1
-        assert dict_list[0]["trip_id"] == "trip_123"
-        assert dict_list[0]["lat"] == 41.9
+        assert live_trip.get_gps_data() == gps
+        assert live_trip.last_seen_timestamp > 0
 
 
 class TestMeasurement:
-    """Test Measurement class functionality."""
+    """Test Measurement records."""
 
     def test_measurement_creation(self):
         """Measurement should store all provided data."""
-        from application.domain.observers import Measurement
+        from application.domain.live_data import Measurement
 
-        mock_gps = Mock()
-        mock_gps.latitude = 41.9
-        mock_gps.longitude = 12.5
-        mock_gps.speed = 30
-        mock_gps.heading = 180
-        mock_gps.occupancy_status = 1
-
-        m = Measurement(
+        gps = _mock_gps()
+        measurement = Measurement(
             id=1,
-            autobus_id="bus_123",
+            vehicle_id="bus_123",
             next_stop="stop_1",
             next_stop_distance=150.5,
-            gpsdata=mock_gps,
+            gpsdata=gps,
             trip_id="trip_123",
             weather=None,
             occupancy_status=1,
@@ -218,30 +95,24 @@ class TestMeasurement:
             is_in_preferential=False,
         )
 
-        assert m.id == 1
-        assert m.next_stop == "stop_1"
-        assert m.next_stop_distance == 150.5
-        assert m.gpsdata == mock_gps
-        assert m.trip_id == "trip_123"
-        assert m.measurement_time > 0  # Unix timestamp
+        assert measurement.id == 1
+        assert measurement.vehicle_id == "bus_123"
+        assert measurement.next_stop == "stop_1"
+        assert measurement.next_stop_distance == 150.5
+        assert measurement.gpsdata == gps
+        assert measurement.trip_id == "trip_123"
+        assert measurement.measurement_time > 0
 
     def test_to_dict_contains_required_fields(self):
         """to_dict should contain all required fields for parquet."""
-        from application.domain.observers import Measurement
+        from application.domain.live_data import Measurement
 
-        mock_gps = Mock()
-        mock_gps.latitude = 41.9
-        mock_gps.longitude = 12.5
-        mock_gps.speed = 30
-        mock_gps.heading = 180
-        mock_gps.occupancy_status = 1
-
-        m = Measurement(
+        measurement = Measurement(
             id=1,
-            autobus_id="bus_123",
+            vehicle_id="bus_123",
             next_stop="stop_1",
             next_stop_distance=150.5,
-            gpsdata=mock_gps,
+            gpsdata=_mock_gps(),
             trip_id="trip_123",
             weather=None,
             occupancy_status=1,
@@ -251,7 +122,7 @@ class TestMeasurement:
             derived_bearing=180,
             is_in_preferential=False,
         )
-        d = m.to_dict("trip_123")
+        data = measurement.to_dict("trip_123")
 
         required_fields = [
             "trip_id",
@@ -268,25 +139,18 @@ class TestMeasurement:
         ]
 
         for field in required_fields:
-            assert field in d, f"Missing field: {field}"
+            assert field in data, f"Missing field: {field}"
 
     def test_to_dict_has_formatted_time(self):
         """to_dict should include human-readable formatted_time."""
-        from application.domain.observers import Measurement
+        from application.domain.live_data import Measurement
 
-        mock_gps = Mock()
-        mock_gps.latitude = 41.9
-        mock_gps.longitude = 12.5
-        mock_gps.speed = 30
-        mock_gps.heading = 180
-        mock_gps.occupancy_status = 1
-
-        m = Measurement(
+        measurement = Measurement(
             id=1,
-            autobus_id="bus_123",
+            vehicle_id="bus_123",
             next_stop="stop_1",
             next_stop_distance=150.5,
-            gpsdata=mock_gps,
+            gpsdata=_mock_gps(),
             trip_id="trip_123",
             weather=None,
             occupancy_status=1,
@@ -296,10 +160,10 @@ class TestMeasurement:
             derived_bearing=180,
             is_in_preferential=False,
         )
-        d = m.to_dict("trip_123")
+        data = measurement.to_dict("trip_123")
 
-        assert d["formatted_time"] is not None
-        assert isinstance(d["formatted_time"], str)
+        assert data["formatted_time"] is not None
+        assert isinstance(data["formatted_time"], str)
 
 
 class TestTimeUtils:
@@ -323,5 +187,4 @@ class TestTimeUtils:
         result = to_readable_time(now)
 
         assert isinstance(result, str)
-        # Should contain colons (HH:MM:SS format)
         assert ":" in result

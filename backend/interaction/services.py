@@ -5,20 +5,14 @@ Subscribes to events from the event bus for start/stop control.
 """
 
 import logging
-from application.live import data
-from application.domain.internal_events import LIVE_TRIP_FINISHED, domain_events
-from .events import SERVICES_START, SERVICES_STOP, SHUTDOWN_REQUESTED, console_events
-
-COLLECTION_THREAD = None
-SAVING_THREAD = None
-UPTIME_THREAD = None
-WEATHER_THREAD = None
-GEOCODING_THREAD = None
-TRAFFIC_THREAD = None
-GUI_THREAD = None
-
-UPDATE_TIME = 900
-TRAFFIC_UPDATE_TIME = 900  # 15 minutes
+from application.domain.internal_events import (
+    LIVE_TRIP_FINISHED,
+    SERVICES_START,
+    SERVICES_STOP,
+    SHUTDOWN_REQUESTED,
+    console_events,
+    domain_events,
+)
 
 # State interface for GUI (set by main.py)
 _state_interface = None
@@ -27,25 +21,13 @@ _thread_loader = None
 _validation_controller = None
 
 
-def start_services(observatory=None, config: dict = None, context=None):
+def start_services(context=None):
     """Start all background services."""
-    global \
-        COLLECTION_THREAD, \
-        SAVING_THREAD, \
-        UPTIME_THREAD, \
-        WEATHER_THREAD, \
-        GEOCODING_THREAD, \
-        TRAFFIC_THREAD, \
-        GUI_THREAD, \
-        _state_interface, \
-        _runtime_context, \
-        _thread_loader
+    global _state_interface, _runtime_context, _thread_loader
 
     logging.info("Starting Services...")
     if context is not None:
         _runtime_context = context
-    elif _runtime_context is None:
-        _runtime_context = _build_compat_context(observatory, config)
 
     if _runtime_context is None:
         logging.error("Cannot start services: runtime context is missing.")
@@ -53,6 +35,8 @@ def start_services(observatory=None, config: dict = None, context=None):
 
     if _state_interface is not None:
         _runtime_context.state_interface = _state_interface
+        if hasattr(_state_interface, "set_context"):
+            _state_interface.set_context(_runtime_context)
 
     # Subscribe to domain events
     domain_events.subscribe(LIVE_TRIP_FINISHED, _on_live_trip_finished)
@@ -64,13 +48,14 @@ def start_services(observatory=None, config: dict = None, context=None):
         _runtime_context.thread_loader = _thread_loader
 
     _thread_loader.start()
-    _sync_thread_globals()
 
 
 def set_state_interface(state_interface):
     """Set the state interface for the GUI (called from main.py)."""
     global _state_interface
     _state_interface = state_interface
+    if _runtime_context is not None and hasattr(state_interface, "set_context"):
+        state_interface.set_context(_runtime_context)
 
 
 def _get_validation_controller():
@@ -83,7 +68,9 @@ def _get_validation_controller():
     if context is not None:
         controller = getattr(context, "validation_controller", None)
         if controller is None:
-            controller = ValidationController()
+            controller = ValidationController(
+                persistence_gateway=getattr(context, "persistence_gateway", None),
+            )
             context.validation_controller = controller
         return controller
 
@@ -149,54 +136,14 @@ def stop_services():
     domain_events.unsubscribe(LIVE_TRIP_FINISHED, _on_live_trip_finished)
     if _thread_loader is not None:
         _thread_loader.stop()
-        _sync_thread_globals()
-    else:
-        data.STOP_COLLECTION_EVENT.set()
+    elif _runtime_context is not None and _runtime_context.stop_event is not None:
+        _runtime_context.stop_event.set()
 
 
 def join_core_threads(timeout: float = 5):
     """Wait briefly for core service threads."""
     if _thread_loader is not None:
         _thread_loader.join_core(timeout=timeout)
-
-
-def _sync_thread_globals():
-    """Mirror context threads into legacy module globals for GUI/status code."""
-    global COLLECTION_THREAD, SAVING_THREAD, UPTIME_THREAD
-    global WEATHER_THREAD, GEOCODING_THREAD, TRAFFIC_THREAD, GUI_THREAD
-    if _runtime_context is None:
-        return
-    threads = _runtime_context.threads
-    COLLECTION_THREAD = threads.get("collection")
-    SAVING_THREAD = threads.get("saving")
-    UPTIME_THREAD = threads.get("uptime")
-    WEATHER_THREAD = threads.get("weather")
-    GEOCODING_THREAD = threads.get("geocoding")
-    TRAFFIC_THREAD = threads.get("traffic")
-    GUI_THREAD = threads.get("gui")
-
-
-def _build_compat_context(observatory=None, config: dict = None):
-    """Build a minimal context for legacy event handlers."""
-    observatory = observatory or data.OBSERVATORY
-    if observatory is None:
-        return None
-
-    from application.runtime import ApplicationContext
-
-    city = observatory.get_city("Rome")
-    return ApplicationContext(
-        config=config or data.CONFIG or {},
-        observatory=observatory,
-        city=city,
-        cache_strategy=data.CACHE_STRATEGY,
-        geocoding_service=getattr(observatory, "_geocoding", None),
-        traffic_service=getattr(city, "traffic_service", None) if city else None,
-        feed_fetcher=data.get_feed_fetcher(),
-        stop_event=data.STOP_COLLECTION_EVENT,
-        shutdown_event=data.SHUTDOWN_EVENT,
-        state_interface=_state_interface,
-    )
 
 
 # ============================================================
@@ -215,11 +162,7 @@ def _record_historical(event_data: dict):
 
     live_trip = event_data.get("live_trip")
     route_id = event_data.get("route_id")
-    observatory = (
-        _runtime_context.observatory
-        if _runtime_context is not None
-        else data.OBSERVATORY
-    )
+    observatory = _runtime_context.observatory if _runtime_context is not None else None
     if not live_trip or not observatory or not route_id:
         return
 
@@ -269,7 +212,6 @@ def _on_shutdown(event_data):
     """Handler for shutdown_requested event."""
     if _runtime_context is not None:
         _runtime_context.shutdown_event.set()
-    data.SHUTDOWN_EVENT.set()
     stop_services()
 
 

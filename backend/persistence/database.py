@@ -1,14 +1,9 @@
-"""
-Database Access Layer - TimescaleDB persistence for Vector data.
-
-Uses asyncpg for async connection pooling and batched writes.
-"""
+"""Database access layer for TimescaleDB persistence."""
 
 import logging
-import os
 import asyncio
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, List
+from typing import Any
 from urllib.parse import urlparse
 import uuid
 
@@ -22,16 +17,7 @@ except ImportError:
     ASYNCPG_AVAILABLE = False
     asyncpg = None
 
-from application.post_processing.vectorization import (
-    PredictionVector,
-    PredictionLabel,
-    TrafficVector,
-    TrafficLabel,
-    VehicleVector,
-    VehicleLabel,
-)
-from application.domain.time_utils import get_seconds_since_midnight
-from config import Prediction, Traffic, Vehicle
+from config import Ledger
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -58,9 +44,6 @@ class TimescaleDBConnection:
         self.table_name = table_name
 
         self.pool = None
-        self._write_queue = []
-        self._queue_lock = asyncio.Lock()
-        self._batch_size = 100
 
     async def connect(self):
         """Establish or reuse a shared connection pool."""
@@ -114,9 +97,7 @@ class TimescaleDBConnection:
         return self.pool
 
     async def close(self):
-        """Close connection pool and flush remaining writes."""
-        if self._write_queue:
-            await self._flush_queue()
+        """Close connection pool."""
         if self.pool:
             # Only close if this is the last reference and loop matches
             try:
@@ -129,286 +110,6 @@ class TimescaleDBConnection:
                 pass
             self.pool = None
             logger.info(f"TimescaleDB connection closed for {self.table_name}.")
-
-    async def insert_items(self, items: List[Any]):
-        """
-        Queue items (Vectors or Labels) for async batch insert.
-        """
-        if not items:
-            return
-
-        async with self._queue_lock:
-            self._write_queue.extend(items)
-            if len(self._write_queue) >= self._batch_size:
-                await self._flush_queue()
-
-    async def _flush_queue(self):
-        """Flush the write queue to database."""
-        if not self._write_queue:
-            return
-
-        items = self._write_queue[:]
-        self._write_queue.clear()
-
-        if not items:
-            return
-
-        pool = await self.get_valid_pool()
-        if not pool:
-            # Failed to connect, re-queue items?
-            # For now, log error and drop to prevent memory leak if DB is down forever
-            logger.error(
-                f"❌ Failed to get connection pool for {self.table_name}. Dropping {len(items)} items."
-            )
-            return
-
-        # Determine type based on first item
-        first_item = items[0]
-        query = ""
-        rows = []
-
-        try:
-            if isinstance(first_item, PredictionVector):
-                query, rows = self._prepare_prediction_vectors(items)
-            elif isinstance(first_item, PredictionLabel):
-                query, rows = self._prepare_prediction_labels(items)
-            elif isinstance(first_item, TrafficVector):
-                query, rows = self._prepare_traffic_vectors(items)
-            elif isinstance(first_item, TrafficLabel):
-                query, rows = self._prepare_traffic_labels(items)
-            elif isinstance(first_item, VehicleVector):
-                query, rows = self._prepare_vehicle_vectors(items)
-            elif isinstance(first_item, VehicleLabel):
-                query, rows = self._prepare_vehicle_labels(items)
-            else:
-                logger.warning(f"⚠️ Unknown item type for DB insert: {type(first_item)}")
-                return
-
-            if not query:
-                return
-
-            async with pool.acquire() as conn:
-                await conn.executemany(query, rows)
-
-            logger.info(f"📊 Inserted {len(rows)} rows into {self.table_name}")
-
-        except Exception as e:
-            logger.error(f"❌ TimescaleDB insert failed ({self.table_name}): {e}")
-            # Optional: Re-queue failed rows or handle error strategy
-            # self._write_queue.extend(items)
-
-    def _prepare_prediction_vectors(self, items: List[PredictionVector]):
-        """Prepare prediction vectors."""
-        query = f"""
-            INSERT INTO {self.table_name} (
-                id, ts, route_id, direction_id, stop_sequence,
-                shape_dist_travelled, distance_to_next_stop, far_status,
-                day_type, rush_hour_status, time_feat, time_sin, time_cos,
-                schedule_adherence, speed_ratio, current_traffic_speed, 
-                current_speed, precipitation, weather_code, bus_type, door_number,
-                deposit_grottarossa, deposit_magliana, deposit_tor_sapienza, deposit_portonaccio,
-                deposit_monte_sacro, deposit_tor_pagnotta, deposit_tor_cervara, deposit_maglianella,
-                deposit_costi, deposit_trastevere, deposit_acilia, deposit_tor_vergata,
-                deposit_porta_maggiore,
-                served_ratio,
-                trip_id,
-                sch_starting_time_cos, sch_starting_time_sin,
-                starting_time_cos, starting_time_sin,
-                delay_genuine
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
-                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-                $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36,
-                $37, $38, $39, $40, $41
-            )
-            ON CONFLICT DO NOTHING
-        """
-        rows = []
-        for v in items:
-            ts = (
-                datetime.fromtimestamp(v.time) if hasattr(v, "time") else datetime.now()
-            )
-            # Calculate time_feat
-            seconds = get_seconds_since_midnight(v.time) if hasattr(v, "time") else 0
-            time_feat = seconds / 86400.0
-
-            rows.append(
-                (
-                    v.id,
-                    ts,
-                    str(v.route_id),
-                    int(v.direction_id),
-                    int(v.stop_sequence),
-                    float(v.shape_dist_travelled),
-                    float(v.distance_to_next_stop),
-                    bool(v.far_status),
-                    int(v.day_type),
-                    bool(v.rush_hour_status),
-                    float(time_feat),
-                    float(v.time_encoding[0]),
-                    float(v.time_encoding[1]),
-                    float(v.schedule_adherence),
-                    float(v.speed_ratio),
-                    float(v.current_traffic_speed),
-                    float(v.current_speed),
-                    float(v.precipitation),
-                    int(v.weather_code),
-                    int(v.bus_type),
-                    int(v.door_number),
-                    int(v.deposit_grottarossa),
-                    int(v.deposit_magliana),
-                    int(v.deposit_tor_sapienza),
-                    int(v.deposit_portonaccio),
-                    int(v.deposit_monte_sacro),
-                    int(v.deposit_tor_pagnotta),
-                    int(v.deposit_tor_cervara),
-                    int(v.deposit_maglianella),
-                    int(v.deposit_costi),
-                    int(v.deposit_trastevere),
-                    int(v.deposit_acilia),
-                    int(v.deposit_tor_vergata),
-                    int(v.deposit_porta_maggiore),
-                    float(v.served_ratio),
-                    str(v.trip_id),
-                    float(v.sch_starting_time_cos),
-                    float(v.sch_starting_time_sin),
-                    float(v.starting_time_cos),
-                    float(v.starting_time_sin),
-                    int(v.delay_genuine),
-                )
-            )
-        return query, rows
-
-    def _prepare_prediction_labels(self, items: List[PredictionLabel]):
-        """Prepare prediction labels."""
-        query = f"""
-            INSERT INTO {self.table_name} (
-                id, ts, time_seconds, occupancy_status
-            ) VALUES (
-                $1, $2, $3, $4
-            )
-            ON CONFLICT DO NOTHING
-        """
-        rows = []
-        for l in items:
-            ts = (
-                datetime.fromtimestamp(l.time) if hasattr(l, "time") else datetime.now()
-            )
-            rows.append(
-                (
-                    l.id,
-                    ts,
-                    int(l.time_seconds),
-                    int(l.occupancy_status),
-                )
-            )
-        return query, rows
-
-    def _prepare_traffic_vectors(self, items: List[TrafficVector]):
-        """Prepare traffic vectors."""
-        query = f"""
-            INSERT INTO {self.table_name} (
-                id, ts, day_type, rush_hour_status, time_sin, time_cos, hexagon_id, trip_id
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8
-            )
-            ON CONFLICT DO NOTHING
-        """
-        rows = []
-        for v in items:
-            ts = (
-                datetime.fromtimestamp(v.time) if hasattr(v, "time") else datetime.now()
-            )
-            rows.append(
-                (
-                    v.id,
-                    ts,
-                    int(v.day_type),
-                    bool(v.rush_hour_status),
-                    float(v.time_encoding[0]),
-                    float(v.time_encoding[1]),
-                    str(v.hexagon_id) if v.hexagon_id else None,
-                    str(v.trip_id),
-                )
-            )
-        return query, rows
-
-    def _prepare_traffic_labels(self, items: List[TrafficLabel]):
-        """Prepare traffic labels."""
-        query = f"""
-            INSERT INTO {self.table_name} (
-                id, ts, speed_ratio, current_traffic_speed
-            ) VALUES (
-                $1, $2, $3, $4
-            )
-            ON CONFLICT DO NOTHING
-        """
-        rows = []
-        for l in items:
-            ts = (
-                datetime.fromtimestamp(l.time) if hasattr(l, "time") else datetime.now()
-            )
-            rows.append(
-                (
-                    l.id,
-                    ts,
-                    float(l.speed_ratio),
-                    float(l.current_traffic_speed),
-                )
-            )
-        return query, rows
-
-    def _prepare_vehicle_vectors(self, items: List[VehicleVector]):
-        """Prepare vehicle vectors."""
-        query = f"""
-            INSERT INTO {self.table_name} (
-                id, ts, route_id, trip_id, direction_id
-            ) VALUES (
-                $1, $2, $3, $4, $5
-            )
-            ON CONFLICT DO NOTHING
-        """
-        rows = []
-        for v in items:
-            ts = (
-                datetime.fromtimestamp(v.timestamp)
-                if hasattr(v, "timestamp")
-                else datetime.now()
-            )
-            rows.append(
-                (
-                    v.id,
-                    ts,
-                    str(v.route_id),
-                    str(v.trip_id),
-                    int(v.direction_id),
-                )
-            )
-        return query, rows
-
-    def _prepare_vehicle_labels(self, items: List[VehicleLabel]):
-        """Prepare vehicle labels."""
-        query = f"""
-            INSERT INTO {self.table_name} (
-                id, ts, vehicle_type
-            ) VALUES (
-                $1, $2, $3
-            )
-            ON CONFLICT DO NOTHING
-        """
-        rows = []
-        for l in items:
-            ts = (
-                datetime.fromtimestamp(l.time) if hasattr(l, "time") else datetime.now()
-            )
-            rows.append(
-                (
-                    l.id,
-                    ts,
-                    str(l.vehicle_type),
-                )
-            )
-        return query, rows
 
     async def ensure_table_exists(self):
         """
@@ -433,9 +134,9 @@ def get_db_connection(
     global _db_instances
 
     if not connection_string:
-        connection_string = Prediction.VECTOR_DB_CONNECTION
+        connection_string = Ledger.DB_CONNECTION
     if not table_name:
-        table_name = Prediction.VECTOR_TABLE
+        table_name = Ledger.HISTORICAL_TABLE
 
     key = (connection_string, table_name)
 
@@ -463,109 +164,134 @@ def _log_connection_target(uri: str, health_logger: logging.Logger):
 
 
 def _mock_insert_statement(table_type: str, table_name: str, mock_id: str, ts: datetime):
-    """Return the health-check INSERT statement and values for a configured table."""
-    if table_type == "pred_vec":
+    """Return health-check INSERT and DELETE statements for a ledger table."""
+    if table_type == "historical":
         query = f"""
             INSERT INTO {table_name} (
-                id, ts, route_id, direction_id, stop_sequence,
-                shape_dist_travelled, distance_to_next_stop, far_status,
-                day_type, rush_hour_status, time_feat, time_sin, time_cos,
-                schedule_adherence, speed_ratio, current_traffic_speed,
-                current_speed, precipitation, weather_code, bus_type, door_number,
-                deposit_grottarossa, deposit_magliana, deposit_tor_sapienza, deposit_portonaccio,
-                deposit_monte_sacro, deposit_tor_pagnotta, deposit_tor_cervara, deposit_maglianella,
-                deposit_costi, deposit_trastevere, deposit_acilia, deposit_tor_vergata,
-                deposit_porta_maggiore,
-                served_ratio,
-                trip_id,
-                sch_starting_time_cos, sch_starting_time_sin,
-                starting_time_cos, starting_time_sin,
-                delay_genuine
+                trip_id, route_id, direction_id, vehicle_id,
+                latitude, longitude, hexagon_id,
+                stop_sequence, shape_dist_travelled, distance_to_next_stop,
+                is_in_preferential,
+                measurement_time, actual_start_time,
+                schedule_adherence, scheduled_start_time, delay_genuine,
+                current_speed, speed_ratio, current_traffic_speed,
+                temperature, apparent_temperature, humidity,
+                precipitation, wind_speed, weather_code,
+                bus_type, door_number, occupancy_status,
+                deposits
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-                $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-                $36, $37, $38, $39, $40, $41
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                $21,$22,$23,$24,$25,$26,$27,$28,$29
             )
         """
+        test_trip_id = f"TEST_TRIP_{mock_id}"
         values = (
-            mock_id,
+            test_trip_id,
+            "TEST_ROUTE",
+            0,
+            f"TEST_VEHICLE_{mock_id}",
+            41.9,
+            12.5,
+            "TEST_HEX",
+            0,
+            0.0,
+            0.0,
+            False,
             ts,
-            "TEST",
-            0,
+            ts,
+            0.0,
+            "00:00:00",
             0,
             0.0,
-            0.0,
-            False,
-            0,
-            False,
-            0.0,
+            1.0,
             0.0,
             0.0,
             0.0,
             0.0,
             0.0,
             0.0,
-            0.0,
             0,
             0,
             0,
             0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0.0,
-            "TEST_TRIP",
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0,
+            "[]",
         )
-    elif table_type == "pred_lbl":
+        delete_query = f"DELETE FROM {table_name} WHERE trip_id = $1"
+        delete_values = (test_trip_id,)
+    elif table_type == "predicted":
         query = f"""
-            INSERT INTO {table_name} (id, ts, time_seconds, occupancy_status)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO {table_name} (
+                route_id, direction_id, trip_date, scheduled_start,
+                stop_id, stop_sequence,
+                predicted_arrival, predicted_delay_sec, predicted_crowd_level,
+                prediction_timestamp
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         """
-        values = (mock_id, ts, 0, 0)
-    elif table_type == "traf_vec":
+        test_route_id = f"TEST_ROUTE_{mock_id}"
+        values = (
+            test_route_id,
+            0,
+            ts.date(),
+            "00:00:00",
+            "TEST_STOP",
+            0,
+            "00:00:00",
+            0.0,
+            0,
+            ts,
+        )
+        delete_query = f"DELETE FROM {table_name} WHERE route_id = $1"
+        delete_values = (test_route_id,)
+    elif table_type == "vehicle":
         query = f"""
-            INSERT INTO {table_name} (id, ts, day_type, rush_hour_status, time_sin, time_cos, hexagon_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO {table_name} (
+                vehicle_id, trip_id, route_id, direction_id,
+                vehicle_type_name, fuel_type, euro_class, capacity_total,
+                trip_date, scheduled_start, actual_start_time,
+                trip_end_time, trip_duration_sec,
+                mean_delay_sec, median_delay_sec, max_delay_sec,
+                min_delay_sec, std_delay_sec,
+                mean_occupancy, max_occupancy,
+                measurement_count, preferential_ratio, recorded_at
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                $21,$22,$23
+            )
         """
-        values = (mock_id, ts, 0, False, 0.0, 0.0, "TEST_HEX")
-    elif table_type == "traf_lbl":
-        query = f"""
-            INSERT INTO {table_name} (id, ts, speed_ratio, current_traffic_speed)
-            VALUES ($1, $2, $3, $4)
-        """
-        values = (mock_id, ts, 0.0, 0.0)
-    elif table_type == "veh_vec":
-        query = f"""
-            INSERT INTO {table_name} (id, ts, route_id, trip_id, direction_id)
-            VALUES ($1, $2, $3, $4, $5)
-        """
-        values = (mock_id, ts, "TEST_ROUTE", "TEST_TRIP", 0)
-    elif table_type == "veh_lbl":
-        query = f"""
-            INSERT INTO {table_name} (id, ts, vehicle_type)
-            VALUES ($1, $2, $3)
-        """
-        values = (mock_id, ts, "TEST_TYPE")
+        test_trip_id = f"TEST_TRIP_{mock_id}"
+        values = (
+            f"TEST_VEHICLE_{mock_id}",
+            test_trip_id,
+            "TEST_ROUTE",
+            0,
+            "TEST_TYPE",
+            0,
+            0,
+            0,
+            ts.date(),
+            "00:00:00",
+            ts,
+            ts,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            1,
+            0.0,
+            ts,
+        )
+        delete_query = f"DELETE FROM {table_name} WHERE trip_id = $1"
+        delete_values = (test_trip_id,)
     else:
         raise ValueError(f"Unknown table type {table_type}")
 
-    return query, values
+    return query, values, delete_query, delete_values
 
 
 async def _test_table_operations(
@@ -592,7 +318,12 @@ async def _test_table_operations(
             ts = datetime.now()
 
             try:
-                query, values = _mock_insert_statement(table_type, table_name, mock_id, ts)
+                query, values, delete_query, delete_values = _mock_insert_statement(
+                    table_type,
+                    table_name,
+                    mock_id,
+                    ts,
+                )
             except ValueError as e:
                 health_logger.warning(str(e))
                 return
@@ -604,9 +335,8 @@ async def _test_table_operations(
                 health_logger.error("   Insertion failed: %s", e)
                 return
 
-            delete_query = f"DELETE FROM {table_name} WHERE id = $1"
             try:
-                await conn.execute(delete_query, mock_id)
+                await conn.execute(delete_query, *delete_values)
                 health_logger.info("   Mock deletion successful")
             except Exception as e:
                 health_logger.error("   Deletion failed: %s", e)
@@ -629,88 +359,27 @@ async def test_database_connection():
     else:
         health_logger.info("Loading config from: %s", _CONFIG_PATH)
 
-    config = load_config()
+    load_config()
+    conn_str = Ledger.DB_CONNECTION
+    health_logger.info("\nTesting Ledger Database...")
+    _log_connection_target(conn_str, health_logger)
 
-    if Prediction.ENABLED:
-        health_logger.info("\nTesting Prediction Database...")
-        pred_section = config.get("prediction", {})
-        health_logger.info("   Loaded Keys: %s", list(pred_section.keys()))
-        if "vector_db_connection" in pred_section:
-            _log_connection_target(pred_section["vector_db_connection"], health_logger)
-        else:
-            health_logger.warning("   'vector_db_connection' NOT found in [prediction] section!")
+    if not conn_str:
+        health_logger.warning("Ledger DB connection not configured.")
+        return
 
-        conn_str = Prediction.VECTOR_DB_CONNECTION
-        table_vec = Prediction.VECTOR_TABLE
-        table_lbl = Prediction.LABEL_TABLE
-
-        health_logger.info("   Resolved Connection String:")
-        _log_connection_target(conn_str, health_logger)
-
-        if conn_str:
-            if table_vec:
-                health_logger.info("   Vector Table: '%s'", table_vec)
-                db_vec = TimescaleDBConnection(conn_str, table_vec)
-                await _test_table_operations(db_vec, "pred_vec", table_vec, health_logger)
-            else:
-                health_logger.warning("Prediction vector table not defined")
-
-            if table_lbl:
-                health_logger.info("   Label Table: '%s'", table_lbl)
-                db_lbl = TimescaleDBConnection(conn_str, table_lbl)
-                await _test_table_operations(db_lbl, "pred_lbl", table_lbl, health_logger)
-            else:
-                health_logger.warning("Prediction label table not defined")
-    else:
-        health_logger.info("\nPrediction pipeline disabled.")
-
-    if Traffic.ENABLED:
-        health_logger.info("\nTesting Traffic Database...")
-        conn_str = Traffic.VECTOR_DB_CONNECTION
-        table_vec = Traffic.VECTOR_TABLE
-        table_lbl = Traffic.LABEL_TABLE
-        _log_connection_target(conn_str, health_logger)
-
-        if conn_str:
-            if table_vec:
-                health_logger.info("   Vector Table: '%s'", table_vec)
-                db_vec = TimescaleDBConnection(conn_str, table_vec)
-                await _test_table_operations(db_vec, "traf_vec", table_vec, health_logger)
-            else:
-                health_logger.warning("Traffic vector table not defined")
-
-            if table_lbl:
-                health_logger.info("   Label Table: '%s'", table_lbl)
-                db_lbl = TimescaleDBConnection(conn_str, table_lbl)
-                await _test_table_operations(db_lbl, "traf_lbl", table_lbl, health_logger)
-            else:
-                health_logger.warning("Traffic label table not defined")
-    else:
-        health_logger.info("\nTraffic pipeline disabled.")
-
-    if Vehicle.ENABLED:
-        health_logger.info("\nTesting Vehicle Database...")
-        conn_str = Vehicle.VECTOR_DB_CONNECTION
-        table_vec = Vehicle.VECTOR_TABLE
-        table_lbl = Vehicle.LABEL_TABLE
-        _log_connection_target(conn_str, health_logger)
-
-        if conn_str:
-            if table_vec:
-                health_logger.info("   Vector Table: '%s'", table_vec)
-                db_vec = TimescaleDBConnection(conn_str, table_vec)
-                await _test_table_operations(db_vec, "veh_vec", table_vec, health_logger)
-            else:
-                health_logger.warning("Vehicle vector table not defined")
-
-            if table_lbl:
-                health_logger.info("   Label Table: '%s'", table_lbl)
-                db_lbl = TimescaleDBConnection(conn_str, table_lbl)
-                await _test_table_operations(db_lbl, "veh_lbl", table_lbl, health_logger)
-            else:
-                health_logger.warning("Vehicle label table not defined")
-    else:
-        health_logger.info("\nVehicle pipeline disabled.")
+    tables = [
+        ("Historical", Ledger.HISTORICAL_TABLE, "historical"),
+        ("Predicted", Ledger.PREDICTED_TABLE, "predicted"),
+        ("Vehicle", Ledger.VEHICLE_TABLE, "vehicle"),
+    ]
+    for label, table_name, table_type in tables:
+        if not table_name:
+            health_logger.warning("%s ledger table not defined", label)
+            continue
+        health_logger.info("   %s Table: '%s'", label, table_name)
+        db_conn = TimescaleDBConnection(conn_str, table_name)
+        await _test_table_operations(db_conn, table_type, table_name, health_logger)
 
 
 class LedgerDBWriter:
@@ -1045,88 +714,51 @@ def read_vehicle_trips(
 
 
 def read_prediction_training_rows(start_date: str = None) -> pd.DataFrame:
-    """Read joined prediction vectors/labels for dataset extraction."""
-    engine = get_sync_engine_for_pipeline("prediction")
+    """Read historical measurements for dataset extraction."""
+    engine = get_sync_engine(Ledger.DB_CONNECTION)
     if engine is None:
         return pd.DataFrame()
 
     query = f"""
     SELECT
-        v.id,
-        v.ts,
-        v.trip_id,
-        v.route_id,
-        v.direction_id,
-        v.stop_sequence,
-        v.shape_dist_travelled,
-        v.distance_to_next_stop,
-        v.far_status,
-        v.day_type,
-        v.rush_hour_status,
-        v.time_feat,
-        v.time_sin,
-        v.time_cos,
-        v.schedule_adherence,
-        v.speed_ratio,
-        v.current_traffic_speed,
-        v.current_speed,
-        v.precipitation,
-        v.weather_code,
-        v.bus_type,
-        v.door_number,
-        v.deposit_grottarossa,
-        v.deposit_magliana,
-        v.deposit_tor_sapienza,
-        v.deposit_portonaccio,
-        v.deposit_monte_sacro,
-        v.deposit_tor_pagnotta,
-        v.deposit_tor_cervara,
-        v.deposit_maglianella,
-        v.deposit_costi,
-        v.deposit_trastevere,
-        v.deposit_acilia,
-        v.deposit_tor_vergata,
-        v.deposit_porta_maggiore,
-        v.served_ratio,
-        v.starting_time_sin,
-        v.starting_time_cos,
-        v.sch_starting_time_sin,
-        v.sch_starting_time_cos,
-        l.time_seconds,
-        l.occupancy_status
-    FROM {Prediction.VECTOR_TABLE} v
-    JOIN {Prediction.LABEL_TABLE} l ON v.id = l.id
+        *,
+        measurement_time AS ts
+    FROM {Ledger.HISTORICAL_TABLE}
     """
     if start_date:
-        query += f"\n    WHERE v.ts >= '{start_date} 00:00:00'"
+        query += f"\n    WHERE measurement_time >= '{start_date} 00:00:00'"
 
     try:
         return pd.read_sql(query, engine)
     except Exception as e:
-        logger.error("Error querying prediction training rows: %s", e)
+        logger.error("Error querying historical training rows: %s", e)
         return pd.DataFrame()
 
 
 def read_traffic_training_rows() -> pd.DataFrame:
-    """Read joined traffic vectors/labels for canonical traffic averages."""
-    engine = get_sync_engine_for_pipeline("traffic")
+    """Read traffic-related historical measurements for canonical averages."""
+    engine = get_sync_engine(Ledger.DB_CONNECTION)
     if engine is None:
         return pd.DataFrame()
 
     query = f"""
     SELECT
-        v.hexagon_id AS h3_index,
-        v.day_type,
-        v.ts,
-        l.speed_ratio,
-        l.current_traffic_speed
-    FROM {Traffic.VECTOR_TABLE} v
-    JOIN {Traffic.LABEL_TABLE} l ON v.id::text = l.id::text AND v.ts = l.ts
+        hexagon_id AS h3_index,
+        measurement_time AS ts,
+        speed_ratio,
+        current_traffic_speed
+    FROM {Ledger.HISTORICAL_TABLE}
+    WHERE hexagon_id IS NOT NULL
     """
     try:
-        return pd.read_sql(query, engine)
+        df = pd.read_sql(query, engine)
+        if df.empty:
+            return df
+        ts = pd.to_datetime(df["ts"])
+        df["day_type"] = ts.dt.weekday.map(lambda weekday: 1 if weekday == 5 else 2 if weekday == 6 else 0)
+        return df
     except Exception as e:
-        logger.error("Error querying traffic training rows: %s", e)
+        logger.error("Error querying historical traffic rows: %s", e)
         return pd.DataFrame()
 
 
@@ -1138,9 +770,9 @@ async def fetch_validation_rows_by_trip_ids(trip_ids: set[str]) -> dict[str, lis
         logger.warning("asyncpg not available: DB fallback disabled")
         return {}
 
-    conn_str = Prediction.VECTOR_DB_CONNECTION
+    conn_str = Ledger.DB_CONNECTION
     if not conn_str:
-        logger.warning("Prediction DB connection not configured: DB fallback disabled")
+        logger.warning("Ledger DB connection not configured: DB fallback disabled")
         return {}
 
     rows_by_trip: dict[str, list[Any]] = {}
@@ -1148,11 +780,10 @@ async def fetch_validation_rows_by_trip_ids(trip_ids: set[str]) -> dict[str, lis
     try:
         conn = await asyncpg.connect(conn_str, timeout=30)
         query = f"""
-            SELECT v.trip_id, v.stop_sequence, v.schedule_adherence, l.occupancy_status
-            FROM {Prediction.VECTOR_TABLE} v
-            LEFT JOIN {Prediction.LABEL_TABLE} l ON v.id = l.id
-            WHERE v.trip_id = ANY($1)
-            ORDER BY v.trip_id, v.ts ASC
+            SELECT trip_id, stop_sequence, schedule_adherence, occupancy_status
+            FROM {Ledger.HISTORICAL_TABLE}
+            WHERE trip_id = ANY($1)
+            ORDER BY trip_id, measurement_time ASC
         """
         rows = await conn.fetch(query, list(trip_ids))
         for row in rows:
@@ -1174,42 +805,23 @@ async def close_ledger_writers():
 
 
 async def init_database(config: dict = None) -> bool:
-    """Initialize the default database connections (shared pools)."""
+    """Initialize the configured ledger database connections."""
 
-    # Collect all instances that need connecting
     instances = [
         get_db_connection(
-            connection_string=Prediction.VECTOR_DB_CONNECTION,
-            table_name=Prediction.VECTOR_TABLE,
+            connection_string=Ledger.DB_CONNECTION,
+            table_name=Ledger.HISTORICAL_TABLE,
         ),
         get_db_connection(
-            connection_string=Prediction.VECTOR_DB_CONNECTION,
-            table_name=Prediction.LABEL_TABLE,
+            connection_string=Ledger.DB_CONNECTION,
+            table_name=Ledger.PREDICTED_TABLE,
+        ),
+        get_db_connection(
+            connection_string=Ledger.DB_CONNECTION,
+            table_name=Ledger.VEHICLE_TABLE,
         ),
     ]
 
-    if Traffic.ENABLED:
-        instances.append(get_db_connection(
-            connection_string=Traffic.VECTOR_DB_CONNECTION,
-            table_name=Traffic.VECTOR_TABLE,
-        ))
-        instances.append(get_db_connection(
-            connection_string=Traffic.VECTOR_DB_CONNECTION,
-            table_name=Traffic.LABEL_TABLE,
-        ))
-
-    if Vehicle.ENABLED:
-        instances.append(get_db_connection(
-            connection_string=Vehicle.VECTOR_DB_CONNECTION,
-            table_name=Vehicle.VECTOR_TABLE,
-        ))
-        instances.append(get_db_connection(
-            connection_string=Vehicle.VECTOR_DB_CONNECTION,
-            table_name=Vehicle.LABEL_TABLE,
-        ))
-
-    # connect() reuses shared pools, so only the first call per
-    # connection_string actually creates a pool.
     results = await asyncio.gather(*[inst.connect() for inst in instances])
     return all(results)
 
@@ -1249,7 +861,7 @@ def get_sync_engine(connection_string: str = None):
     Converts postgresql:// URLs to postgresql+psycopg2:// for SQLAlchemy.
 
     Args:
-        connection_string: PostgreSQL connection string. Defaults to Prediction.VECTOR_DB_CONNECTION.
+        connection_string: PostgreSQL connection string. Defaults to Ledger.DB_CONNECTION.
 
     Returns:
         SQLAlchemy Engine or None if not configured.
@@ -1258,7 +870,7 @@ def get_sync_engine(connection_string: str = None):
     from urllib.parse import urlparse
 
     if connection_string is None:
-        connection_string = Prediction.VECTOR_DB_CONNECTION
+        connection_string = Ledger.DB_CONNECTION
 
     if not connection_string:
         return None
@@ -1278,22 +890,12 @@ def get_sync_engine(connection_string: str = None):
 
 def get_sync_engine_for_pipeline(pipeline: str = "prediction"):
     """
-    Convenience getter for specific pipeline databases.
+    Convenience getter for the configured ledger database.
 
     Args:
-        pipeline: One of "prediction", "traffic", or "vehicle"
+        pipeline: Ignored. Kept for callers that still pass a dataset name.
 
     Returns:
         SQLAlchemy Engine or None if not configured.
     """
-    pipeline_map = {
-        "prediction": Prediction.VECTOR_DB_CONNECTION,
-        "traffic": Traffic.VECTOR_DB_CONNECTION,
-        "vehicle": Vehicle.VECTOR_DB_CONNECTION,
-    }
-
-    conn_str = pipeline_map.get(pipeline)
-    if not conn_str:
-        return None
-
-    return get_sync_engine(conn_str)
+    return get_sync_engine(Ledger.DB_CONNECTION)

@@ -48,17 +48,17 @@ def mock_observatory():
     from unittest.mock import Mock
 
     obs = Mock()
-    obs.search_diary.return_value = None
-    obs.search_history.return_value = None
-    obs.get_all_current_diaries.return_value = ([], 0, 0)
-    obs.get_completed_diaries.return_value = []
+    obs.search_live_trip.return_value = None
+    obs.search_completed_live_trip.return_value = None
+    obs.get_all_current_measurements.return_value = ([], 0, 0)
+    obs.get_completed_measurements.return_value = []
     return obs
 
 
 @pytest.fixture
 def fresh_event_bus():
     """Create a fresh ConsoleEventBus for testing."""
-    from interaction.events import ConsoleEventBus
+    from application.domain.internal_events import ConsoleEventBus
 
     return ConsoleEventBus()
 

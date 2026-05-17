@@ -2,7 +2,11 @@
 Tests for ConsoleEventBus - the event system for console-initiated events.
 """
 
-from interaction.events import ConsoleEventBus, ServicesStartEvent, console_events
+from application.domain.internal_events import (
+    ConsoleEventBus,
+    ServicesStartEvent,
+    console_events,
+)
 
 
 class TestConsoleEventBus:
@@ -174,7 +178,7 @@ class TestGlobalConsoleEvents:
 
     def test_global_bus_is_same_instance(self):
         """Importing console_events multiple times should return same instance."""
-        from interaction.events import console_events as bus1
-        from interaction.events import console_events as bus2
+        from application.domain.internal_events import console_events as bus1
+        from application.domain.internal_events import console_events as bus2
 
         assert bus1 is bus2

@@ -10,6 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
+from application.services.persistence_gateway import get_persistence_gateway
 from .time_utils import to_unix_time
 
 class FuelType(Enum):
@@ -86,7 +87,7 @@ class VehicleType:
         self.capacity_standing = capacity_standing
         self.capacity_total = (self.capacity_sitting + self.capacity_standing) if capacity_total == 0 else capacity_total
         self.construction_year = construction_year
-        self.constructors = constructors        
+        self.constructors = constructors
 
 
 class Vehicle:
@@ -104,6 +105,7 @@ class Vehicle:
         vehicle_type: VehicleType = None,
         history_loader=None,
         history_ledger=None,
+        persistence_gateway=None,
         history_ttl_seconds: int = 300,
     ):
         """Store stable vehicle identity and optional lazy history access."""
@@ -112,6 +114,7 @@ class Vehicle:
         self.vehicle_type = vehicle_type
         self._history_loader = history_loader
         self._history_ledger = history_ledger
+        self._persistence = persistence_gateway or get_persistence_gateway()
         self._history_ttl_seconds = history_ttl_seconds
         self._history_cache = None
         self._history_loaded_at = 0.0
@@ -135,7 +138,9 @@ class Vehicle:
     def _get_history_ledger(self):
         """Return this vehicle's lazy mini-ledger."""
         if self._history_ledger is None:
-            self._history_ledger = VehicleHistoryLedger()
+            self._history_ledger = VehicleHistoryLedger(
+                persistence_gateway=self._persistence,
+            )
         return self._history_ledger
 
     def get_history(self, force_refresh: bool = False):
@@ -213,12 +218,18 @@ class VehicleHistoryLedger:
         "measurement_count", "preferential_ratio", "recorded_at",
     ]
 
-    def __init__(self, connection_string: str = None, table_name: str = None):
+    def __init__(
+        self,
+        connection_string: str = None,
+        table_name: str = None,
+        persistence_gateway=None,
+    ):
         """Bind the mini-ledger to its DB destination configuration."""
         from config import Ledger
 
         self._conn_str = connection_string or Ledger.DB_CONNECTION
         self._table = table_name or Ledger.VEHICLE_TABLE
+        self._persistence = persistence_gateway or get_persistence_gateway()
         self._today_records: list[dict] = []
         self._history_cache: dict[str, tuple[float, list[dict]]] = {}
         self._history_ttl_seconds = 300
@@ -241,9 +252,11 @@ class VehicleHistoryLedger:
         """Push pending vehicle-trip rows to the database layer."""
         if not self._pending_db_rows:
             return
-        from persistence.database import write_vehicle_trips
-
-        write_vehicle_trips(self._conn_str, self._table, self._pending_db_rows)
+        self._persistence.write_vehicle_trip_records(
+            self._conn_str,
+            self._table,
+            self._pending_db_rows,
+        )
         self._pending_db_rows = []
 
     def get_today_vehicle_trips(self) -> list[dict]:
@@ -271,9 +284,7 @@ class VehicleHistoryLedger:
         date_end: str = None,
     ):
         """Query vehicle trip records through the DB layer."""
-        from persistence.database import read_vehicle_trips
-
-        return read_vehicle_trips(
+        return self._persistence.read_vehicle_trip_records(
             self._conn_str,
             self._table,
             vehicle_id=vehicle_id,

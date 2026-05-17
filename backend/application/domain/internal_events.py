@@ -105,7 +105,7 @@ class InternalEventBus(EventBus):
             self._subscribers[event_name].remove(handler)
 
     def emit(self, event: EventKey, data: Optional[dict] = None):
-        """Emit an event. Handlers receive a payload dict for compatibility."""
+        """Emit an event. Handlers receive a payload dictionary."""
         event_name, payload = self._event_payload(event, data)
         if event_name not in self._subscribers:
             return

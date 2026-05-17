@@ -27,7 +27,7 @@ import pandas as pd
 
 from application.domain.internal_events import LIVE_TRIP_FINISHED, domain_events
 from application.domain.live_data import LiveTrip
-from persistence.database import fetch_validation_rows_by_trip_ids
+from application.services.persistence_gateway import get_persistence_gateway
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RESULTS_DIR = PROJECT_ROOT / "results"
@@ -139,12 +139,14 @@ class Validator(ABC):
         predictor,
         observatory,
         bus_type_predictor=None,
+        persistence_gateway=None,
         logger_name: str = "validator",
     ):
         """Bind shared dependencies."""
         self.predictor = predictor
         self.observatory = observatory
         self._bus_type_predictor = bus_type_predictor
+        self.persistence = persistence_gateway or get_persistence_gateway()
         self.logger = logging.getLogger(logger_name)
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -661,11 +663,18 @@ class HistoricalValidator(Validator):
         """Prefix used for historical validation output files."""
         return "validation"
 
-    def __init__(self, predictor, observatory, bus_type_predictor=None):
+    def __init__(
+        self,
+        predictor,
+        observatory,
+        bus_type_predictor=None,
+        persistence_gateway=None,
+    ):
         super().__init__(
             predictor=predictor,
             observatory=observatory,
             bus_type_predictor=bus_type_predictor,
+            persistence_gateway=persistence_gateway,
             logger_name="validator.historical",
         )
 
@@ -890,11 +899,13 @@ class LiveValidator(Validator):
         predictor,
         observatory,
         bus_type_predictor=None,
+        persistence_gateway=None,
     ):
         super().__init__(
             predictor=predictor,
             observatory=observatory,
             bus_type_predictor=bus_type_predictor,
+            persistence_gateway=persistence_gateway,
             logger_name=f"validator.live.{session_id[:8]}",
         )
         self.session_id = session_id
@@ -1087,7 +1098,9 @@ class LiveValidator(Validator):
     async def _resolve_from_db(self, trip_ids: Set[str]) -> int:
         """One-shot DB lookup for trips not found in the historical ledger."""
         resolved = 0
-        rows_by_trip = await fetch_validation_rows_by_trip_ids(trip_ids)
+        rows_by_trip = await self.persistence.fetch_validation_rows_by_trip_ids(
+            trip_ids,
+        )
         for trip_id, rows in rows_by_trip.items():
             if len(rows) < MIN_MEASUREMENTS:
                 continue
@@ -1363,9 +1376,14 @@ class LiveValidator(Validator):
 class ValidationController:
     """Lifecycle facade for historical and live validation sessions."""
 
-    def __init__(self, logger_name: str = "validator.controller"):
+    def __init__(
+        self,
+        logger_name: str = "validator.controller",
+        persistence_gateway=None,
+    ):
         """Initialize controller-owned validation state."""
         self.logger = logging.getLogger(logger_name)
+        self.persistence = persistence_gateway or get_persistence_gateway()
         self.historical_thread: Optional[threading.Thread] = None
         self.live_thread: Optional[threading.Thread] = None
         self.live_session: Optional[LiveValidator] = None
@@ -1385,6 +1403,7 @@ class ValidationController:
             predictor=predictor,
             observatory=observatory,
             bus_type_predictor=bus_type_predictor,
+            persistence_gateway=self.persistence,
         )
         report = validator.validate_date(date_str)
         with self._lock:
@@ -1702,6 +1721,7 @@ class ValidationController:
             predictor=predictor,
             observatory=observatory,
             bus_type_predictor=bus_type_predictor,
+            persistence_gateway=self.persistence,
         )
 
     def _live_running_locked(self) -> bool:
@@ -2055,12 +2075,9 @@ def _write_metric_report(
         f.write("\n" + "=" * 60 + "\n")
 
 
-LiveValidationSession = LiveValidator
-
 __all__ = [
     "EvaluationValidator",
     "HistoricalValidator",
-    "LiveValidationSession",
     "LiveValidationStatus",
     "LiveValidator",
     "LossPlotResult",

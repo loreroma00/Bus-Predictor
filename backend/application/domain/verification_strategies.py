@@ -119,7 +119,7 @@ class ScaledMeasurementVerification(TripVerificationStrategy):
     def is_trip_valid(
         self, live_trip: "LiveTrip", shape: "Shape" = None, stop_count: int = None
     ) -> bool:
-        """Return True if the diary meets a dynamic minimum scaled by ``stop_count``."""
+        """Return True if the live trip has enough measurements for ``stop_count``."""
         if not live_trip.measurements:
             return False
 
