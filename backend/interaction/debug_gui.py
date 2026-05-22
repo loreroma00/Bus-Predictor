@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from .state_interface import StateInterface
 
 _state: "StateInterface" = None
+_map_tile_url = None
+_map_tile_attribution = None
 _REFRESH_MS = 5000
 
 # ============================================================
@@ -234,11 +236,15 @@ def _build_map_component():
     return html.Div([
         dl.Map([
             dl.TileLayer(
-                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-                attribution='&copy; <a href="https://carto.com/">CARTO</a>',
+                url=_map_tile_url,
+                attribution=_map_tile_attribution,
             ),
             dl.LayerGroup(id="hex-layer"),
-            dl.Pane(dl.LayerGroup(id="bus-layer"), name="buses", style={"zIndex": 650}),
+            dl.Pane(
+                dl.LayerGroup(id="live-trip-layer"),
+                name="live-trips",
+                style={"zIndex": 650},
+            ),
         ], id="main-map", center=[41.9028, 12.4964], zoom=12,
            style={
                "height": "65vh", "borderRadius": "8px",
@@ -277,7 +283,7 @@ def _register_callbacks(app):
     # Map layers update
     @app.callback(
         Output("hex-layer", "children"),
-        Output("bus-layer", "children"),
+        Output("live-trip-layer", "children"),
         Input("refresh-interval", "n_intervals"),
         Input("active-tab-store", "data"),
     )
@@ -310,19 +316,19 @@ def _register_callbacks(app):
                     children=dl.Tooltip(
                         f"Hex: {h['hex_id'][:12]}...\n"
                         f"Speed ratio: {h['speed_ratio']:.2f}\n"
-                        f"Buses: {h['bus_count']}\n"
+                        f"LiveTrips: {h['live_trip_count']}\n"
                         f"Avg speed: {h['current_speed']} kph"
                     ),
                 )
             )
 
-        bus_children = []
-        bus_positions = _state.get_bus_positions("Rome")
-        for b in bus_positions:
-            marker_color = _GREEN if b["status"] == "ACTIVE" else _ORANGE
-            bus_children.append(
+        live_trip_children = []
+        live_trip_positions = _state.get_live_trip_positions("Rome")
+        for live_trip in live_trip_positions:
+            marker_color = _GREEN if live_trip["status"] == "ACTIVE" else _ORANGE
+            live_trip_children.append(
                 dl.CircleMarker(
-                    center=[b["lat"], b["lon"]],
+                    center=[live_trip["lat"], live_trip["lon"]],
                     radius=7,
                     bubblingMouseEvents=False,
                     pathOptions={
@@ -330,14 +336,14 @@ def _register_callbacks(app):
                         "fillOpacity": 0.95, "weight": 2,
                     },
                     children=dl.Tooltip(
-                        f"Route {b['route_id']} | {b['label']}\n"
-                        f"{b['direction']}\n"
-                        f"Speed: {b['speed']} kph"
+                        f"Route {live_trip['route_id']} | {live_trip['label']}\n"
+                        f"{live_trip['direction']}\n"
+                        f"Speed: {live_trip['speed']} kph"
                     ),
                 )
             )
 
-        return hex_children, bus_children
+        return hex_children, live_trip_children
 
     # Stats cards
     @app.callback(
@@ -352,8 +358,8 @@ def _register_callbacks(app):
             stats = _state.get_system_stats()
             traffic = _state.get_traffic_stats("Rome")
             return dbc.Row([
-                dbc.Col(_stat_card("Active", stats["active_buses"], _GREEN), width="auto"),
-                dbc.Col(_stat_card("Deposit", stats["deposit_buses"], _ORANGE), width="auto"),
+                dbc.Col(_stat_card("Active", stats["active_live_trips"], _GREEN), width="auto"),
+                dbc.Col(_stat_card("Deposit", stats["deposit_live_trips"], _ORANGE), width="auto"),
                 dbc.Col(_stat_card("LiveTrips", stats["live_trip_count"], _ACCENT_BLUE), width="auto"),
                 dbc.Col(_stat_card("Hexagons", traffic["with_traffic"], _ACCENT), width="auto"),
             ], className="g-2")
@@ -558,7 +564,7 @@ def _register_callbacks(app):
                                 style={"color": _TEXT_DIM, "padding": "12px"})
             return dash_table.DataTable(
                 columns=[
-                    {"name": "ID", "id": "bus_id"},
+                    {"name": "ID", "id": "vehicle_id"},
                     {"name": "Route", "id": "route_id"},
                     {"name": "Direction", "id": "headsign"},
                     {"name": "Speed", "id": "speed"},
@@ -808,7 +814,7 @@ def _render_vehicles_tab():
 
     return dash_table.DataTable(
         columns=[
-            {"name": "ID", "id": "bus_id"},
+            {"name": "ID", "id": "vehicle_id"},
             {"name": "Type", "id": "vehicle_type"},
             {"name": "Route", "id": "route_id"},
             {"name": "Direction", "id": "headsign"},
@@ -936,10 +942,18 @@ def _ledger_card(title, rows, color=_ACCENT):
 # ============================================================
 
 
-def create_app(state: "StateInterface") -> dash.Dash:
+def create_app(
+    state: "StateInterface",
+    map_tile_url: str | None = None,
+    map_tile_attribution: str | None = None,
+) -> dash.Dash:
     """Create a app."""
-    global _state
+    global _state, _map_tile_url, _map_tile_attribution
     _state = state
+    if map_tile_url:
+        _map_tile_url = map_tile_url
+    if map_tile_attribution:
+        _map_tile_attribution = map_tile_attribution
 
     app = dash.Dash(
         __name__,
@@ -952,17 +966,29 @@ def create_app(state: "StateInterface") -> dash.Dash:
     return app
 
 
-def start_gui(state: "StateInterface", port: int = 8050):
+def start_gui(
+    state: "StateInterface",
+    port: int,
+    host: str,
+    display_host: str,
+    display_scheme: str,
+    map_tile_url: str | None = None,
+    map_tile_attribution: str | None = None,
+):
     """Start the gui."""
-    app = create_app(state)
+    app = create_app(
+        state,
+        map_tile_url=map_tile_url,
+        map_tile_attribution=map_tile_attribution,
+    )
 
     def run_server():
         """Run the server."""
-        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+        app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
 
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
-    print(f" > Dashboard GUI started at http://localhost:{port}")
+    print(f" > Dashboard GUI started at {display_scheme}://{display_host}:{port}")
     return thread
 
 

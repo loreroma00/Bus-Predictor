@@ -15,6 +15,7 @@ import math
 from typing import TYPE_CHECKING
 from types import SimpleNamespace
 
+from config import Config
 from ..domain.live_data import GPSData
 from ..domain.weather import Weather
 from application.domain.interfaces import Pipeline
@@ -33,7 +34,7 @@ class PredictionPipeline(Pipeline):
         live_trip: "LiveTrip",
         topology=None,
         served_ratio: float = 1.0,
-        config: dict = None,
+        config: Config | dict = None,
     ):
         """
         Initialize pipeline with one completed live trip and static data.
@@ -48,9 +49,9 @@ class PredictionPipeline(Pipeline):
         self.topology = topology
         self.served_ratio = served_ratio
 
-        cleaning_cfg = config.get("data_cleaning", {}) if config else {}
+        config = Config.coerce(config)
         self.uptime_lookback_seconds = (
-            int(cleaning_cfg.get("served_ratio_lookback_minutes", 60)) * 60
+            config.data_cleaning.served_ratio_lookback_minutes * 60
         )
 
         self.uptime_timestamps = _load_uptime_data("uptime.csv")
@@ -375,7 +376,7 @@ def _process_parquet_file(file_path: str) -> list["LiveTrip"]:
             # Reconstruct Measurement
             m = Measurement(
                 id=row.get("stop_id"),
-                vehicle_id=row.get("vehicle_id", row.get("autobus_id", 0)),
+                vehicle_id=row.get("vehicle_id", 0),
                 next_stop=row.get("next_stop"),
                 next_stop_distance=row.get("next_stop_distance"),
                 gpsdata=gps_data,

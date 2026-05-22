@@ -34,23 +34,25 @@ from joblib import Parallel, delayed
 from scipy.interpolate import PchipInterpolator, interp1d
 from sklearn.preprocessing import LabelEncoder
 
+from application.runtime import ApplicationContext
+from application.domain.artifacts import Artifact, DEFAULT_ARTIFACTS
 from application.domain.static_data_fetcher import StaticDataFetcher
-from config import Ledger
 from persistence.gateway import create_persistence_gateway
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-PARQUET_DIR = PROJECT_ROOT / "parquets"
-CANONICAL_MAP_PATH = PARQUET_DIR / "stop_route_map.parquet"
-STOP_ROUTE_CONFIG_PATH = PARQUET_DIR / "stop_route_config.json"
-TRAFFIC_AVERAGES_PATH = PARQUET_DIR / "traffic_averages.parquet"
+PROJECT_ROOT = DEFAULT_ARTIFACTS.project_root
+PARQUET_DIR = DEFAULT_ARTIFACTS.parquet_dir
+CANONICAL_MAP_PATH = DEFAULT_ARTIFACTS.path(Artifact.CANONICAL_STOP_MAP)
+STOP_ROUTE_CONFIG_PATH = DEFAULT_ARTIFACTS.path(Artifact.CANONICAL_STOP_CONFIG)
+TRAFFIC_AVERAGES_PATH = DEFAULT_ARTIFACTS.path(Artifact.TRAFFIC_AVERAGES)
 UNSCALED_DATASET_PATH = PARQUET_DIR / "dataset_lstm_unscaled.parquet"
 FINAL_DATASET_PATH = PARQUET_DIR / "dataset_lstm_final.parquet"
 ROUTE_ENCODER_PATH = PARQUET_DIR / "route_encoder.pkl"
 ROUTE_ENCODING_PATH = PARQUET_DIR / "route_encoding.json"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
-GTFS_MD5_PATH = PARQUET_DIR / "gtfs_md5.json"
-PERSISTENCE = create_persistence_gateway()
+GTFS_MD5_PATH = DEFAULT_ARTIFACTS.path(Artifact.GTFS_MD5)
+CONFIG_CONTEXT = ApplicationContext()
+PERSISTENCE = create_persistence_gateway(CONFIG_CONTEXT.config)
 
 H3_RESOLUTION = 9
 R_EARTH = 6371000
@@ -231,14 +233,13 @@ def get_remote_gtfs_md5() -> str | None:
     """Fetch the remote GTFS MD5 hash."""
     import requests as rq
 
-    url_md5 = "https://romamobilita.it/wp-content/uploads/drupal/rome_static_gtfs.zip.md5"
     headers = {
-        "Referer": "https://romamobilita.it/sistemi-e-tecnologie/open-data/",
+        "Referer": CONFIG_CONTEXT.config.urls.gtfs_referer,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
 
     try:
-        response = rq.get(url_md5, headers=headers, timeout=15)
+        response = rq.get(CONFIG_CONTEXT.config.urls.gtfs_md5, headers=headers, timeout=15)
         return response.text.strip()
     except Exception as e:
         print(f"Warning: Could not fetch remote MD5: {e}")
@@ -247,7 +248,7 @@ def get_remote_gtfs_md5() -> str | None:
 
 def get_local_gtfs_md5() -> str | None:
     """Return the MD5 of the local GTFS zip file, if present."""
-    gtfs_zip = PROJECT_ROOT / "rome_static_gtfs.zip"
+    gtfs_zip = PROJECT_ROOT / CONFIG_CONTEXT.config.paths.gtfs_static_zip
     if not gtfs_zip.exists():
         return None
 
@@ -332,7 +333,12 @@ def build_canonical_shape_map(
     if fetch_static:
         try:
             with working_directory(PROJECT_ROOT):
-                fetcher = StaticDataFetcher(zip_path=str(PROJECT_ROOT / "rome_static_gtfs.zip"))
+                fetcher = StaticDataFetcher(
+                    zip_path=str(PROJECT_ROOT / CONFIG_CONTEXT.config.paths.gtfs_static_zip),
+                    static_url=CONFIG_CONTEXT.config.urls.gtfs_static,
+                    md5_url=CONFIG_CONTEXT.config.urls.gtfs_md5,
+                    referer=CONFIG_CONTEXT.config.urls.gtfs_referer,
+                )
                 fetcher.fetch()
         except Exception as e:
             print(f"Warning: StaticDataFetcher failed: {e}")
@@ -502,7 +508,7 @@ def compute_traffic_averages(
     """Compute per-H3/day/hour traffic averages from DB-returned rows."""
     if traffic_rows is None:
         print("Fetching traffic data from database...")
-        traffic_rows = PERSISTENCE.read_traffic_training_rows()
+        traffic_rows = PERSISTENCE.read_historical_traffic_rows()
 
     if traffic_rows is None or traffic_rows.empty:
         print("No traffic data found.")
@@ -552,15 +558,12 @@ def get_processed_dates(parquet_dir: Path = PARQUET_DIR) -> set[str]:
 def extract_historical_training_rows(start_date: str = None) -> pd.DataFrame:
     """Read historical measurement rows through the persistence facade."""
     print("Executing query and loading data (this may take a while)...")
-    df = PERSISTENCE.read_prediction_training_rows(start_date=start_date)
+    df = PERSISTENCE.read_historical_training_rows(start_date=start_date)
     if df is None:
         raise RuntimeError("Ledger database not configured. Check config.ini.")
     df = normalize_historical_training_rows(df)
     print(f"Loaded {len(df)} rows from database.")
     return df
-
-
-extract_prediction_rows = extract_historical_training_rows
 
 
 def normalize_historical_training_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -679,10 +682,6 @@ def preprocess_historical_rows(
     if write_daily_parquets:
         write_daily_dynamic_parquets(df, parquet_dir=parquet_dir)
     return df
-
-
-preprocess_prediction_rows = preprocess_historical_rows
-
 
 def write_daily_dynamic_parquets(
     df: pd.DataFrame,
@@ -1436,8 +1435,8 @@ def extract_historical(start_date: str = None, end_date: str = None) -> pd.DataF
     date_start = datetime.strptime(start_date, "%Y-%m-%d").timestamp() if start_date else None
     date_end = datetime.strptime(end_date, "%Y-%m-%d").timestamp() if end_date else None
     df = PERSISTENCE.read_historical_records(
-        Ledger.DB_CONNECTION,
-        Ledger.HISTORICAL_TABLE,
+        CONFIG_CONTEXT.config.ledger.db_connection,
+        CONFIG_CONTEXT.config.ledger.historical_table,
         date_start=date_start,
         date_end=date_end,
     )
@@ -1452,8 +1451,8 @@ def extract_vehicle_trips(
 ) -> pd.DataFrame:
     """Extract vehicle-level trip performance data from the ledger database."""
     df = PERSISTENCE.read_vehicle_trip_records(
-        Ledger.DB_CONNECTION,
-        Ledger.VEHICLE_TABLE,
+        CONFIG_CONTEXT.config.ledger.db_connection,
+        CONFIG_CONTEXT.config.ledger.vehicle_table,
         route_id=route_id,
         date_start=start_date,
         date_end=end_date,

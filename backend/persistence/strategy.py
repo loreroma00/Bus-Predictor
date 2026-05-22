@@ -1,7 +1,4 @@
-"""
-Persistence Strategies - Abstract strategy patterns for persistence operations.
-Contains cache strategies and saving strategies.
-"""
+"""Cache strategies and shared persistence runtime helpers."""
 
 import logging
 import asyncio
@@ -285,46 +282,3 @@ def shutdown_db_loop():
         _db_loop_thread.join(timeout=5)
     _db_loop = None
     _db_loop_thread = None
-
-
-# ============================================================
-# Saving Strategy Pattern (Diaries)
-# ============================================================
-class saving_strategy(ABC):
-    """Abstract base for diary saving strategies."""
-
-    @abstractmethod
-    def execute(self, diaries_list, filename):
-        """Execute."""
-        pass
-
-
-class saving_parquet(saving_strategy):
-    """Saves diaries to parquet format."""
-
-    def execute(self, diaries_list, filename):
-        # Import here to avoid circular dependency
-        """Execute."""
-        from .diaries import DIARIES_PATH, updateParquet, writeParquet
-        import pandas as pd
-
-        df = pd.DataFrame(diaries_list)
-
-        # Ensure stop_sequence columns are integer
-        for col in ["sequence", "stop_sequence"]:
-            if col in df.columns:
-                df[col] = (
-                    pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
-                )
-
-        # Ensure directory exists
-        os.makedirs(DIARIES_PATH, exist_ok=True)
-        full_path = os.path.join(DIARIES_PATH, filename)
-
-        if os.path.exists(full_path):
-            appended = updateParquet(df, full_path)
-            if appended:
-                logging.info(f"Appended {len(df)} records to {full_path}")
-        else:
-            writeParquet(df, full_path)
-            logging.info(f"Saved {len(df)} records to {full_path}")

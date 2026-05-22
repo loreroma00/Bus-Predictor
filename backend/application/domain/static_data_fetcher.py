@@ -6,14 +6,10 @@ import zipfile
 import hashlib
 import requests as rq
 
-# Static configuration
 BASE_PATH = os.getcwd()
 FULL_PATH = os.path.join(BASE_PATH, 'rome_static_gtfs.zip')
-URL_STATIC = 'https://romamobilita.it/wp-content/uploads/drupal/rome_static_gtfs.zip'
-URL_MD5 = 'https://romamobilita.it/wp-content/uploads/drupal/rome_static_gtfs.zip.md5'
 
 HEADERS = {
-    'Referer': 'https://romamobilita.it/sistemi-e-tecnologie/open-data/',
     'Upgrade-Insecure-Requests': '1',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
     'sec-ch-ua': '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
@@ -25,9 +21,20 @@ HEADERS = {
 class StaticDataFetcher:
     """Fetches and manages GTFS static data files."""
     
-    def __init__(self, zip_path=FULL_PATH):
+    def __init__(
+        self,
+        zip_path=FULL_PATH,
+        static_url: str | None = None,
+        md5_url: str | None = None,
+        referer: str | None = None,
+    ):
         """Store the local path used for the GTFS zip cache."""
         self.zip_path = zip_path
+        self.static_url = static_url
+        self.md5_url = md5_url
+        self.headers = dict(HEADERS)
+        if referer:
+            self.headers["Referer"] = referer
     
     def fetch(self) -> str:
         """
@@ -66,14 +73,17 @@ class StaticDataFetcher:
         Check remote MD5 and download if different.
         Returns the remote MD5.
         """
+        if not self.md5_url or not self.static_url:
+            raise RuntimeError("GTFS static URLs are not configured")
+
         # Get remote MD5
-        response = rq.get(URL_MD5, headers=HEADERS, timeout=15)
+        response = rq.get(self.md5_url, headers=self.headers, timeout=15)
         remote_md5 = response.text.strip()
         
         # Compare and download
         if local_md5 is None or local_md5.strip() not in remote_md5:
             print(f"Downloading static GTFS data (New Version: {remote_md5})...")
-            content = rq.get(URL_STATIC, headers=HEADERS, timeout=30).content
+            content = rq.get(self.static_url, headers=self.headers, timeout=30).content
             with open(self.zip_path, 'wb') as f:
                 f.write(content)
         

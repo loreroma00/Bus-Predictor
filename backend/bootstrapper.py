@@ -8,10 +8,11 @@ state interface, starts/stops collection services, and performs final cleanup.
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Any
 
+from config import Config
 from application import domain
+from application.domain.artifacts import Artifact
 from application.domain.map_info import create_geocoding_service
 from application.runtime import ApplicationContext
 from application.services.persistence_gateway import (
@@ -24,10 +25,6 @@ from persistence import (
     load_pickle,
 )
 from persistence.gateway import create_persistence_gateway
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-PARQUET_DIR = PROJECT_ROOT / "parquets"
 
 
 def configure_logging(debug_mode: bool = False, log_file: str = "backend.log"):
@@ -50,30 +47,26 @@ def configure_logging(debug_mode: bool = False, log_file: str = "backend.log"):
 
 
 def build_runtime_context(
-    config: dict[str, Any] | None = None,
+    config: Config | None = None,
     lenient_pipeline: bool = False,
+    context: ApplicationContext | None = None,
 ) -> ApplicationContext:
     """Initialize Observatory, City, cache strategy, DB singleton and live services."""
-    from config import load_config
+    if context is not None:
+        config = context.config
+    config = Config.coerce(config)
 
-    if config is None:
-        config = load_config()
-
-    file_setting = (
-        config.get("data_cleaning", {})
-        .get("lenient_pipeline", "false")
-        .lower()
-        == "true"
-    )
-    if lenient_pipeline or file_setting:
-        config["lenient_pipeline"] = True
+    if lenient_pipeline or config.data_cleaning.lenient_pipeline:
+        config = config.with_lenient_pipeline(True)
         logging.info("Lenient Pipeline ENABLED.")
 
     logging.info("Available cache strategies: %s", get_available_strategies())
-    strategy_name = config.get("services", {}).get("cache_strategy", "file")
+    strategy_name = config.services.cache_strategy
     logging.info("Using cache strategy: '%s'", strategy_name)
     cache_strategy = get_cache_strategy(strategy_name)
-    persistence_gateway = configure_persistence_gateway(create_persistence_gateway())
+    persistence_gateway = configure_persistence_gateway(
+        create_persistence_gateway(config)
+    )
 
     logging.info("Creating Observatory...")
     observatory = domain.Observatory(
@@ -82,13 +75,17 @@ def build_runtime_context(
         persistence_gateway=persistence_gateway,
     )
 
-    persistence_gateway.ensure_database(config)
+    persistence_gateway.ensure_database()
 
-    static_bus_lanes = load_pickle("static_bus_lanes_roma.pkl", default={})
+    static_bus_lanes = load_pickle(config.paths.static_bus_lanes, default={})
     if static_bus_lanes:
         logging.info("Loaded static bus lanes map (%s hexes)", len(static_bus_lanes))
 
-    observatory.add_city("Rome", static_bus_lanes=static_bus_lanes)
+    observatory.add_city(
+        "Rome",
+        static_bus_lanes=static_bus_lanes,
+        weather_url=config.urls.weather_api,
+    )
     city = observatory.get_city("Rome")
 
     from application.domain.weather_strategy import (
@@ -96,9 +93,8 @@ def build_runtime_context(
         get_weather_strategy,
     )
 
-    services_cfg = config.get("services", {})
-    weather_strategy_name = services_cfg.get("weather_strategy", "greedy")
-    weather_subsets = int(services_cfg.get("weather_subsets", "4"))
+    weather_strategy_name = config.services.weather_strategy
+    weather_subsets = config.services.weather_subsets
     city.weather_strategy = get_weather_strategy(
         weather_strategy_name,
         n_subsets=weather_subsets,
@@ -112,15 +108,26 @@ def build_runtime_context(
     if hasattr(cache_strategy, "load_city_cache"):
         cache_strategy.load_city_cache(city)
 
-    geocoding_service = create_geocoding_service(city)
+    geocoding_service = create_geocoding_service(
+        city,
+        nominatim_url=config.urls.nominatim_url,
+        user_agent=config.services.nominatim_user_agent,
+    )
     observatory._geocoding = geocoding_service
 
     traffic_service = None
     from application.live.traffic_service import create_traffic_service
 
-    tomtom_api_key = config.get("api", {}).get("tomtom_api_key")
+    tomtom_api_key = config.api.tomtom_api_key
     if tomtom_api_key:
-        traffic_service = create_traffic_service(city, api_key=tomtom_api_key, zoom=15)
+        traffic_service = create_traffic_service(
+            city,
+            api_key=tomtom_api_key,
+            zoom=config.traffic.tomtom_zoom,
+            base_url=config.urls.tomtom_traffic,
+            qps_limit=config.traffic.qps_limit,
+            tile_ttl_seconds=config.traffic.tile_ttl_seconds,
+        )
         city.set_traffic_service(traffic_service)
         logging.info("Traffic service initialized.")
     else:
@@ -131,10 +138,10 @@ def build_runtime_context(
 
     from application.live.feed_fetcher import LiveFeedFetcher
 
-    urls = config.get("urls", {})
     feed_fetcher = LiveFeedFetcher(
-        vehicles_url=urls.get("rtgtfs_vehicles"),
-        trips_url=urls.get("rtgtfs_trip_updates"),
+        vehicles_url=config.urls.rtgtfs_vehicles,
+        trips_url=config.urls.rtgtfs_trip_updates,
+        referer=config.urls.gtfs_referer,
     )
     stop_event = threading.Event()
     shutdown_event = threading.Event()
@@ -191,13 +198,21 @@ def build_serving_runtime(
     time_model_name: str | None = None,
     crowd_model_name: str | None = None,
     lenient_pipeline: bool = False,
+    context: ApplicationContext | None = None,
 ):
     """Build the full runtime used by ``main.py serve``."""
     print("\n[1/5] Initializing collection pipeline (Observatory, City, services)...")
-    context = build_runtime_context(lenient_pipeline=lenient_pipeline)
+    context = build_runtime_context(
+        context=context,
+        lenient_pipeline=lenient_pipeline,
+    )
 
-    print("\n[2/5] Generating canonical route map (if needed)...")
-    _ensure_canonical_map()
+    print("\n[2/5] Ensuring canonical route map is available...")
+    if not context.observatory.artifacts.ensure(
+        Artifact.CANONICAL_STOP_MAP,
+        build=True,
+    ):
+        raise RuntimeError("Canonical route map is not available.")
 
     print("\n[3/5] Loading ML model...")
     from application.model.model_loader import ModelLoader
@@ -232,17 +247,6 @@ def build_serving_runtime(
     )
     start_collection_services(context)
     return runtime
-
-
-def _ensure_canonical_map():
-    """Build the canonical static map required by the predictor when absent."""
-    if (PARQUET_DIR / "stop_route_map.parquet").exists():
-        return
-
-    print("Generating stop_route_map.parquet...")
-    from prepare_dataset import build_canonical_shape_map
-
-    build_canonical_shape_map()
 
 
 def _model_cards(candidates) -> list[dict[str, str]]:

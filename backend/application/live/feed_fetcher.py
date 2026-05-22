@@ -11,7 +11,6 @@ from application.domain.live_data import LiveFeedRecord
 
 
 HEADERS: dict[str, str] = {
-    "Referer": "https://romamobilita.it/sistemi-e-tecnologie/open-data/",
     "Upgrade-Insecure-Requests": "1",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
     "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
@@ -23,10 +22,13 @@ HEADERS: dict[str, str] = {
 class LiveFeedFetcher:
     """Fetches and parses GTFS-RT vehicle positions and trip updates."""
 
-    def __init__(self, vehicles_url=None, trips_url=None):
+    def __init__(self, vehicles_url=None, trips_url=None, referer: str | None = None):
         """Store the GTFS-RT endpoints; warns if either URL is missing."""
         self.vehicles_url = vehicles_url
         self.trips_url = trips_url
+        self.headers = dict(HEADERS)
+        if referer:
+            self.headers["Referer"] = referer
         
         if not self.vehicles_url:
             logging.warning("LiveFeedFetcher initialized without vehicles_url")
@@ -49,7 +51,7 @@ class LiveFeedFetcher:
 
         df_vp = pd.DataFrame()
         try:
-            resp_vp = rq.get(self.vehicles_url, headers=HEADERS, timeout=15)
+            resp_vp = rq.get(self.vehicles_url, headers=self.headers, timeout=15)
             if resp_vp.status_code == 200:
                 vp_raw = grt.FeedMessage()
                 try:
@@ -69,7 +71,7 @@ class LiveFeedFetcher:
         # 2. Fetch Trip Updates (Optional)
         df_tu = pd.DataFrame()
         try:
-            resp_tu = rq.get(self.trips_url, headers=HEADERS, timeout=15)
+            resp_tu = rq.get(self.trips_url, headers=self.headers, timeout=15)
             if resp_tu.status_code == 200:
                 trip_raw = grt.FeedMessage()
                 try:

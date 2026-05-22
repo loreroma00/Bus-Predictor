@@ -25,10 +25,8 @@ from application.domain.spatial_utils import (
 if TYPE_CHECKING:
     from application.domain.cities import City
 
-TOMTOM_BASE_URL = "https://api.tomtom.com/traffic/map/4/tile/flow"
 DEFAULT_ZOOM = 12
 QPS_LIMIT = 10
-REQUEST_DELAY = 1.0 / QPS_LIMIT
 DIRECTIONS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 TILE_TTL_SECONDS = 900
 
@@ -36,11 +34,18 @@ TILE_TTL_SECONDS = 900
 class _TomTomTrafficClient:
     """Private TomTom MVT client used only by TrafficService."""
 
-    def __init__(self, api_key: str, zoom: int = DEFAULT_ZOOM):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "",
+        zoom: int = DEFAULT_ZOOM,
+        qps_limit: int = QPS_LIMIT,
+    ):
         """Store API credentials and rate-limit state."""
         self.api_key = api_key
         self.zoom = zoom
-        self.base_url = TOMTOM_BASE_URL
+        self.base_url = base_url.rstrip("/")
+        self._request_delay = 1.0 / max(1, qps_limit)
         self._last_request_time = 0.0
 
     def get_tiles_for_bbox(
@@ -62,8 +67,8 @@ class _TomTomTrafficClient:
     def _rate_limit(self):
         """Enforce TomTom request rate limiting."""
         elapsed = time.time() - self._last_request_time
-        if elapsed < REQUEST_DELAY:
-            time.sleep(REQUEST_DELAY - elapsed)
+        if elapsed < self._request_delay:
+            time.sleep(self._request_delay - elapsed)
         self._last_request_time = time.time()
 
     def fetch_tile(self, x: int, y: int, flow_type: str = "absolute") -> dict | None:
@@ -110,6 +115,9 @@ class TrafficService:
         city: "City",
         api_key: str | None = None,
         zoom: int = DEFAULT_ZOOM,
+        base_url: str | None = None,
+        qps_limit: int = QPS_LIMIT,
+        tile_ttl_seconds: int = TILE_TTL_SECONDS,
         traffic_client=None,
     ):
         """
@@ -132,10 +140,13 @@ class TrafficService:
         self._city = city
         self._traffic_client = traffic_client or _TomTomTrafficClient(
             api_key=api_key,
+            base_url=base_url or "",
             zoom=zoom,
+            qps_limit=qps_limit,
         )
         client_zoom = getattr(self._traffic_client, "zoom", None)
         self._zoom = client_zoom if isinstance(client_zoom, int) else zoom
+        self._tile_ttl_seconds = tile_ttl_seconds
         self._tile_last_update: dict[tuple[int, int], float] = {}  # Track tile TTLs
         self._paused_until = 0.0
 
@@ -151,9 +162,10 @@ class TrafficService:
         return time.time() < self._paused_until
 
     def _is_tile_expired(
-        self, tile: tuple[int, int], ttl: int = TILE_TTL_SECONDS
+        self, tile: tuple[int, int], ttl: int | None = None
     ) -> bool:
         """Check if a tile's cached data has expired."""
+        ttl = self._tile_ttl_seconds if ttl is None else ttl
         last_update = self._tile_last_update.get(tile, 0)
         return (time.time() - last_update) > ttl
 
@@ -593,7 +605,12 @@ def _tile_coords_to_latlon(
 
 
 def create_traffic_service(
-    city: "City", api_key: str, zoom: int = DEFAULT_ZOOM
+    city: "City",
+    api_key: str,
+    zoom: int = DEFAULT_ZOOM,
+    base_url: str | None = None,
+    qps_limit: int = QPS_LIMIT,
+    tile_ttl_seconds: int = TILE_TTL_SECONDS,
 ) -> TrafficService:
     """
     Factory function to create a TrafficService.
@@ -606,4 +623,11 @@ def create_traffic_service(
     Returns:
         Configured TrafficService instance
     """
-    return TrafficService(city, api_key=api_key, zoom=zoom)
+    return TrafficService(
+        city,
+        api_key=api_key,
+        zoom=zoom,
+        base_url=base_url,
+        qps_limit=qps_limit,
+        tile_ttl_seconds=tile_ttl_seconds,
+    )

@@ -9,16 +9,18 @@ from bootstrapper import (
     start_collection_services,
     wire_state_interface,
 )
+from application.runtime import ApplicationContext
 from . import console
 
 
 def main(debug_mode: bool = False, lenient_pipeline: bool = False):
     """Entry point for ``collect``: bootstraps logging, services, and the observation loop (plus debug GUI)."""
     configure_logging(debug_mode=debug_mode)
-    context = None
+    context = ApplicationContext()
 
     try:
         context = build_runtime_context(
+            context=context,
             lenient_pipeline=lenient_pipeline,
         )
 

@@ -105,6 +105,8 @@ class Vehicle:
         vehicle_type: VehicleType = None,
         history_loader=None,
         history_ledger=None,
+        history_connection_string: str = None,
+        history_table_name: str = None,
         persistence_gateway=None,
         history_ttl_seconds: int = 300,
     ):
@@ -114,6 +116,8 @@ class Vehicle:
         self.vehicle_type = vehicle_type
         self._history_loader = history_loader
         self._history_ledger = history_ledger
+        self._history_connection_string = history_connection_string
+        self._history_table_name = history_table_name
         self._persistence = persistence_gateway or get_persistence_gateway()
         self._history_ttl_seconds = history_ttl_seconds
         self._history_cache = None
@@ -139,6 +143,8 @@ class Vehicle:
         """Return this vehicle's lazy mini-ledger."""
         if self._history_ledger is None:
             self._history_ledger = VehicleHistoryLedger(
+                connection_string=self._history_connection_string,
+                table_name=self._history_table_name,
                 persistence_gateway=self._persistence,
             )
         return self._history_ledger
@@ -225,10 +231,8 @@ class VehicleHistoryLedger:
         persistence_gateway=None,
     ):
         """Bind the mini-ledger to its DB destination configuration."""
-        from config import Ledger
-
-        self._conn_str = connection_string or Ledger.DB_CONNECTION
-        self._table = table_name or Ledger.VEHICLE_TABLE
+        self._conn_str = connection_string
+        self._table = table_name
         self._persistence = persistence_gateway or get_persistence_gateway()
         self._today_records: list[dict] = []
         self._history_cache: dict[str, tuple[float, list[dict]]] = {}

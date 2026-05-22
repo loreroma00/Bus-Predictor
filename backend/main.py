@@ -28,18 +28,20 @@ def run_serve(
 ):
     """Create and run the FastAPI server."""
     import uvicorn
-    from api import create_app, load_api_config
+    from api import create_app
+    from application.runtime import ApplicationContext
 
-    api_config = load_api_config()
+    context = ApplicationContext()
     app = create_app(
         time_model_name=time_model_name,
         crowd_model_name=crowd_model_name,
         lenient_pipeline=lenient_pipeline,
+        context=context,
     )
     uvicorn.run(
         app,
-        host=host or api_config["host"],
-        port=port or api_config["port"],
+        host=host or context.config.api.host,
+        port=port or context.config.api.port,
     )
 
 
@@ -113,9 +115,11 @@ Commands:
         )
     elif args.command == "test-db":
         try:
+            from application.runtime import ApplicationContext
             from persistence.database import test_database_connection
 
-            asyncio.run(test_database_connection())
+            context = ApplicationContext()
+            asyncio.run(test_database_connection(context.config))
         except KeyboardInterrupt:
             pass
         except Exception as e:

@@ -17,7 +17,7 @@ except ImportError:
     ASYNCPG_AVAILABLE = False
     asyncpg = None
 
-from config import Ledger
+from config import Config
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -125,18 +125,86 @@ class TimescaleDBConnection:
 _db_instances: dict[tuple[str, str], "TimescaleDBConnection"] = {}
 
 
+HISTORICAL_COLUMNS = (
+    "trip_id",
+    "route_id",
+    "direction_id",
+    "vehicle_id",
+    "latitude",
+    "longitude",
+    "hexagon_id",
+    "stop_sequence",
+    "shape_dist_travelled",
+    "distance_to_next_stop",
+    "is_in_preferential",
+    "measurement_time",
+    "actual_start_time",
+    "schedule_adherence",
+    "scheduled_start_time",
+    "delay_genuine",
+    "current_speed",
+    "speed_ratio",
+    "current_traffic_speed",
+    "temperature",
+    "apparent_temperature",
+    "humidity",
+    "precipitation",
+    "wind_speed",
+    "weather_code",
+    "bus_type",
+    "door_number",
+    "occupancy_status",
+    "deposits",
+)
+
+PREDICTED_COLUMNS = (
+    "route_id",
+    "direction_id",
+    "trip_date",
+    "scheduled_start",
+    "stop_id",
+    "stop_sequence",
+    "predicted_arrival",
+    "predicted_delay_sec",
+    "predicted_crowd_level",
+    "prediction_timestamp",
+)
+
+VEHICLE_TRIP_COLUMNS = (
+    "vehicle_id",
+    "trip_id",
+    "route_id",
+    "direction_id",
+    "vehicle_type_name",
+    "fuel_type",
+    "euro_class",
+    "capacity_total",
+    "trip_date",
+    "scheduled_start",
+    "actual_start_time",
+    "trip_end_time",
+    "trip_duration_sec",
+    "mean_delay_sec",
+    "median_delay_sec",
+    "max_delay_sec",
+    "min_delay_sec",
+    "std_delay_sec",
+    "mean_occupancy",
+    "max_occupancy",
+    "measurement_count",
+    "preferential_ratio",
+    "recorded_at",
+)
+
+
 def get_db_connection(
-    config: dict = None, connection_string: str = None, table_name: str = None
+    connection_string: str,
+    table_name: str,
 ) -> TimescaleDBConnection:
     """
     Get or create a database connection for the given string and table.
     """
     global _db_instances
-
-    if not connection_string:
-        connection_string = Ledger.DB_CONNECTION
-    if not table_name:
-        table_name = Ledger.HISTORICAL_TABLE
 
     key = (connection_string, table_name)
 
@@ -163,28 +231,28 @@ def _log_connection_target(uri: str, health_logger: logging.Logger):
         health_logger.info("   Target: [Could not parse connection string]")
 
 
+def _insert_statement(
+    table_name: str,
+    columns: tuple[str, ...],
+    on_conflict: str | None = "ON CONFLICT DO NOTHING",
+) -> str:
+    """Build an asyncpg positional INSERT statement for a ledger table."""
+    column_sql = ", ".join(columns)
+    placeholder_sql = ", ".join(f"${idx}" for idx in range(1, len(columns) + 1))
+    conflict_sql = f"\n        {on_conflict}" if on_conflict else ""
+    return f"""
+        INSERT INTO {table_name} (
+            {column_sql}
+        ) VALUES (
+            {placeholder_sql}
+        ){conflict_sql}
+    """
+
+
 def _mock_insert_statement(table_type: str, table_name: str, mock_id: str, ts: datetime):
     """Return health-check INSERT and DELETE statements for a ledger table."""
     if table_type == "historical":
-        query = f"""
-            INSERT INTO {table_name} (
-                trip_id, route_id, direction_id, vehicle_id,
-                latitude, longitude, hexagon_id,
-                stop_sequence, shape_dist_travelled, distance_to_next_stop,
-                is_in_preferential,
-                measurement_time, actual_start_time,
-                schedule_adherence, scheduled_start_time, delay_genuine,
-                current_speed, speed_ratio, current_traffic_speed,
-                temperature, apparent_temperature, humidity,
-                precipitation, wind_speed, weather_code,
-                bus_type, door_number, occupancy_status,
-                deposits
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-                $21,$22,$23,$24,$25,$26,$27,$28,$29
-            )
-        """
+        query = _insert_statement(table_name, HISTORICAL_COLUMNS, on_conflict=None)
         test_trip_id = f"TEST_TRIP_{mock_id}"
         values = (
             test_trip_id,
@@ -220,14 +288,7 @@ def _mock_insert_statement(table_type: str, table_name: str, mock_id: str, ts: d
         delete_query = f"DELETE FROM {table_name} WHERE trip_id = $1"
         delete_values = (test_trip_id,)
     elif table_type == "predicted":
-        query = f"""
-            INSERT INTO {table_name} (
-                route_id, direction_id, trip_date, scheduled_start,
-                stop_id, stop_sequence,
-                predicted_arrival, predicted_delay_sec, predicted_crowd_level,
-                prediction_timestamp
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        """
+        query = _insert_statement(table_name, PREDICTED_COLUMNS, on_conflict=None)
         test_route_id = f"TEST_ROUTE_{mock_id}"
         values = (
             test_route_id,
@@ -244,22 +305,7 @@ def _mock_insert_statement(table_type: str, table_name: str, mock_id: str, ts: d
         delete_query = f"DELETE FROM {table_name} WHERE route_id = $1"
         delete_values = (test_route_id,)
     elif table_type == "vehicle":
-        query = f"""
-            INSERT INTO {table_name} (
-                vehicle_id, trip_id, route_id, direction_id,
-                vehicle_type_name, fuel_type, euro_class, capacity_total,
-                trip_date, scheduled_start, actual_start_time,
-                trip_end_time, trip_duration_sec,
-                mean_delay_sec, median_delay_sec, max_delay_sec,
-                min_delay_sec, std_delay_sec,
-                mean_occupancy, max_occupancy,
-                measurement_count, preferential_ratio, recorded_at
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-                $21,$22,$23
-            )
-        """
+        query = _insert_statement(table_name, VEHICLE_TRIP_COLUMNS, on_conflict=None)
         test_trip_id = f"TEST_TRIP_{mock_id}"
         values = (
             f"TEST_VEHICLE_{mock_id}",
@@ -347,20 +393,18 @@ async def _test_table_operations(
         await db_conn.close()
 
 
-async def test_database_connection():
+async def test_database_connection(config: Config | None = None):
     """Test configured TimescaleDB connections and table write/delete operations."""
-    from config import _CONFIG_PATH, load_config
-
+    config = Config.coerce(config)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     health_logger = logging.getLogger("test_db")
 
-    if not _CONFIG_PATH.exists():
-        health_logger.warning("Config file not found at: %s", _CONFIG_PATH)
+    if not config.source_path.exists():
+        health_logger.warning("Config file not found at: %s", config.source_path)
     else:
-        health_logger.info("Loading config from: %s", _CONFIG_PATH)
+        health_logger.info("Loading config from: %s", config.source_path)
 
-    load_config()
-    conn_str = Ledger.DB_CONNECTION
+    conn_str = config.ledger.db_connection
     health_logger.info("\nTesting Ledger Database...")
     _log_connection_target(conn_str, health_logger)
 
@@ -369,9 +413,9 @@ async def test_database_connection():
         return
 
     tables = [
-        ("Historical", Ledger.HISTORICAL_TABLE, "historical"),
-        ("Predicted", Ledger.PREDICTED_TABLE, "predicted"),
-        ("Vehicle", Ledger.VEHICLE_TABLE, "vehicle"),
+        ("Historical", config.ledger.historical_table, "historical"),
+        ("Predicted", config.ledger.predicted_table, "predicted"),
+        ("Vehicle", config.ledger.vehicle_table, "vehicle"),
     ]
     for label, table_name, table_type in tables:
         if not table_name:
@@ -409,14 +453,14 @@ class LedgerDBWriter:
             logger.error("Failed to create pool for %s: %s", self._table_name, e)
         return self._pool
 
-    async def insert_rows(self, query: str, rows: list[tuple]):
+    async def insert_rows(self, insert_query: str, rows: list[tuple]):
         """Execute an INSERT VALUES statement for a batch of rows."""
         pool = await self._ensure_pool()
         if not pool:
             return
         try:
             async with pool.acquire() as conn:
-                await conn.executemany(query, rows)
+                await conn.executemany(insert_query, rows)
             logger.debug("Inserted %s rows into %s", len(rows), self._table_name)
         except Exception as e:
             logger.error("Ledger insert failed (%s): %s", self._table_name, e)
@@ -431,6 +475,96 @@ class LedgerDBWriter:
 def _ts(unix: float) -> datetime:
     """Convert a Unix timestamp to an aware UTC datetime."""
     return datetime.fromtimestamp(float(unix), tz=timezone.utc)
+
+
+def _prediction_date(value: str | None):
+    """Parse API-facing prediction dates."""
+    return datetime.strptime(value, "%d-%m-%Y").date() if value else None
+
+
+def _trip_date(value: str | None):
+    """Parse ledger-facing vehicle trip dates."""
+    return datetime.strptime(value, "%Y-%m-%d").date() if value else None
+
+
+def _historical_values(record: dict) -> tuple:
+    """Normalize one historical measurement dict to DB column order."""
+    return (
+        record["trip_id"],
+        record["route_id"],
+        int(record["direction_id"]),
+        str(record.get("vehicle_id", "")),
+        float(record["latitude"]),
+        float(record["longitude"]),
+        str(record.get("hexagon_id", "")),
+        int(record["stop_sequence"]),
+        float(record["shape_dist_travelled"]),
+        float(record["distance_to_next_stop"]),
+        bool(record.get("is_in_preferential", False)),
+        _ts(record["measurement_time"]),
+        _ts(record.get("actual_start_time") or record["measurement_time"]),
+        float(record["schedule_adherence"]),
+        str(record.get("scheduled_start_time", "")),
+        int(record.get("delay_genuine", 0)),
+        float(record["current_speed"]),
+        float(record["speed_ratio"]),
+        float(record["current_traffic_speed"]),
+        float(record.get("temperature", 0.0)),
+        float(record.get("apparent_temperature", 0.0)),
+        float(record.get("humidity", 0.0)),
+        float(record["precipitation"]),
+        float(record.get("wind_speed", 0.0)),
+        int(record["weather_code"]),
+        int(record["bus_type"]),
+        int(record["door_number"]),
+        int(record["occupancy_status"]),
+        str(record.get("deposits", "[]")),
+    )
+
+
+def _predicted_values(prediction: dict) -> tuple:
+    """Normalize one stop prediction dict to DB column order."""
+    return (
+        prediction["route_id"],
+        int(prediction["direction_id"]),
+        _prediction_date(prediction.get("trip_date")),
+        prediction["scheduled_start"],
+        prediction["stop_id"],
+        int(prediction["stop_sequence"]),
+        prediction["predicted_arrival"],
+        float(prediction["predicted_delay_sec"]),
+        int(prediction["predicted_crowd_level"]),
+        _ts(prediction["prediction_timestamp"]),
+    )
+
+
+def _vehicle_trip_values(record: dict) -> tuple:
+    """Normalize one vehicle trip dict to DB column order."""
+    return (
+        record["vehicle_id"],
+        record["trip_id"],
+        record["route_id"],
+        int(record["direction_id"]),
+        record["vehicle_type_name"],
+        int(record["fuel_type"]),
+        int(record["euro_class"]),
+        int(record["capacity_total"]),
+        _trip_date(record.get("trip_date")),
+        record["scheduled_start"],
+        _ts(record["actual_start_time"]),
+        _ts(record["trip_end_time"]),
+        float(record["trip_duration_sec"]),
+        float(record["mean_delay_sec"]),
+        float(record["median_delay_sec"]),
+        float(record["max_delay_sec"]),
+        float(record["min_delay_sec"]),
+        float(record["std_delay_sec"]),
+        float(record["mean_occupancy"]),
+        int(record["max_occupancy"]),
+        int(record["measurement_count"]),
+        float(record["preferential_ratio"]),
+        _ts(record["recorded_at"]),
+    )
 
 
 _ledger_writers: dict[str, LedgerDBWriter] = {}
@@ -452,155 +586,57 @@ def _get_db_loop():
     return get_loop()
 
 
-def write_historical(connection_string: str, table_name: str, records: list[dict]):
-    """Write MeasurementRecord rows to the database."""
-    if not records:
+def _submit_insert(
+    connection_string: str,
+    table_name: str,
+    columns: tuple[str, ...],
+    rows: list[tuple],
+) -> None:
+    """Submit an async batched insert on the shared DB event loop."""
+    if not rows:
         return
     writer = _get_ledger_writer(connection_string, table_name)
-    query = f"""
-        INSERT INTO {table_name} (
-            trip_id, route_id, direction_id, vehicle_id,
-            latitude, longitude, hexagon_id,
-            stop_sequence, shape_dist_travelled, distance_to_next_stop,
-            is_in_preferential,
-            measurement_time, actual_start_time,
-            schedule_adherence, scheduled_start_time, delay_genuine,
-            current_speed, speed_ratio, current_traffic_speed,
-            temperature, apparent_temperature, humidity,
-            precipitation, wind_speed, weather_code,
-            bus_type, door_number, occupancy_status,
-            deposits
-        ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-            $21,$22,$23,$24,$25,$26,$27,$28,$29
-        )
-        ON CONFLICT DO NOTHING
-    """
-    rows = [
-        (
-            r["trip_id"],
-            r["route_id"],
-            int(r["direction_id"]),
-            str(r.get("vehicle_id", "")),
-            float(r["latitude"]),
-            float(r["longitude"]),
-            str(r.get("hexagon_id", "")),
-            int(r["stop_sequence"]),
-            float(r["shape_dist_travelled"]),
-            float(r["distance_to_next_stop"]),
-            bool(r.get("is_in_preferential", False)),
-            _ts(r["measurement_time"]),
-            _ts(r.get("actual_start_time") or r["measurement_time"]),
-            float(r["schedule_adherence"]),
-            str(r.get("scheduled_start_time", "")),
-            int(r.get("delay_genuine", 0)),
-            float(r["current_speed"]),
-            float(r["speed_ratio"]),
-            float(r["current_traffic_speed"]),
-            float(r.get("temperature", 0.0)),
-            float(r.get("apparent_temperature", 0.0)),
-            float(r.get("humidity", 0.0)),
-            float(r["precipitation"]),
-            float(r.get("wind_speed", 0.0)),
-            int(r["weather_code"]),
-            int(r["bus_type"]),
-            int(r["door_number"]),
-            int(r["occupancy_status"]),
-            str(r.get("deposits", "[]")),
-        )
-        for r in records
-    ]
-    asyncio.run_coroutine_threadsafe(writer.insert_rows(query, rows), _get_db_loop())
+    insert_query = _insert_statement(table_name, columns)
+    asyncio.run_coroutine_threadsafe(
+        writer.insert_rows(insert_query, rows),
+        _get_db_loop(),
+    )
+
+
+def write_historical(connection_string: str, table_name: str, records: list[dict]):
+    """Write historical measurement rows to the database."""
+    if not records:
+        return
+    _submit_insert(
+        connection_string,
+        table_name,
+        HISTORICAL_COLUMNS,
+        [_historical_values(record) for record in records],
+    )
 
 
 def write_predicted(connection_string: str, table_name: str, predictions: list[dict]):
-    """Write StopPredictionRecord rows to the database."""
+    """Write stop prediction rows to the database."""
     if not predictions:
         return
-    writer = _get_ledger_writer(connection_string, table_name)
-    query = f"""
-        INSERT INTO {table_name} (
-            route_id, direction_id, trip_date, scheduled_start,
-            stop_id, stop_sequence,
-            predicted_arrival, predicted_delay_sec, predicted_crowd_level,
-            prediction_timestamp
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        ON CONFLICT DO NOTHING
-    """
-    rows = [
-        (
-            p["route_id"],
-            int(p["direction_id"]),
-            datetime.strptime(p["trip_date"], "%d-%m-%Y").date()
-            if p.get("trip_date")
-            else None,
-            p["scheduled_start"],
-            p["stop_id"],
-            int(p["stop_sequence"]),
-            p["predicted_arrival"],
-            float(p["predicted_delay_sec"]),
-            int(p["predicted_crowd_level"]),
-            _ts(p["prediction_timestamp"]),
-        )
-        for p in predictions
-    ]
-    asyncio.run_coroutine_threadsafe(writer.insert_rows(query, rows), _get_db_loop())
+    _submit_insert(
+        connection_string,
+        table_name,
+        PREDICTED_COLUMNS,
+        [_predicted_values(prediction) for prediction in predictions],
+    )
 
 
 def write_vehicle_trips(connection_string: str, table_name: str, records: list[dict]):
-    """Write VehicleTripRecord rows to the database."""
+    """Write vehicle trip rows to the database."""
     if not records:
         return
-    writer = _get_ledger_writer(connection_string, table_name)
-    query = f"""
-        INSERT INTO {table_name} (
-            vehicle_id, trip_id, route_id, direction_id,
-            vehicle_type_name, fuel_type, euro_class, capacity_total,
-            trip_date, scheduled_start, actual_start_time,
-            trip_end_time, trip_duration_sec,
-            mean_delay_sec, median_delay_sec, max_delay_sec,
-            min_delay_sec, std_delay_sec,
-            mean_occupancy, max_occupancy,
-            measurement_count, preferential_ratio, recorded_at
-        ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-            $21,$22,$23
-        )
-        ON CONFLICT DO NOTHING
-    """
-    rows = [
-        (
-            r["vehicle_id"],
-            r["trip_id"],
-            r["route_id"],
-            int(r["direction_id"]),
-            r["vehicle_type_name"],
-            int(r["fuel_type"]),
-            int(r["euro_class"]),
-            int(r["capacity_total"]),
-            datetime.strptime(r["trip_date"], "%Y-%m-%d").date()
-            if r.get("trip_date")
-            else None,
-            r["scheduled_start"],
-            _ts(r["actual_start_time"]),
-            _ts(r["trip_end_time"]),
-            float(r["trip_duration_sec"]),
-            float(r["mean_delay_sec"]),
-            float(r["median_delay_sec"]),
-            float(r["max_delay_sec"]),
-            float(r["min_delay_sec"]),
-            float(r["std_delay_sec"]),
-            float(r["mean_occupancy"]),
-            int(r["max_occupancy"]),
-            int(r["measurement_count"]),
-            float(r["preferential_ratio"]),
-            _ts(r["recorded_at"]),
-        )
-        for r in records
-    ]
-    asyncio.run_coroutine_threadsafe(writer.insert_rows(query, rows), _get_db_loop())
+    _submit_insert(
+        connection_string,
+        table_name,
+        VEHICLE_TRIP_COLUMNS,
+        [_vehicle_trip_values(record) for record in records],
+    )
 
 
 def _get_cached_sync_engine(connection_string: str):
@@ -713,9 +749,13 @@ def read_vehicle_trips(
         return pd.DataFrame()
 
 
-def read_prediction_training_rows(start_date: str = None) -> pd.DataFrame:
+def read_historical_training_rows(
+    connection_string: str,
+    table_name: str,
+    start_date: str = None,
+) -> pd.DataFrame:
     """Read historical measurements for dataset extraction."""
-    engine = get_sync_engine(Ledger.DB_CONNECTION)
+    engine = get_sync_engine(connection_string)
     if engine is None:
         return pd.DataFrame()
 
@@ -723,7 +763,7 @@ def read_prediction_training_rows(start_date: str = None) -> pd.DataFrame:
     SELECT
         *,
         measurement_time AS ts
-    FROM {Ledger.HISTORICAL_TABLE}
+    FROM {table_name}
     """
     if start_date:
         query += f"\n    WHERE measurement_time >= '{start_date} 00:00:00'"
@@ -735,9 +775,12 @@ def read_prediction_training_rows(start_date: str = None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def read_traffic_training_rows() -> pd.DataFrame:
+def read_historical_traffic_rows(
+    connection_string: str,
+    table_name: str,
+) -> pd.DataFrame:
     """Read traffic-related historical measurements for canonical averages."""
-    engine = get_sync_engine(Ledger.DB_CONNECTION)
+    engine = get_sync_engine(connection_string)
     if engine is None:
         return pd.DataFrame()
 
@@ -747,7 +790,7 @@ def read_traffic_training_rows() -> pd.DataFrame:
         measurement_time AS ts,
         speed_ratio,
         current_traffic_speed
-    FROM {Ledger.HISTORICAL_TABLE}
+    FROM {table_name}
     WHERE hexagon_id IS NOT NULL
     """
     try:
@@ -762,7 +805,11 @@ def read_traffic_training_rows() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-async def fetch_validation_rows_by_trip_ids(trip_ids: set[str]) -> dict[str, list[Any]]:
+async def fetch_validation_rows_by_trip_ids(
+    trip_ids: set[str],
+    connection_string: str,
+    table_name: str,
+) -> dict[str, list[Any]]:
     """Fetch validation fallback rows grouped by trip id."""
     if not trip_ids:
         return {}
@@ -770,7 +817,7 @@ async def fetch_validation_rows_by_trip_ids(trip_ids: set[str]) -> dict[str, lis
         logger.warning("asyncpg not available: DB fallback disabled")
         return {}
 
-    conn_str = Ledger.DB_CONNECTION
+    conn_str = connection_string
     if not conn_str:
         logger.warning("Ledger DB connection not configured: DB fallback disabled")
         return {}
@@ -781,7 +828,7 @@ async def fetch_validation_rows_by_trip_ids(trip_ids: set[str]) -> dict[str, lis
         conn = await asyncpg.connect(conn_str, timeout=30)
         query = f"""
             SELECT trip_id, stop_sequence, schedule_adherence, occupancy_status
-            FROM {Ledger.HISTORICAL_TABLE}
+            FROM {table_name}
             WHERE trip_id = ANY($1)
             ORDER BY trip_id, measurement_time ASC
         """
@@ -804,21 +851,22 @@ async def close_ledger_writers():
     _ledger_writers.clear()
 
 
-async def init_database(config: dict = None) -> bool:
+async def init_database(config: Config | None = None) -> bool:
     """Initialize the configured ledger database connections."""
+    config = Config.coerce(config)
 
     instances = [
         get_db_connection(
-            connection_string=Ledger.DB_CONNECTION,
-            table_name=Ledger.HISTORICAL_TABLE,
+            connection_string=config.ledger.db_connection,
+            table_name=config.ledger.historical_table,
         ),
         get_db_connection(
-            connection_string=Ledger.DB_CONNECTION,
-            table_name=Ledger.PREDICTED_TABLE,
+            connection_string=config.ledger.db_connection,
+            table_name=config.ledger.predicted_table,
         ),
         get_db_connection(
-            connection_string=Ledger.DB_CONNECTION,
-            table_name=Ledger.VEHICLE_TABLE,
+            connection_string=config.ledger.db_connection,
+            table_name=config.ledger.vehicle_table,
         ),
     ]
 
@@ -854,23 +902,20 @@ def shutdown_database():
         shutdown_db_loop()
 
 
-def get_sync_engine(connection_string: str = None):
+def get_sync_engine(connection_string: str):
     """
     Get a synchronous SQLAlchemy engine for batch operations.
 
     Converts postgresql:// URLs to postgresql+psycopg2:// for SQLAlchemy.
 
     Args:
-        connection_string: PostgreSQL connection string. Defaults to Ledger.DB_CONNECTION.
+        connection_string: PostgreSQL connection string.
 
     Returns:
         SQLAlchemy Engine or None if not configured.
     """
     import sqlalchemy
     from urllib.parse import urlparse
-
-    if connection_string is None:
-        connection_string = Ledger.DB_CONNECTION
 
     if not connection_string:
         return None
@@ -886,16 +931,3 @@ def get_sync_engine(connection_string: str = None):
     except Exception as e:
         logger.error(f"Failed to create sync engine: {e}")
         return None
-
-
-def get_sync_engine_for_pipeline(pipeline: str = "prediction"):
-    """
-    Convenience getter for the configured ledger database.
-
-    Args:
-        pipeline: Ignored. Kept for callers that still pass a dataset name.
-
-    Returns:
-        SQLAlchemy Engine or None if not configured.
-    """
-    return get_sync_engine(Ledger.DB_CONNECTION)

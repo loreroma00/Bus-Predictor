@@ -1,6 +1,22 @@
-from unittest.mock import Mock
 from application.domain.cities import City, Hexagon
-from application.domain.live_data import Autobus
+
+
+class DummyLiveTrip:
+    """Small stand-in for the City live-trip contract."""
+
+    def __init__(self, live_trip_id: str, bearing: float):
+        self.id = live_trip_id
+        self.derived_bearing = bearing
+        self._is_in_preferential = False
+
+    def get_bearing(self):
+        return self.derived_bearing
+
+    def set_is_in_preferential(self, value: bool):
+        self._is_in_preferential = value
+
+    def get_is_in_preferential(self):
+        return self._is_in_preferential
 
 
 class TestPreferentialUpdate:
@@ -17,35 +33,30 @@ class TestPreferentialUpdate:
         hexagon.preferentials = [90.0]
         city.add_hexagon(hexagon)
 
-        # 2. Add Bus 1 (Aligned)
-        bus1 = Autobus(id="BUS1", trip=Mock())
-        # Manually set bearing since strictly we need GPSData to derive it usually,
-        # but get_bearing() returns derived_bearing.
-        bus1.derived_bearing = 90.0
+        # 2. Add LiveTrip 1 (aligned)
+        live_trip1 = DummyLiveTrip("TRIP1", 90.0)
 
-        city.add_bus_to_city(bus1, hex_id=hex_id)
+        city.add_live_trip_to_city(live_trip1, hex_id=hex_id)
 
-        assert bus1.get_is_in_preferential() is True, (
-            "Bus 1 should be in preferential lane upon addition"
+        assert live_trip1.get_is_in_preferential() is True, (
+            "LiveTrip 1 should be in preferential lane upon addition"
         )
 
-        # 3. Add Bus 2 (Misaligned)
-        bus2 = Autobus(id="BUS2", trip=Mock())
-        bus2.derived_bearing = 180.0
+        # 3. Add LiveTrip 2 (misaligned)
+        live_trip2 = DummyLiveTrip("TRIP2", 180.0)
 
-        city.add_bus_to_city(bus2, hex_id=hex_id)
+        city.add_live_trip_to_city(live_trip2, hex_id=hex_id)
 
-        assert bus2.get_is_in_preferential() is False, (
-            "Bus 2 should NOT be in preferential lane upon addition"
+        assert live_trip2.get_is_in_preferential() is False, (
+            "LiveTrip 2 should NOT be in preferential lane upon addition"
         )
 
-        # 4. Update Bus 2 Bearing to match (90.0)
-        bus2.derived_bearing = 90.0
+        # 4. Update LiveTrip 2 bearing to match (90.0)
+        live_trip2.derived_bearing = 90.0
 
-        # 5. Move Bus 2 (Stay in same hex)
-        # This mirrors the update loop: calculate new position (same hex) -> move_bus
-        city.move_bus("BUS2", new_hex_id=hex_id)
+        # 5. Move LiveTrip 2 (stay in same hex)
+        city.move_live_trip("TRIP2", new_hex_id=hex_id)
 
-        assert bus2.get_is_in_preferential() is True, (
-            "Bus 2 should detected preferential lane after move (same hex)"
+        assert live_trip2.get_is_in_preferential() is True, (
+            "LiveTrip 2 should detect preferential lane after move (same hex)"
         )

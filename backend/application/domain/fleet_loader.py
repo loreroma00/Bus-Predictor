@@ -183,8 +183,8 @@ def load_fleet(csv_path: str) -> Dict[str, VehicleType]:
                     )
                     
                     # Populate map
-                    for bus_id in id_list:
-                        fleet_map[str(bus_id)] = v_type
+                    for vehicle_id in id_list:
+                        fleet_map[str(vehicle_id)] = v_type
                             
                 except Exception as e:
                     logger.error(f"Error parsing vehicle row {row.get('name', 'Unknown')}: {e}")

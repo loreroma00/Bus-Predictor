@@ -131,31 +131,43 @@ class TestObservatoryCityManagement:
         assert city is None
 
 
-class TestObservatoryBusManagement:
-    """Test Observatory's bus management features."""
+class TestObservatoryLiveTripManagement:
+    """Test Observatory's live-trip management features."""
 
-    def test_add_bus_to_city(self):
-        """Should be able to add a bus to a city."""
+    def test_add_live_trip_to_city(self):
+        """Should be able to add a live trip to a city."""
         from application.domain.virtual_entities import Observatory
-        from application.domain.live_data import Autobus
+
+        class DummyLiveTrip:
+            def __init__(self, live_trip_id: str):
+                self.id = live_trip_id
+                self.hexagon_id = None
+
+            def get_bearing(self):
+                return 0.0
+
+            def set_is_in_preferential(self, value: bool):
+                self.is_in_preferential = value
+
+            def set_hexagon_id(self, hexagon_id: str):
+                self.hexagon_id = hexagon_id
 
         obs = Observatory()
         obs.add_city("Roma")
 
-        mock_trip = Mock()
-        bus = Autobus(id="V001", trip=mock_trip)
+        live_trip = DummyLiveTrip("V001")
 
-        obs.add_bus_to_city("Roma", bus, latitude=41.9, longitude=12.5)
+        obs.add_live_trip_to_city("Roma", live_trip, hex_id="892d3fbe257ffff")
 
-        retrieved = obs.get_bus("Roma", "V001")
-        assert retrieved == bus
+        retrieved = obs.get_city("Roma").get_live_trip("V001")
+        assert retrieved == live_trip
 
-    def test_get_nonexistent_bus(self):
-        """Should return None for nonexistent bus."""
+    def test_get_nonexistent_live_trip(self):
+        """Should return None for nonexistent live trip."""
         from application.domain.virtual_entities import Observatory
 
         obs = Observatory()
         obs.add_city("Roma")
 
-        bus = obs.get_bus("Roma", "nonexistent_bus")
-        assert bus is None
+        live_trip = obs.get_city("Roma").get_live_trip("nonexistent_live_trip")
+        assert live_trip is None

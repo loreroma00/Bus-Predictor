@@ -1,74 +1,85 @@
-"""Geocoding services — sync and async Nominatim wrappers with per-hex street caching."""
+"""Geocoding services: sync and async Nominatim wrappers with per-hex caching."""
+
+from __future__ import annotations
 
 import logging
-from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
-from functools import lru_cache
 import queue
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
+
+from geopy.extra.rate_limiter import RateLimiter
+from geopy.geocoders import Nominatim
 
 if TYPE_CHECKING:
     from .cities import City
 
-
-# User agent is required by Nominatim usage policy
-# CUSTOM CONFIGURATION
-NOMINATIM_DOMAIN = "192.168.1.96:1213"
-NOMINATIM_SCHEME = "http"
-
-geolocator = Nominatim(
-    user_agent="thesis_project_real_bus_tracker",
-    domain=NOMINATIM_DOMAIN,
-    scheme=NOMINATIM_SCHEME,
-)
-
-# Create a rate-limited wrapper (1 request per second) ONLY for official server
-if "nominatim.openstreetmap.org" in NOMINATIM_DOMAIN:
-    geocode_throttled = RateLimiter(geolocator.reverse, min_delay_seconds=1.0)
-else:
-    # No rate limit for local/custom server
-    geocode_throttled = geolocator.reverse
+DEFAULT_NOMINATIM_SCHEME = "https"
 
 
-# Coordinates are rounded to 5 decimal places (~1m precision) for better cache hits.
-# This prevents near-duplicate requests from GPS jitter.
-@lru_cache(maxsize=1000)
-def _get_street_name_cached(lat: float, lon: float) -> str:
-    """
-    Internal cached function - expects already-rounded coordinates.
-    """
-    try:
-        # RateLimiter handles the 1 req/s delay automatically (if active).
-        # This is CRITICAL to avoid getting banned by official Nominatim.
-        location = geocode_throttled((lat, lon), exactly_one=True, addressdetails=True)
+def _parse_nominatim_url(nominatim_url: str) -> tuple[str, str]:
+    """Return ``(scheme, domain)`` for geopy from a configured URL."""
+    parsed = urlparse(nominatim_url)
+    if not parsed.scheme:
+        parsed = urlparse(f"{DEFAULT_NOMINATIM_SCHEME}://{nominatim_url}")
 
-        if location and location.raw and "address" in location.raw:
-            address = location.raw["address"]
-            # Try to find the most relevant "street" field
-            return (
-                address.get("road")
-                or address.get("pedestrian")
-                or address.get("suburb")
-                or "Unknown Street"
-            )
+    domain = parsed.netloc or parsed.path
+    if not domain:
+        raise ValueError("Nominatim URL must include a host")
 
-        return "Unknown Location"
-    except Exception as e:
-        logging.error(f"Geocoding error: {e}")
-        return "Unknown"
+    return parsed.scheme, domain.rstrip("/")
 
 
-def get_street_name(lat: float, lon: float) -> str:
-    """
-    Returns the street name for a given latitude and longitude.
+def _street_from_location(location) -> str:
+    """Extract the best street-like label from a Nominatim result."""
+    if location and location.raw and "address" in location.raw:
+        address = location.raw["address"]
+        return (
+            address.get("road")
+            or address.get("pedestrian")
+            or address.get("suburb")
+            or "Unknown Street"
+        )
+    return "Unknown Location"
 
-    Coordinates are rounded to 5 decimal places (~1m precision)
-    to maximize cache hits from GPS jitter.
-    """
-    # Round to ensure consistent cache keys
-    rounded_lat = round(lat, 5)
-    rounded_lon = round(lon, 5)
-    return _get_street_name_cached(rounded_lat, rounded_lon)
+
+class StreetNameResolver:
+    """Small cached reverse-geocoder configured at runtime."""
+
+    def __init__(self, nominatim_url: str, user_agent: str):
+        """Create the geopy client and local coordinate cache."""
+        scheme, domain = _parse_nominatim_url(nominatim_url)
+        self.domain = domain
+        geolocator = Nominatim(
+            user_agent=user_agent,
+            domain=domain,
+            scheme=scheme,
+        )
+        if "nominatim.openstreetmap.org" in domain:
+            self._reverse = RateLimiter(geolocator.reverse, min_delay_seconds=1.0)
+        else:
+            self._reverse = geolocator.reverse
+        self._cache: dict[tuple[float, float], str] = {}
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """Return whether this resolver targets the official Nominatim service."""
+        return "nominatim.openstreetmap.org" in self.domain
+
+    def get_street_name(self, lat: float, lon: float) -> str:
+        """Resolve a rounded coordinate pair into a street-like label."""
+        key = (round(lat, 5), round(lon, 5))
+        if key in self._cache:
+            return self._cache[key]
+
+        try:
+            location = self._reverse(key, exactly_one=True, addressdetails=True)
+            street = _street_from_location(location)
+        except Exception as exc:
+            logging.error("Geocoding error: %s", exc)
+            street = "Unknown"
+
+        self._cache[key] = street
+        return street
 
 
 class SyncGeocodingService:
@@ -77,47 +88,46 @@ class SyncGeocodingService:
 
     Implements GeocodingStrategy Protocol for dependency injection.
     Resolves streets immediately inline (no queue, no background thread).
-    Use this when your Nominatim server has no rate limits.
     """
 
-    def __init__(self, city: "City"):
-        """Bind the service to the ``City`` whose hexagons cache the resolved streets."""
+    def __init__(self, city: "City", resolver: StreetNameResolver):
+        """Bind the service to the city whose hexagons cache street names."""
         self._city = city
+        self._resolver = resolver
 
     def enqueue(self, lat: float, lon: float, hex_id: str) -> None:
         """
-        Immediately resolve and cache the street name (synchronous).
+        Immediately resolve and cache the street name.
+
         The method name matches the geocoding strategy protocol.
         """
         key = (round(lat, 5), round(lon, 5))
 
-        # Skip if already cached
         hexagon = self._city.get_hexagon(hex_id)
         if hexagon and key in hexagon.streets:
             return
 
-        # Resolve immediately
-        street = get_street_name(lat, lon)
+        street = self._resolver.get_street_name(lat, lon)
         if hexagon:
             hexagon.add_street(lat, lon, street)
 
     def get_street(self, lat: float, lon: float) -> str | None:
-        """Get cached street name from hexagon."""
+        """Get cached street name from the backing hexagon."""
         key = (round(lat, 5), round(lon, 5))
         hex_id = self._city.get_hex_id(lat, lon)
         hexagon = self._city.get_hexagon(hex_id)
         return hexagon.get_street_by_coords(*key) if hexagon else None
 
     def process_one(self) -> bool:
-        """No-op for sync service (nothing to process)."""
+        """No-op for sync service."""
         return False
 
     def get_and_reset_resolved_count(self) -> int:
-        """No tracking needed for sync service."""
+        """No background work is tracked for sync service."""
         return 0
 
     def get_queue_size(self) -> int:
-        """Always 0 for sync service."""
+        """Always zero for sync service."""
         return 0
 
 
@@ -126,22 +136,20 @@ class AsyncGeocodingService:
     Background geocoding service with queue for rate-limited servers.
 
     Implements GeocodingStrategy Protocol for dependency injection.
-    Uses a queue to process geocoding requests at a controlled rate.
-    Use this when connecting to official Nominatim (1 req/s limit).
     """
 
-    def __init__(self, city: "City"):
-        """Bind the service to a ``City`` and initialise the async resolution queue."""
+    def __init__(self, city: "City", resolver: StreetNameResolver):
+        """Bind the service to a city and initialise the async queue."""
         self._city = city
+        self._resolver = resolver
         self._queue: queue.Queue[tuple[float, float, str]] = queue.Queue()
         self._pending: set[tuple[float, float]] = set()
         self._resolved_since_last_report = 0
 
     def enqueue(self, lat: float, lon: float, hex_id: str) -> None:
-        """Add coords to resolution queue (deduplicated)."""
+        """Add coords to the resolution queue, deduplicated by rounded coords."""
         key = (round(lat, 5), round(lon, 5))
 
-        # Skip if already pending or cached
         if key in self._pending:
             return
         hexagon = self._city.get_hexagon(hex_id)
@@ -159,11 +167,11 @@ class AsyncGeocodingService:
         return hexagon.get_street_by_coords(*key) if hexagon else None
 
     def process_one(self) -> bool:
-        """Process one item from queue. Returns False if empty."""
+        """Process one queued coordinate. Returns False if the queue is empty."""
         lat, lon, hex_id = None, None, None
         try:
             lat, lon, hex_id = self._queue.get_nowait()
-            street = get_street_name(lat, lon)
+            street = self._resolver.get_street_name(lat, lon)
             hexagon = self._city.get_hexagon(hex_id)
             if hexagon:
                 hexagon.add_street(lat, lon, street)
@@ -176,26 +184,26 @@ class AsyncGeocodingService:
                 self._pending.discard((lat, lon))
 
     def get_and_reset_resolved_count(self) -> int:
-        """Get resolved count since last call and reset."""
+        """Return and reset the number of resolved queue items."""
         count = self._resolved_since_last_report
         self._resolved_since_last_report = 0
         return count
 
     def get_queue_size(self) -> int:
-        """Returns current queue size."""
+        """Return current queue size."""
         return self._queue.qsize()
 
 
-def create_geocoding_service(city: "City"):
-    """
-    Factory function to create appropriate geocoding service based on server config.
+def create_geocoding_service(
+    city: "City",
+    nominatim_url: str,
+    user_agent: str,
+):
+    """Create a geocoding service from runtime configuration."""
+    resolver = StreetNameResolver(nominatim_url=nominatim_url, user_agent=user_agent)
+    if resolver.is_rate_limited:
+        logging.info("Using ASYNC geocoding for rate-limited Nominatim")
+        return AsyncGeocodingService(city, resolver)
 
-    Returns SyncGeocodingService for local/fast servers (no rate limit).
-    Returns AsyncGeocodingService for official Nominatim (rate limited).
-    """
-    if "nominatim.openstreetmap.org" in NOMINATIM_DOMAIN:
-        logging.info("📍 Using ASYNC geocoding (rate-limited for official Nominatim)")
-        return AsyncGeocodingService(city)
-    else:
-        logging.info(f"📍 Using SYNC geocoding (fast mode for {NOMINATIM_DOMAIN})")
-        return SyncGeocodingService(city)
+    logging.info("Using SYNC geocoding for %s", resolver.domain)
+    return SyncGeocodingService(city, resolver)

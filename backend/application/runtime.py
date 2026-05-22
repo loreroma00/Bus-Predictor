@@ -7,14 +7,16 @@ This module intentionally holds data only.  Bootstrapping lives in
 from dataclasses import dataclass, field
 from typing import Any
 
+from config import Config
+
 
 @dataclass
 class ApplicationContext:
     """Container for runtime objects wired during startup."""
 
-    config: dict[str, Any]
-    observatory: Any
-    city: Any
+    config: Config | dict[str, Any] | None = None
+    observatory: Any = None
+    city: Any = None
     cache_strategy: Any = None
     persistence_gateway: Any = None
     geocoding_service: Any = None
@@ -28,3 +30,7 @@ class ApplicationContext:
     predictor: Any = None
     bus_type_predictor: Any = None
     validation_controller: Any = None
+
+    def __post_init__(self):
+        """Normalize callers onto the typed backend configuration object."""
+        self.config = Config.coerce(self.config)

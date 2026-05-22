@@ -12,12 +12,14 @@ from typing import Dict, Optional, TYPE_CHECKING
 
 import pandas as pd
 
+from config import Config
 from .interfaces import CacheStrategy, GeocodingStrategy
 from .static_data import Route, Shape, Trip, Vehicle, VehicleType
 from .static_data_fetcher import StaticDataFetcher
 from .cities import City
 from .live_data import GPSData, LiveFeedRecord, LiveTrip, Update
 from .fleet_loader import load_fleet
+from .artifacts import StaticArtifacts
 from application.services.persistence_gateway import get_persistence_gateway
 
 if TYPE_CHECKING:
@@ -125,10 +127,6 @@ class MeasurementRecord:
     occupancy_status: int
     deposits: str
 
-
-StopArrival = MeasurementRecord
-
-
 class HistoricalLedger:
     """Append-only record of per-measurement observations owned by Observatory."""
 
@@ -139,10 +137,8 @@ class HistoricalLedger:
         persistence_gateway=None,
     ):
         """Bind ledger state to its DB destination configuration."""
-        from config import Ledger
-
-        self._conn_str = connection_string or Ledger.DB_CONNECTION
-        self._table = table_name or Ledger.HISTORICAL_TABLE
+        self._conn_str = connection_string
+        self._table = table_name
         self._persistence = persistence_gateway or get_persistence_gateway()
         self._today_by_trip: Dict[str, list[dict]] = {}
         self._pending_db_rows: list[dict] = []
@@ -192,8 +188,6 @@ class HistoricalLedger:
 
         self._pending_db_rows.extend(rows)
         return rows
-
-    record_arrivals = record_measurements
 
     def push_to_db(self):
         """Push pending measurement rows to the database layer."""
@@ -335,8 +329,9 @@ class Observatory:
         self,
         cache_strategy: "CacheStrategy" = None,
         geocoding_strategy: "GeocodingStrategy" = None,
-        config: dict = None,
+        config: Config | dict = None,
         persistence_gateway=None,
+        artifacts: StaticArtifacts | None = None,
     ):
         """
         Initialize Observatory with optional injected dependencies.
@@ -346,23 +341,34 @@ class Observatory:
                            If None, caching is disabled.
             geocoding_strategy: Implementation of GeocodingStrategy for street name
                                resolution. If None, geocoding is disabled.
-            config: Configuration dictionary.
+            config: Typed backend configuration.
+            artifacts: Static artifact registry shared across domain/runtime code.
         """
         # Injected dependencies
         self._cache = cache_strategy
         self._geocoding = geocoding_strategy
         self._persistence = persistence_gateway or get_persistence_gateway()
-        self.config = config or {}
+        self.config = Config.coerce(config)
+        self.artifacts = artifacts or StaticArtifacts(
+            config=self.config,
+            cache_strategy=cache_strategy,
+        )
 
         # Internal components (no external dependencies)
         from .ledger_builder import LedgerBuilder
 
-        self._fetcher = StaticDataFetcher()
+        self._fetcher = StaticDataFetcher(
+            static_url=self.config.urls.gtfs_static,
+            md5_url=self.config.urls.gtfs_md5,
+            referer=self.config.urls.gtfs_referer,
+        )
         self._builder = LedgerBuilder()
         # ---- Ledgers ----
         self.topology: TopologyLedger = None
         self.schedule_ledger: ScheduleLedger = None
         self.historical: HistoricalLedger = HistoricalLedger(
+            connection_string=self.config.ledger.db_connection,
+            table_name=self.config.ledger.historical_table,
             persistence_gateway=self._persistence,
         )
 
@@ -378,9 +384,18 @@ class Observatory:
         self.live_trips_by_trip_id: dict[str, LiveTrip] = {}
         self.completed_live_trips: list[LiveTrip] = []
 
-    def add_city(self, city_name: str, static_bus_lanes: dict = None):
+    def add_city(
+        self,
+        city_name: str,
+        static_bus_lanes: dict = None,
+        weather_url: str | None = None,
+    ):
         """Add a city to the observed cities."""
-        self.observed_cities[city_name] = City(city_name, static_bus_lanes)
+        self.observed_cities[city_name] = City(
+            city_name,
+            static_bus_lanes,
+            weather_url=weather_url,
+        )
 
     def get_city(self, city_name: str) -> City | None:
         """Get a city instance by name."""
@@ -695,6 +710,8 @@ class Observatory:
             id=vehicle_id,
             label=display_id,
             vehicle_type=vehicle_type,
+            history_connection_string=self.config.ledger.db_connection,
+            history_table_name=self.config.ledger.vehicle_table,
             persistence_gateway=self._persistence,
         )
         self.vehicles[vehicle_id] = vehicle
@@ -862,7 +879,7 @@ class Observatory:
         if not expected_trip_ids:
             return 1.0  # No trips expected = 100% adherence by definition
 
-        # 2. Find served trips from diaries
+        # 2. Find served trips from completed measurements
         served_trip_ids = self._get_served_trip_ids(
             expected_trip_ids, verification_strategy
         )
@@ -974,7 +991,7 @@ class Observatory:
         verification_strategy,
     ) -> set:
         """
-        Get set of trip IDs that were actually served (have valid diaries).
+        Get set of trip IDs that were actually served (have valid measurements).
 
         Only checks trips that are in the expected set for efficiency.
         """

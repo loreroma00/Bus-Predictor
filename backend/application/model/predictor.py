@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import joblib
 
+from application.domain.artifacts import Artifact, DEFAULT_ARTIFACTS
 from application.services.persistence_gateway import get_persistence_gateway
 
 try:
@@ -19,14 +20,11 @@ try:
 except ImportError:  # pragma: no cover - keeps script-style imports working
     from model_loader import LoadedModel, ModelLoader
 
-CURRENT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = CURRENT_DIR.parent.parent
-
-PARQUET_DIR = PROJECT_ROOT / "parquets"
+PARQUET_DIR = DEFAULT_ARTIFACTS.parquet_dir
 ROUTE_ENCODING_PATH = PARQUET_DIR / "route_encoding.json"
 ROUTE_ENCODER_PKL_PATH = PARQUET_DIR / "route_encoder.pkl"
 H3_ENCODING_PATH = PARQUET_DIR / "h3_encoding.json"
-STATIC_MAP_PATH = PARQUET_DIR / "stop_route_map.parquet"
+STATIC_MAP_PATH = DEFAULT_ARTIFACTS.path(Artifact.CANONICAL_STOP_MAP)
 logger = logging.getLogger(__name__)
 
 
@@ -61,10 +59,8 @@ class PredictedLedger:
         persistence_gateway=None,
     ):
         """Bind ledger state to its DB destination configuration."""
-        from config import Ledger
-
-        self._conn_str = connection_string or Ledger.DB_CONNECTION
-        self._table = table_name or Ledger.PREDICTED_TABLE
+        self._conn_str = connection_string
+        self._table = table_name
         self._persistence = persistence_gateway or get_persistence_gateway()
         self._today_trips: list[dict] = []
         self._today_stops: Dict[str, list[dict]] = {}
@@ -255,7 +251,14 @@ class Predictor:
         self.max_stops = loaded_model.max_stops
         self.observatory = observatory
         self.persistence = persistence_gateway or get_persistence_gateway()
+        ledger_config = getattr(getattr(observatory, "config", None), "ledger", None)
         self.predicted = prediction_ledger or PredictedLedger(
+            connection_string=(
+                ledger_config.db_connection if ledger_config is not None else None
+            ),
+            table_name=(
+                ledger_config.predicted_table if ledger_config is not None else None
+            ),
             persistence_gateway=self.persistence,
         )
 

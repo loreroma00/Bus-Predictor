@@ -1,75 +1,104 @@
-[api]
-# TomTom Traffic API
-tomtom_api_key = YOUR_TOMTOM_API_KEY_HERE
+# Copy this file to config.ini and adjust local secrets/hosts as needed.
+#
+# Runtime code reads these values through backend/config.py::Config, then through
+# ApplicationContext.config. Do not add ad-hoc parsers for new configuration.
 
-# API Server settings (for 'python main.py serve')
+[api]
+# Optional. Can also be provided with TOMTOM_API_KEY.
+# Leave empty to disable TomTom traffic updates.
+tomtom_api_key =
+
+# FastAPI server settings for `python main.py serve`.
+# frontend_url may be a concrete origin or * for local development.
 frontend_url = http://localhost:3000
 host = 0.0.0.0
 port = 8000
 
 [ledger]
-# Database-backed ledgers (TimescaleDB hypertables)
-db_connection = postgresql://user:password@localhost:1515/transit
+# Optional. Can also be provided with TIMESCALE_CONNECTION_STRING.
+# Leave empty when running without TimescaleDB persistence.
+db_connection =
 historical_table = historical_measurements
 predicted_table = predicted_arrivals
 vehicle_table = vehicle_trips
 
 [urls]
-# GTFS Static Data
+# GTFS static data.
 gtfs_static = https://romamobilita.it/wp-content/uploads/drupal/rome_static_gtfs.zip
 gtfs_md5 = https://romamobilita.it/wp-content/uploads/drupal/rome_static_gtfs.zip.md5
 
-# GTFS Realtime Feeds
+# GTFS real-time feeds.
 rtgtfs_vehicles = https://romamobilita.it/wp-content/uploads/drupal/rome_rtgtfs_vehicle_positions_feed.pb
 rtgtfs_trip_updates = https://romamobilita.it/wp-content/uploads/drupal/rome_rtgtfs_trip_updates_feed.pb
 
-# Weather API (Open-Meteo, no key required)
+# Weather API. Open-Meteo requires no key.
 weather_api = https://api.open-meteo.com/v1/forecast
 
-# TomTom Traffic API
+# TomTom traffic tile API base URL.
 tomtom_traffic = https://api.tomtom.com/traffic/map/4/tile/flow
 
-# Nominatim (geocoding) - use custom server or https://nominatim.openstreetmap.org
+# Nominatim geocoding endpoint. Use a local server or the public endpoint.
 nominatim_url = http://localhost:8080
 
+# Request metadata and debug GUI base map tiles.
+gtfs_referer = https://romamobilita.it/sistemi-e-tecnologie/open-data/
+map_tile_url = https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png
+map_tile_attribution = &copy; <a href="https://carto.com/">CARTO</a>
+
 [paths]
-# Cache files
+# Cache files.
 ledger_cache = ledger_cache.pkl
 city_cache = city_cache.pkl
 
-# Diaries storage
-diaries_path = diaries/
-diaries_file = diaries.parquet
+# Completed measurement storage.
+measurements_path = measurements/
+measurements_file = measurements.parquet
 
-# Static bus lanes
+# Static assets.
 static_bus_lanes = static_bus_lanes_roma.pkl
+gtfs_static_zip = rome_static_gtfs.zip
 
 [timings]
-# Update intervals in seconds
+# Collection/update intervals in seconds.
 update_interval = 900
 traffic_update_interval = 900
 saving_interval = 1800
 weather_update_interval = 3600
+live_trip_stale_ttl = 600
 
 [services]
-# Cache strategy: file, none
+# cache_strategy: file, none
 cache_strategy = file
 
-# Debug GUI port
+# Debug GUI binding and display URL.
 debug_gui_port = 8050
+debug_gui_host = 0.0.0.0
+debug_gui_display_host = localhost
+debug_gui_display_scheme = http
+
+# weather_strategy: greedy, subset
+weather_strategy = greedy
+weather_subsets = 4
+
+# Required by Nominatim usage policy.
+nominatim_user_agent = thesis_project_real_bus_tracker
+
+[traffic]
+# TomTom traffic tile settings.
+tomtom_zoom = 15
+qps_limit = 10
+tile_ttl_seconds = 900
 
 [data_cleaning]
-# Minimum measurements for valid run
+# Minimum measurements for valid run.
 min_measurements_per_run = 7
 
-# Maximum bus speed for outlier detection (km/h)
+# Outlier and gap thresholds.
 max_bus_speed_kmh = 120
-
-# Maximum time gap for isolated measurement detection (seconds)
 max_time_gap_seconds = 600
 
-# Time that the bot needed to be active for prior to a recording to consider it valid
+# Uptime lookback used before accepting partially served trips.
 served_ratio_lookback_minutes = 60
 
-# Use lenient pipeline (skips strict filtering)
+# Use lenient pipeline filtering.
 lenient_pipeline = false

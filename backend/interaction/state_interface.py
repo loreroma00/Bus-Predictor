@@ -54,8 +54,8 @@ class StateInterface:
         return {
             "name": city.name,
             "hexagon_count": len(city.hexagons),
-            "active_buses": len(city.live_trip_index),
-            "deposit_buses": len(city.live_trip_deposit),
+            "active_live_trips": len(city.live_trip_index),
+            "deposit_live_trips": len(city.live_trip_deposit),
         }
 
     def get_hexagons(self, city_name: str) -> list[dict]:
@@ -69,7 +69,7 @@ class StateInterface:
             hexagons.append(
                 {
                     "hex_id": hex_id,
-                    "bus_count": len(hexagon.mobile_agents["live_trips"]),
+                    "live_trip_count": len(hexagon.mobile_agents["live_trips"]),
                     "street_count": len(hexagon.streets),
                     "temperature": hexagon.get_temperature(),
                     "humidity": hexagon.get_humidity(),
@@ -83,8 +83,8 @@ class StateInterface:
             )
         return hexagons
 
-    def get_hexagon_buses(self, city_name: str, hex_id: str) -> list[dict]:
-        """Get all buses in a specific hexagon."""
+    def get_hexagon_live_trips(self, city_name: str, hex_id: str) -> list[dict]:
+        """Get all live trips in a specific hexagon."""
         city = self._observatory.get_city(city_name)
         if not city:
             return []
@@ -123,7 +123,7 @@ class StateInterface:
             "center": {"lat": lat, "lon": lon},
             "streets": streets,
             "preferentials": hexagon.get_preferentials(),
-            "buses": live_trips_list,
+            "live_trips": live_trips_list,
             # Aggregate traffic (averages)
             "current_speed": hexagon.get_current_speed(),
             "flow_speed": hexagon.get_flow_speed(),
@@ -145,11 +145,11 @@ class StateInterface:
         }
 
     # ============================================================
-    # Bus Access
+    # LiveTrip Access
     # ============================================================
 
-    def get_all_buses(self, city_name: str) -> list[dict]:
-        """Get all active buses in a city."""
+    def get_all_live_trips(self, city_name: str) -> list[dict]:
+        """Get all active live trips in a city."""
         city = self._observatory.get_city(city_name)
         if not city:
             return []
@@ -161,23 +161,23 @@ class StateInterface:
                 live_trips.append(self._live_trip_to_dict(live_trip))
         return live_trips
 
-    def get_deposit_buses(self, city_name: str) -> list[dict]:
-        """Get all buses currently in deposit."""
+    def get_deposit_live_trips(self, city_name: str) -> list[dict]:
+        """Get all live trips currently in deposit."""
         city = self._observatory.get_city(city_name)
         if not city:
             return []
 
-        buses = []
+        live_trips = []
         for _, live_trip in city.live_trip_deposit.items():
             data = self._live_trip_to_dict(live_trip)
             data["status"] = "DEPOSIT"
-            buses.append(data)
-        return buses
+            live_trips.append(data)
+        return live_trips
 
-    def get_bus(self, city_name: str, bus_id: str) -> Optional[dict]:
+    def get_live_trip(self, city_name: str, live_trip_id: str) -> Optional[dict]:
         """Get detailed info about a specific active live trip by vehicle id."""
         city = self._observatory.get_city(city_name)
-        live_trip = city.get_live_trip(bus_id) if city else None
+        live_trip = city.get_live_trip(live_trip_id) if city else None
         if not live_trip:
             return None
         return self._live_trip_to_dict(live_trip, detailed=True)
@@ -254,7 +254,7 @@ class StateInterface:
 
             # Basic info
             row = {
-                "bus_id": live_trip.label,
+                "vehicle_id": live_trip.label,
                 "vehicle_type": vehicle_type,
                 "trip_id": trip.id if trip else "N/A",
                 "route_id": trip.route.id if trip and trip.route else "N/A",
@@ -354,8 +354,8 @@ class StateInterface:
 
         return {
             "live_trip_count": len(live_trips),
-            "active_buses": total_active,
-            "deposit_buses": total_deposit,
+            "active_live_trips": total_active,
+            "deposit_live_trips": total_deposit,
             "hexagon_count": total_hexagons,
             "city_count": len(cities),
         }
@@ -391,8 +391,8 @@ class StateInterface:
     # Map Data (for Dashboard GUI)
     # ============================================================
 
-    def get_bus_positions(self, city_name: str) -> list[dict]:
-        """Get all active bus positions with GPS coordinates for map rendering."""
+    def get_live_trip_positions(self, city_name: str) -> list[dict]:
+        """Get all active live-trip positions with GPS coordinates for map rendering."""
         city = self._observatory.get_city(city_name)
         if not city:
             return []
@@ -442,7 +442,7 @@ class StateInterface:
                 "hex_id": hex_id,
                 "boundary": boundary_coords,
                 "speed_ratio": round(speed_ratio, 3),
-                "bus_count": len(hexagon.mobile_agents["live_trips"]),
+                "live_trip_count": len(hexagon.mobile_agents["live_trips"]),
                 "current_speed": round(hexagon.get_current_speed(), 1),
             })
         return result

@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import configparser
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = PROJECT_ROOT / "config.ini"
+from application.runtime import ApplicationContext
 
 
 class PredictRequest(BaseModel):
@@ -279,26 +275,11 @@ class LiveValidateStatusResponse(BaseModel):
     report_file: Optional[str] = None
 
 
-def load_api_config() -> dict:
-    """Load only the API host/CORS config needed by the FastAPI boundary."""
-    config = configparser.ConfigParser()
-    if CONFIG_PATH.exists():
-        config.read(CONFIG_PATH)
-    return {
-        "frontend_url": config.get(
-            "api",
-            "frontend_url",
-            fallback="http://localhost:3000",
-        ),
-        "host": config.get("api", "host", fallback="0.0.0.0"),
-        "port": config.getint("api", "port", fallback=8000),
-    }
-
-
 def create_app(
     time_model_name: str | None = None,
     crowd_model_name: str | None = None,
     lenient_pipeline: bool = False,
+    context: ApplicationContext | None = None,
 ) -> FastAPI:
     """Create the FastAPI app and wire startup/shutdown lifecycle hooks."""
     logging.basicConfig(
@@ -306,7 +287,7 @@ def create_app(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    api_config = load_api_config()
+    context = context or ApplicationContext()
     runtime = None
 
     app = FastAPI(
@@ -315,7 +296,7 @@ def create_app(
         version="2.0.0",
     )
 
-    frontend_url = api_config["frontend_url"]
+    frontend_url = context.config.api.frontend_url
     allow_origins = ["*"] if frontend_url == "*" else [frontend_url]
     app.add_middleware(
         CORSMiddleware,
@@ -344,12 +325,13 @@ def create_app(
             time_model_name=time_model_name,
             crowd_model_name=crowd_model_name,
             lenient_pipeline=lenient_pipeline,
+            context=context,
         )
 
         print("\n[5/5] Starting background tasks and interactive console...")
         await runtime.start_background_tasks()
 
-        print(f"\nCORS enabled for: {api_config['frontend_url']}")
+        print(f"\nCORS enabled for: {context.config.api.frontend_url}")
         print("Server ready with integrated data collection.")
         print("API documentation at: /docs")
         print("=" * 50 + "\n")

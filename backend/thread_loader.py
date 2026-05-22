@@ -8,7 +8,7 @@ import time
 
 from application.domain.time_utils import to_readable_time
 from application.runtime import ApplicationContext
-from persistence import log_uptime, saving_loop, saving_parquet
+from persistence import log_uptime, saving_loop
 
 
 class ThreadLoader:
@@ -24,10 +24,10 @@ class ThreadLoader:
         if self.context.feed_fetcher is None:
             from application.live.feed_fetcher import LiveFeedFetcher
 
-            urls = self.context.config.get("urls", {})
             self.context.feed_fetcher = LiveFeedFetcher(
-                vehicles_url=urls.get("rtgtfs_vehicles"),
-                trips_url=urls.get("rtgtfs_trip_updates"),
+                vehicles_url=self.context.config.urls.rtgtfs_vehicles,
+                trips_url=self.context.config.urls.rtgtfs_trip_updates,
+                referer=self.context.config.urls.gtfs_referer,
             )
 
     def start(self):
@@ -40,7 +40,6 @@ class ThreadLoader:
             saving_loop,
             args=(
                 self.context.observatory,
-                saving_parquet(),
                 self.context.stop_event,
                 self.context.cache_strategy,
             ),
@@ -100,9 +99,21 @@ class ThreadLoader:
 
         from interaction import debug_gui
 
-        services_cfg = self.context.config.get("services", {})
-        gui_port = int(services_cfg.get("debug_gui_port", 8050))
-        thread = debug_gui.start_gui(self.context.state_interface, port=gui_port)
+        gui_port = self.context.config.services.debug_gui_port
+        gui_host = self.context.config.services.debug_gui_host
+        display_host = self.context.config.services.debug_gui_display_host
+        display_scheme = self.context.config.services.debug_gui_display_scheme
+        map_tile_url = self.context.config.urls.map_tile_url
+        map_tile_attribution = self.context.config.urls.map_tile_attribution
+        thread = debug_gui.start_gui(
+            self.context.state_interface,
+            port=gui_port,
+            host=gui_host,
+            display_host=display_host,
+            display_scheme=display_scheme,
+            map_tile_url=map_tile_url,
+            map_tile_attribution=map_tile_attribution,
+        )
         self.context.threads["gui"] = thread
         return thread
 
@@ -204,11 +215,13 @@ class ThreadLoader:
         """Finish live trips that the city reports as stale."""
         if not self.context.city:
             return
-        for live_trip in self.context.city.prune_stale_live_trips(ttl=600):
+        ttl = self.context.config.timings.live_trip_stale_ttl
+        for live_trip in self.context.city.prune_stale_live_trips(ttl=ttl):
             logging.info(
-                "Finishing stale live trip %s for vehicle %s (inactive > 600s)",
+                "Finishing stale live trip %s for vehicle %s (inactive > %ss)",
                 live_trip.trip_id,
                 live_trip.vehicle.label,
+                ttl,
             )
             self.context.observatory.finish_live_trip(live_trip)
 
@@ -306,7 +319,7 @@ class ThreadLoader:
 
     def _timing(self, key: str, default: int) -> int:
         """Read one timing value from config."""
-        return int(self.context.config.get("timings", {}).get(key, default))
+        return int(getattr(self.context.config.timings, key, default))
 
     def _should_stop(self) -> bool:
         """Return True when service threads should exit."""

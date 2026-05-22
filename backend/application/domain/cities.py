@@ -2,9 +2,8 @@ from .live_data import LiveTrip
 from .weather import Weather
 from . import h3_utils
 from typing import overload, Callable
+import logging
 import time
-
-WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
 
 class Traffic:
@@ -318,13 +317,19 @@ class Hexagon:
 
 class City:
     """City."""
-    def __init__(self, name, static_bus_lanes: dict = None):
+    def __init__(
+        self,
+        name,
+        static_bus_lanes: dict = None,
+        weather_url: str | None = None,
+    ):
         """Initialize the instance."""
         self.name = name
         self.hexagons: dict[str, Hexagon] = {}
         self.live_trip_index: dict[str, str] = {}  # vehicle_id -> HexID
         self.live_trip_deposit: dict[str, LiveTrip] = {}
         self.static_bus_lanes = static_bus_lanes if static_bus_lanes else {}
+        self.weather_url = weather_url
         # Weather update strategy (set externally, defaults to greedy)
         self.weather_strategy = None  # Set during runtime bootstrap.
         self.traffic_service = None
@@ -334,6 +339,10 @@ class City:
     def set_traffic_service(self, traffic_service):
         """Attach the traffic updater serving this city."""
         self.traffic_service = traffic_service
+
+    def set_weather_url(self, weather_url: str):
+        """Set the weather API endpoint used by this city."""
+        self.weather_url = weather_url
 
     def set_on_live_trip_entered_expired_hex(self, callback: Callable[[str, str], None]):
         """Inject callback (live_trip_id, hex_id) for expired traffic handling."""
@@ -524,10 +533,13 @@ class City:
 
     def update_weather(self):
         """Delegates weather fetching to the configured strategy."""
+        if not self.weather_url:
+            logging.warning("Weather update skipped: weather URL is not configured")
+            return
         if self.weather_strategy is None:
             from .weather_strategy import GreedyWeatherStrategy
             self.weather_strategy = GreedyWeatherStrategy()
-        self.weather_strategy.update(self, WEATHER_URL)
+        self.weather_strategy.update(self, self.weather_url)
 
     def refresh_traffic(self) -> int:
         """Refresh traffic for hexagons containing active live trips."""

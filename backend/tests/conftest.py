@@ -27,19 +27,19 @@ def mock_gps_data():
 
 
 @pytest.fixture
-def mock_autobus():
-    """Create a mock Autobus object."""
+def mock_live_trip():
+    """Create a mock LiveTrip object."""
     from unittest.mock import Mock
 
-    bus = Mock()
-    bus.id = 12345
-    bus.hexagon_id = "8a1234567890fff"
-    bus.location_name = "Via Roma"
-    bus.occupancy_status = 2
-    bus.derived_speed = 25.0
-    bus.derived_bearing = 180.0
-    bus.is_in_preferential = False
-    return bus
+    live_trip = Mock()
+    live_trip.id = 12345
+    live_trip.hexagon_id = "8a1234567890fff"
+    live_trip.location_name = "Via Roma"
+    live_trip.occupancy_status = 2
+    live_trip.derived_speed = 25.0
+    live_trip.derived_bearing = 180.0
+    live_trip.is_in_preferential = False
+    return live_trip
 
 
 @pytest.fixture

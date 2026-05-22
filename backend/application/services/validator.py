@@ -31,7 +31,7 @@ from application.services.persistence_gateway import get_persistence_gateway
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RESULTS_DIR = PROJECT_ROOT / "results"
-DIARIES_PATH = PROJECT_ROOT / "diaries" / "diaries.parquet"
+MEASUREMENTS_PATH = PROJECT_ROOT / "measurements" / "measurements.parquet"
 MIN_MEASUREMENTS = 7
 
 
@@ -725,11 +725,11 @@ class HistoricalValidator(Validator):
             except Exception as e:
                 self.logger.warning("Historical ledger query failed: %s", e)
 
-        if not DIARIES_PATH.exists():
-            self.logger.warning("Diaries file not found: %s", DIARIES_PATH)
+        if not MEASUREMENTS_PATH.exists():
+            self.logger.warning("Measurements file not found: %s", MEASUREMENTS_PATH)
             return pd.DataFrame()
 
-        df = pd.read_parquet(DIARIES_PATH)
+        df = pd.read_parquet(MEASUREMENTS_PATH)
         return df[
             (df["measurement_time"] >= start_ts) & (df["measurement_time"] < end_ts)
         ]
